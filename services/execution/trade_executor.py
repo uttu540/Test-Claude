@@ -3,11 +3,12 @@ services/execution/trade_executor.py
 ──────────────────────────────────────
 Converts a Signal into a live/paper trade:
   1. Calls RiskEngine for pre-trade checks + position sizing
-  2. Places entry order (MARKET)
-  3. Records Trade in database
-  4. Places stop-loss order (SL-M)
-  5. Places target order (LIMIT)
-  6. Sends Telegram notification
+  2. Calls Claude AI for strategy evaluation (optional — skipped if key absent)
+  3. Places entry order (MARKET)
+  4. Records Trade in database
+  5. Places stop-loss order (SL-M)
+  6. Places target order (LIMIT)
+  7. Sends Telegram notification
 
 This is the only place that initiates new positions.
 """
@@ -21,6 +22,8 @@ import structlog
 from config.settings import settings
 from database.connection import get_db_session
 from database.models import Trade
+from services.ai_strategy.claude_client import get_claude_client
+from services.ai_strategy.schemas import AIDecision
 from services.execution.zerodha.order_manager import OrderManager
 from services.notifications.telegram_bot import get_notifier
 from services.risk_engine.engine import RiskDecision, RiskEngine
@@ -68,11 +71,24 @@ class TradeExecutor:
             )
             return None
 
+        # ── 2. Claude AI evaluation ───────────────────────────────────────────
+        ai_decision: AIDecision = await get_claude_client().analyse(signal)
+
+        if not ai_decision.is_actionable:
+            log.info(
+                "executor.ai_blocked",
+                symbol     = signal.trading_symbol,
+                action     = ai_decision.action.value,
+                confidence = ai_decision.confidence,
+                reasoning  = ai_decision.reasoning[:120],
+            )
+            return None
+
         trade_id  = uuid.uuid4()
         direction = "LONG" if signal.direction == Direction.BULLISH else "SHORT"
         side      = "BUY"  if signal.direction == Direction.BULLISH else "SELL"
 
-        # ── 2. Entry order ────────────────────────────────────────────────────
+        # ── 3. Entry order ────────────────────────────────────────────────────
         broker_id = await self._orders.place_order(
             symbol           = signal.trading_symbol,
             exchange         = EXCHANGE,
@@ -88,10 +104,10 @@ class TradeExecutor:
             log.error("executor.entry_failed", symbol=signal.trading_symbol)
             return None
 
-        # ── 3. Record trade in DB ─────────────────────────────────────────────
-        trade = await self._record_trade(trade_id, signal, direction, decision)
+        # ── 4. Record trade in DB ─────────────────────────────────────────────
+        trade = await self._record_trade(trade_id, signal, direction, decision, ai_decision)
 
-        # ── 4. Stop-loss order ────────────────────────────────────────────────
+        # ── 5. Stop-loss order ────────────────────────────────────────────────
         await self._orders.place_stop_loss(
             symbol        = signal.trading_symbol,
             exchange      = EXCHANGE,
@@ -102,7 +118,7 @@ class TradeExecutor:
             trade_id      = str(trade_id),
         )
 
-        # ── 5. Target order ───────────────────────────────────────────────────
+        # ── 6. Target order ───────────────────────────────────────────────────
         await self._orders.place_target(
             symbol      = signal.trading_symbol,
             exchange    = EXCHANGE,
@@ -113,9 +129,10 @@ class TradeExecutor:
             trade_id    = str(trade_id),
         )
 
-        # ── 6. Telegram notification ──────────────────────────────────────────
+        # ── 7. Telegram notification ──────────────────────────────────────────
         rr = abs(decision.target - signal.price_at_signal) / abs(signal.price_at_signal - decision.stop_loss)
         notifier = get_notifier()
+        ai_note = f"\n🤖 AI: {ai_decision.confidence:.0%} | {ai_decision.reasoning[:80]}" if ai_decision.reasoning else ""
         await notifier.signal_alert(
             symbol     = signal.trading_symbol,
             signal     = signal.signal_type.value,
@@ -128,6 +145,7 @@ class TradeExecutor:
                 f"🛡 Stop: ₹{decision.stop_loss:.2f}\n"
                 f"🎯 Target: ₹{decision.target:.2f}\n"
                 f"📦 Qty: {decision.position_size} | Risk: ₹{decision.risk_amount:.0f} | RR: {rr:.1f}x"
+                f"{ai_note}"
             ),
         )
 
@@ -153,6 +171,7 @@ class TradeExecutor:
         signal: Signal,
         direction: str,
         decision: RiskDecision,
+        ai_decision: AIDecision,
     ) -> Trade:
         rr = (
             abs(decision.target - signal.price_at_signal)
@@ -179,6 +198,8 @@ class TradeExecutor:
             initial_risk_amount= decision.risk_amount,
             risk_reward_planned= round(rr, 2),
             signals_at_entry   = signal.to_dict(),
+            ai_confidence      = ai_decision.confidence,
+            ai_reasoning       = ai_decision.reasoning,
             status             = "OPEN",
         )
 

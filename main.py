@@ -33,6 +33,7 @@ from rich.text import Text
 from config.settings import settings
 from database.connection import close_db, close_redis, get_redis, init_db
 from services.data_ingestion.historical_seed import HistoricalSeeder
+from services.data_ingestion.news_feed import get_news_service
 from services.data_ingestion.websocket_feed import FeedManager, OHLCVCandle
 from services.notifications.telegram_bot import get_notifier
 from services.execution.trade_executor import TradeExecutor
@@ -129,14 +130,20 @@ async def _run_signals(symbol: str) -> None:
                 timeframe=top.timeframe,
             )
 
-            # Publish signal to Redis for the API / dashboard to consume
+            # Publish to Redis for the API / dashboard and for AI tf_alignment context
             redis = get_redis()
             import json
-            await redis.setex(
-                f"signal:latest:{symbol}",
-                900,   # 15 min TTL
-                json.dumps(top.to_dict()),
-            )
+            signal_payload = json.dumps(top.to_dict())
+            await redis.setex(f"signal:latest:{symbol}",              900, signal_payload)
+            await redis.setex(f"signal:latest:{symbol}:{top.timeframe}", 900, signal_payload)
+
+            # Also cache direction for every detected signal (all timeframes)
+            for sig in signals:
+                await redis.setex(
+                    f"signal:latest:{symbol}:{sig.timeframe}",
+                    900,
+                    json.dumps(sig.to_dict()),
+                )
 
             # Execute trade if signal confidence meets threshold
             if top.confidence >= 65:
@@ -292,6 +299,10 @@ async def startup() -> None:
     else:
         log.info("startup.seed_skip", reason="Already seeded today")
 
+    # 4. News feed (background polling — no-op if NEWS_API_KEY not set)
+    news_service = get_news_service()
+    await news_service.start()
+
     log.info("startup.complete", env=settings.app_env.value)
 
 
@@ -299,6 +310,7 @@ async def shutdown(scheduler: AsyncIOScheduler) -> None:
     """Graceful shutdown."""
     log.info("shutdown.start")
     scheduler.shutdown(wait=False)
+    await get_news_service().stop()
     await close_db()
     await close_redis()
     log.info("shutdown.complete")
