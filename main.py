@@ -34,6 +34,7 @@ from database.connection import close_db, close_redis, get_redis, init_db
 from services.data_ingestion.historical_seed import HistoricalSeeder
 from services.data_ingestion.websocket_feed import FeedManager, OHLCVCandle
 from services.notifications.telegram_bot import get_notifier
+from services.execution.trade_executor import TradeExecutor
 from services.technical_engine.signal_generator import (
     MultiTimeframeSignalEngine,
     Signal,
@@ -60,6 +61,7 @@ console = Console()
 # Stores recent candles per (symbol, timeframe) for indicator computation
 # Format: {symbol: {timeframe: [candle_dicts...]}}
 _candle_buffer: dict[str, dict[str, list[dict]]] = {}
+_active_signal_tasks: set[str] = set()   # Symbols with an in-flight signal task
 BUFFER_MAX = 300   # Keep last 300 candles per symbol/timeframe
 
 
@@ -93,8 +95,11 @@ def on_candle_complete(candle: OHLCVCandle) -> None:
 
     # Run signal detection on the 15min candle close
     # (avoids running on every 1min candle — too noisy)
-    if tf == "15min":
-        asyncio.create_task(_run_signals(sym))
+    # Guard: skip if a signal task is already running for this symbol
+    if tf == "15min" and sym not in _active_signal_tasks:
+        task = asyncio.create_task(_run_signals(sym))
+        _active_signal_tasks.add(sym)
+        task.add_done_callback(lambda _: _active_signal_tasks.discard(sym))
 
 
 async def _run_signals(symbol: str) -> None:
@@ -126,18 +131,19 @@ async def _run_signals(symbol: str) -> None:
                 timeframe=top.timeframe,
             )
 
-            # In paper/dev mode: send Telegram alert for every high-confidence signal
-            if not settings.is_live and top.confidence >= 65:
-                notifier = get_notifier()
-                await notifier.signal_alert(
-                    symbol     = symbol,
-                    signal     = top.signal_type.value,
-                    direction  = top.direction.value,
-                    confidence = top.confidence,
-                    timeframe  = top.timeframe,
-                    price      = top.price_at_signal,
-                    notes      = top.notes,
-                )
+            # Publish signal to Redis for the API / dashboard to consume
+            redis = get_redis()
+            import json
+            await redis.setex(
+                f"signal:latest:{symbol}",
+                900,   # 15 min TTL
+                json.dumps(top.to_dict()),
+            )
+
+            # Execute trade if signal confidence meets threshold
+            if top.confidence >= 65:
+                executor = TradeExecutor()
+                await executor.execute(top)
 
     except Exception as e:
         log.error("signal.run_error", symbol=symbol, error=str(e))

@@ -1,0 +1,126 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: #0f0f0f;
+    color: #f1f5f9;
+    font-family: 'Inter', system-ui, sans-serif;
+    min-height: 100vh;
+    margin: 0;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #0f0f0f;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #2a2a2a;
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a3a3a;
+  }
+
+  ::selection {
+    background: rgba(59, 130, 246, 0.3);
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-bg-card border border-border rounded-lg;
+  }
+
+  .table-row-hover {
+    @apply transition-colors duration-100 hover:bg-bg-hover;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium font-mono tracking-wide;
+  }
+
+  .btn {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-offset-bg-primary disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-danger {
+    @apply btn bg-red-trade/10 text-red-trade border border-red-trade/30 hover:bg-red-trade hover:text-white focus:ring-red-trade;
+  }
+
+  .th {
+    @apply text-left text-2xs font-semibold text-text-muted uppercase tracking-widest px-3 py-2.5 border-b border-border;
+  }
+
+  .td {
+    @apply px-3 py-2.5 text-sm border-b border-border/50;
+  }
+
+  .skeleton {
+    @apply animate-pulse bg-bg-hover rounded;
+  }
+}
+
+@layer utilities {
+  .text-profit {
+    color: #22c55e;
+  }
+
+  .text-loss {
+    color: #ef4444;
+  }
+
+  .text-neutral {
+    color: #94a3b8;
+  }
+
+  .glow-green {
+    box-shadow: 0 0 12px rgba(34, 197, 94, 0.25);
+  }
+
+  .glow-red {
+    box-shadow: 0 0 12px rgba(239, 68, 68, 0.25);
+  }
+
+  .tab-active {
+    @apply text-text-primary border-b-2 border-blue-trade;
+  }
+
+  .tab-inactive {
+    @apply text-text-muted hover:text-text-secondary border-b-2 border-transparent;
+  }
+}
+
+/* Recharts custom overrides */
+.recharts-tooltip-wrapper {
+  outline: none !important;
+}
+
+.recharts-default-tooltip {
+  background: #1a1a1a !important;
+  border: 1px solid #2a2a2a !important;
+  border-radius: 6px !important;
+  font-family: 'JetBrains Mono', monospace !important;
+  font-size: 12px !important;
+}
+
+.recharts-tooltip-label {
+  color: #94a3b8 !important;
+  margin-bottom: 4px !important;
+}
