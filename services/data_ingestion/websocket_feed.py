@@ -129,7 +129,8 @@ class CandleAggregator:
 
     @staticmethod
     def _get_period_start(ts: datetime, delta: timedelta) -> datetime:
-        epoch = datetime(ts.year, ts.month, ts.day, 9, 15)  # Market open 9:15 IST
+        from config.market_hours import MARKET_OPEN
+        epoch = datetime(ts.year, ts.month, ts.day, MARKET_OPEN.hour, MARKET_OPEN.minute)
         elapsed = (ts - epoch).total_seconds()
         bucket  = int(elapsed / delta.total_seconds()) * int(delta.total_seconds())
         return epoch + timedelta(seconds=bucket)
@@ -328,21 +329,29 @@ class TickRedisWriter:
     """
 
     async def write(self, tick: Tick) -> None:
-        redis = get_redis()
-        data = json.dumps({
-            "lp":  tick.last_price,
-            "vol": tick.volume,
-            "chg": tick.change,
-            "ts":  tick.timestamp.isoformat(),
-            "o":   tick.open,
-            "h":   tick.high,
-            "l":   tick.low,
-            "c":   tick.close,
-            "bq":  tick.buy_quantity,
-            "sq":  tick.sell_quantity,
-        })
-        await redis.setex(f"market:tick:{tick.trading_symbol}", 60, data)
-        await redis.zadd("market:prices", {tick.trading_symbol: tick.last_price})
+        try:
+            redis = get_redis()
+            data = json.dumps({
+                "lp":  tick.last_price,
+                "vol": tick.volume,
+                "chg": tick.change,
+                "ts":  tick.timestamp.isoformat(),
+                "o":   tick.open,
+                "h":   tick.high,
+                "l":   tick.low,
+                "c":   tick.close,
+                "bq":  tick.buy_quantity,
+                "sq":  tick.sell_quantity,
+            })
+            await redis.setex(f"market:tick:{tick.trading_symbol}", 60, data)
+            await redis.zadd("market:prices", {tick.trading_symbol: tick.last_price})
+        except Exception as e:
+            log.warning(
+                "redis_writer.write_failed",
+                symbol=tick.trading_symbol,
+                ts=tick.timestamp.isoformat(),
+                error=str(e),
+            )
 
 
 # ─── Main Feed Manager ────────────────────────────────────────────────────────
@@ -370,9 +379,17 @@ class FeedManager:
 
     def _on_tick(self, tick: Tick) -> None:
         """Called for every incoming tick."""
-        # Run async write without blocking the tick loop
-        asyncio.create_task(self._redis_writer.write(tick))
+        # Run async write without blocking the tick loop.
+        # The write() method handles its own exceptions internally,
+        # but we also attach a done-callback to catch any unexpected errors.
+        task = asyncio.create_task(self._redis_writer.write(tick))
+        task.add_done_callback(self._on_redis_write_done)
         self._candle_aggregator.process_tick(tick)
+
+    @staticmethod
+    def _on_redis_write_done(task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            log.warning("feed_manager.redis_task_error", error=str(task.exception()))
 
     def _on_candle_complete(self, candle: OHLCVCandle) -> None:
         """Called when a candle period closes."""

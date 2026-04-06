@@ -192,8 +192,9 @@ def _volatility(df: pd.DataFrame, cfg: IndicatorConfig) -> pd.DataFrame:
         df["high"], df["low"], df["close"], length=cfg.atr_period
     )
 
-    # ATR as % of price (normalised volatility)
-    df["atr_pct"] = df[f"atr_{cfg.atr_period}"] / df["close"] * 100
+    # ATR as % of price (normalised volatility) — guard against zero/bad close prices
+    safe_close = df["close"].replace(0, np.nan)
+    df["atr_pct"] = df[f"atr_{cfg.atr_period}"] / safe_close * 100
 
     # Keltner Channels
     kc = ta.kc(df["high"], df["low"], df["close"], length=cfg.kc_period)

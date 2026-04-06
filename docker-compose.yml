@@ -26,7 +26,11 @@ services:
     image: redis:7-alpine
     container_name: trading_redis
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_secret} --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # volatile-lru: only evict keys that have a TTL set.
+    # Critical trading state (auth tokens, kill switch, position state) must use
+    # no TTL or a long TTL so they are never silently evicted under memory pressure.
+    # Transient data (tick cache, signal cache) use short TTLs and are safe to evict.
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_secret} --maxmemory 256mb --maxmemory-policy volatile-lru
     ports:
       - "6379:6379"
     volumes:

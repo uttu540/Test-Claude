@@ -74,7 +74,9 @@ class TelegramNotifier:
         confidence:   float,
         broker:       str = "ZERODHA",
     ) -> None:
-        rr = (target_1 - price) / (price - stop_loss) if price != stop_loss else 0
+        if price == stop_loss:
+            log.warning("telegram.rr_zero_division", symbol=symbol, price=price, stop_loss=stop_loss)
+        rr = (target_1 - price) / (price - stop_loss) if price != stop_loss else 0.0
         msg = (
             f"📊 *TRADE ENTRY*\n"
             f"──────────────────\n"

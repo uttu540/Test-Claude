@@ -362,7 +362,16 @@ class OrderManager:
                     parent_trade_id  = uuid.UUID(kwargs["trade_id"]) if kwargs.get("trade_id") else None,
                     rejection_reason = kwargs.get("rejection_reason"),
                 )
-                session.add(order)
-                await session.commit()
+                try:
+                    session.add(order)
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    raise
         except Exception as e:
-            log.error("order.record_failed", error=str(e))
+            log.error(
+                "order.record_failed",
+                symbol=kwargs.get("symbol"),
+                broker_order_id=kwargs.get("broker_order_id"),
+                error=str(e),
+            )

@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+from collections import deque
 from datetime import datetime
 
 import structlog
@@ -58,9 +59,10 @@ log     = structlog.get_logger("main")
 console = Console()
 
 # ─── In-memory OHLCV buffer ───────────────────────────────────────────────────
-# Stores recent candles per (symbol, timeframe) for indicator computation
-# Format: {symbol: {timeframe: [candle_dicts...]}}
-_candle_buffer: dict[str, dict[str, list[dict]]] = {}
+# deque(maxlen=BUFFER_MAX) automatically discards the oldest entry when full,
+# giving O(1) append and bounded memory regardless of how long the bot runs.
+# Format: {symbol: {timeframe: deque([candle_dicts...], maxlen=BUFFER_MAX)}}
+_candle_buffer: dict[str, dict[str, deque]] = {}
 _active_signal_tasks: set[str] = set()   # Symbols with an in-flight signal task
 BUFFER_MAX = 300   # Keep last 300 candles per symbol/timeframe
 
@@ -78,7 +80,7 @@ def on_candle_complete(candle: OHLCVCandle) -> None:
     if sym not in _candle_buffer:
         _candle_buffer[sym] = {}
     if tf not in _candle_buffer[sym]:
-        _candle_buffer[sym][tf] = []
+        _candle_buffer[sym][tf] = deque(maxlen=BUFFER_MAX)
 
     _candle_buffer[sym][tf].append({
         "open":   candle.open,
@@ -88,10 +90,6 @@ def on_candle_complete(candle: OHLCVCandle) -> None:
         "volume": candle.volume,
         "ts":     candle.timestamp,
     })
-
-    # Keep buffer bounded
-    if len(_candle_buffer[sym][tf]) > BUFFER_MAX:
-        _candle_buffer[sym][tf] = _candle_buffer[sym][tf][-BUFFER_MAX:]
 
     # Run signal detection on the 15min candle close
     # (avoids running on every 1min candle — too noisy)
@@ -112,7 +110,7 @@ async def _run_signals(symbol: str) -> None:
 
         for tf, candles in _candle_buffer.get(symbol, {}).items():
             if len(candles) >= 30:   # Need enough data
-                df = pd.DataFrame(candles).set_index("ts")
+                df = pd.DataFrame(list(candles)).set_index("ts")  # convert deque → list for pandas
                 ohlcv_by_tf[tf] = df
 
         if not ohlcv_by_tf:
@@ -153,6 +151,10 @@ async def _run_signals(symbol: str) -> None:
 
 async def job_daily_auth() -> None:
     """8:30 AM IST — Re-authenticate Zerodha and refresh tokens."""
+    from config.market_hours import is_trading_day
+    if not is_trading_day():
+        log.info("scheduler.auth_skip", reason="NSE holiday or weekend")
+        return
     if not settings.kite_api_key:
         log.info("scheduler.auth_skip", reason="No KITE_API_KEY configured yet")
         return
@@ -168,6 +170,10 @@ async def job_daily_auth() -> None:
 
 async def job_market_open_briefing() -> None:
     """9:10 AM IST — Send market open Telegram notification."""
+    from config.market_hours import is_trading_day
+    if not is_trading_day():
+        log.info("scheduler.briefing_skip", reason="NSE holiday or weekend")
+        return
     notifier = get_notifier()
     redis    = get_redis()
 
@@ -189,6 +195,9 @@ async def job_market_open_briefing() -> None:
 
 async def job_square_off_intraday() -> None:
     """3:20 PM IST — Square off all intraday positions."""
+    from config.market_hours import is_trading_day
+    if not is_trading_day():
+        return
     log.warning("scheduler.square_off_intraday", time="15:20")
     if settings.is_live:
         from services.execution.zerodha.order_manager import OrderManager

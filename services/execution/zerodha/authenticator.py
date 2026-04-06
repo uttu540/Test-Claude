@@ -87,51 +87,56 @@ class ZerodhaAuthenticator:
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
-            page    = await browser.new_page()
-
-            # Go to Kite login page
-            await page.goto(login_url)
-            await page.wait_for_load_state("networkidle")
-
-            # Enter user ID and password
-            await page.fill('input[type="text"]', settings.kite_user_id)
-            await page.fill('input[type="password"]', settings.kite_password)
-            await page.click('button[type="submit"]')
-            await page.wait_for_load_state("networkidle")
-            await page.wait_for_timeout(2000)
-
-            # Handle TOTP page
-            totp_code = pyotp.TOTP(settings.kite_totp_secret).now()
-            log.debug("zerodha_auth.totp_generated", code=totp_code)
-
-            # Zerodha's TOTP input is a series of individual digit boxes
-            # Try filling the combined input first, then individual boxes
             try:
-                totp_input = page.locator('input[label="External TOTP"]').first
-                if await totp_input.count() > 0:
-                    await totp_input.fill(totp_code)
-                else:
-                    # Individual digit inputs
-                    inputs = page.locator('input[type="number"]')
-                    for i, digit in enumerate(totp_code):
-                        await inputs.nth(i).fill(digit)
-            except Exception:
-                # Fallback: fill whatever input is visible
-                await page.fill('input[type="number"]', totp_code)
+                page = await browser.new_page()
 
-            await page.wait_for_timeout(3000)
+                # Go to Kite login page
+                await page.goto(login_url, timeout=30_000)
+                await page.wait_for_load_state("networkidle", timeout=15_000)
 
-            # Wait for redirect to our redirect URL containing request_token
-            current_url = page.url
-            request_token = self._extract_request_token(current_url)
-
-            if not request_token:
-                # Sometimes takes a moment
+                # Enter user ID and password
+                await page.fill('input[type="text"]', settings.kite_user_id, timeout=10_000)
+                await page.fill('input[type="password"]', settings.kite_password, timeout=10_000)
+                await page.click('button[type="submit"]', timeout=10_000)
+                await page.wait_for_load_state("networkidle", timeout=15_000)
                 await page.wait_for_timeout(2000)
-                current_url   = page.url
+
+                # Handle TOTP page
+                totp_code = pyotp.TOTP(settings.kite_totp_secret).now()
+                log.debug("zerodha_auth.totp_generated", totp_generated=True)  # Never log the code itself
+
+                # Zerodha's TOTP input is a series of individual digit boxes
+                # Try filling the combined input first, then individual boxes
+                try:
+                    totp_input = page.locator('input[label="External TOTP"]').first
+                    if await totp_input.count() > 0:
+                        await totp_input.fill(totp_code, timeout=10_000)
+                    else:
+                        # Individual digit inputs
+                        inputs = page.locator('input[type="number"]')
+                        for i, digit in enumerate(totp_code):
+                            await inputs.nth(i).fill(digit, timeout=5_000)
+                except Exception:
+                    # Fallback: fill whatever input is visible
+                    await page.fill('input[type="number"]', totp_code, timeout=10_000)
+
+                await page.wait_for_timeout(3000)
+
+                # Wait for redirect to our redirect URL containing request_token
+                current_url = page.url
                 request_token = self._extract_request_token(current_url)
 
-            await browser.close()
+                if not request_token:
+                    # Sometimes takes a moment
+                    await page.wait_for_timeout(2000)
+                    current_url   = page.url
+                    request_token = self._extract_request_token(current_url)
+
+            except Exception as e:
+                log.error("zerodha_auth.browser_error", error=str(e), cleaning_up=True)
+                raise
+            finally:
+                await browser.close()
 
         if not request_token:
             raise RuntimeError(
