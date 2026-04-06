@@ -62,6 +62,11 @@ console = Console()
 _candle_buffer: dict[str, dict[str, list[dict]]] = {}
 BUFFER_MAX = 300   # Keep last 300 candles per symbol/timeframe
 
+# ─── Per-symbol signal task registry ─────────────────────────────────────────
+# Prevents concurrent _run_signals tasks for the same symbol.
+# Format: {symbol: asyncio.Task}
+_signal_tasks: dict[str, asyncio.Task] = {}
+
 
 # ─── Candle Handler ───────────────────────────────────────────────────────────
 
@@ -94,7 +99,17 @@ def on_candle_complete(candle: OHLCVCandle) -> None:
     # Run signal detection on the 15min candle close
     # (avoids running on every 1min candle — too noisy)
     if tf == "15min":
-        asyncio.create_task(_run_signals(sym))
+        existing = _signal_tasks.get(sym)
+        if existing and not existing.done():
+            log.warning(
+                "signal.task_skipped",
+                symbol=sym,
+                reason="Previous signal task still in-flight",
+            )
+            return
+        task = asyncio.create_task(_run_signals(sym))
+        _signal_tasks[sym] = task
+        task.add_done_callback(lambda t: _signal_tasks.pop(sym, None))
 
 
 async def _run_signals(symbol: str) -> None:
