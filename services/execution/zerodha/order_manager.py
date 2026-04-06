@@ -183,18 +183,20 @@ class OrderManager:
         quantity:      int,
         trigger_price: float,
         product:       str,
+        direction:     str = "LONG",   # "LONG" or "SHORT"
         tag:           str = "",
         trade_id:      str | None = None,
     ) -> str | None:
         """
         Place a Stop-Loss Market (SL-M) order.
-        SL-M guarantees execution (sells at market price when trigger is hit).
-        Preferred over SL-L for stop losses to avoid getting stuck.
+        SL-M guarantees execution at market price when trigger is hit.
+        LONG stop = SELL to close; SHORT stop = BUY to close.
         """
+        transaction_type = "SELL" if direction == "LONG" else "BUY"
         return await self.place_order(
             symbol           = symbol,
             exchange         = exchange,
-            transaction_type = "SELL",
+            transaction_type = transaction_type,
             quantity         = quantity,
             order_type       = "SL-M",
             product          = product,
@@ -210,14 +212,19 @@ class OrderManager:
         quantity:      int,
         limit_price:   float,
         product:       str,
+        direction:     str = "LONG",   # "LONG" or "SHORT"
         tag:           str = "",
         trade_id:      str | None = None,
     ) -> str | None:
-        """Place a LIMIT sell order for take-profit."""
+        """
+        Place a LIMIT order for take-profit.
+        LONG target = SELL to close; SHORT target = BUY to close.
+        """
+        transaction_type = "SELL" if direction == "LONG" else "BUY"
         return await self.place_order(
             symbol           = symbol,
             exchange         = exchange,
-            transaction_type = "SELL",
+            transaction_type = transaction_type,
             quantity         = quantity,
             order_type       = "LIMIT",
             product          = product,

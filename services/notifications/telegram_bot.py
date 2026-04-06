@@ -77,6 +77,7 @@ class TelegramNotifier:
         if price == stop_loss:
             log.warning("telegram.rr_zero_division", symbol=symbol, price=price, stop_loss=stop_loss)
         rr = (target_1 - price) / (price - stop_loss) if price != stop_loss else 0.0
+        t2_line = f"Target 2:   ₹{target_2:.2f}\n" if target_2 else "Target 2:   —\n"
         msg = (
             f"📊 *TRADE ENTRY*\n"
             f"──────────────────\n"
@@ -84,7 +85,7 @@ class TelegramNotifier:
             f"Qty: {quantity} shares\n"
             f"Stop Loss:  ₹{stop_loss:.2f}  (-{abs(price - stop_loss):.2f})\n"
             f"Target 1:   ₹{target_1:.2f}  (+{abs(target_1 - price):.2f})\n"
-            f"Target 2:   ₹{target_2:.2f}" if target_2 else f"Target 2:   —\n"
+            + t2_line +
             f"\nR:R Ratio:  {rr:.1f}x\n"
             f"Strategy:   {strategy}\n"
             f"AI Conf:    {confidence:.0%}\n"

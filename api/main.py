@@ -83,14 +83,17 @@ async def startup() -> None:
 async def _redis_broadcast_loop() -> None:
     """Poll Redis for new signals and broadcast to WebSocket clients."""
     redis = get_redis()
-    seen: set[str] = set()
+    # Track (key, value_hash) so updates to existing keys are re-broadcast
+    seen: dict[str, str] = {}
     while True:
         try:
-            keys = await redis.keys("signal:latest:*")
+            # Only watch top-level signal keys (not per-timeframe duplicates)
+            keys = [k for k in await redis.keys("signal:latest:*")
+                    if k.count(":") == 2]
             for key in keys:
                 raw = await redis.get(key)
-                if raw and key not in seen:
-                    seen.add(key)
+                if raw and seen.get(key) != raw:
+                    seen[key] = raw
                     data = json.loads(raw)
                     await manager.broadcast({"type": "signal", "data": data})
             await asyncio.sleep(2)
@@ -224,7 +227,7 @@ async def get_pnl_history(days: int = 30) -> list[dict]:
                     COALESCE(SUM(net_pnl), 0) AS net_pnl
                 FROM trades
                 WHERE status = 'CLOSED'
-                  AND entry_time >= NOW() - INTERVAL ':days days'
+                  AND entry_time >= NOW() - MAKE_INTERVAL(days => :days)
                 GROUP BY DATE(entry_time)
                 ORDER BY trading_date DESC
             """),
@@ -238,9 +241,11 @@ async def get_pnl_history(days: int = 30) -> list[dict]:
 
 @app.get("/api/signals/recent")
 async def get_recent_signals() -> list[dict]:
-    """Latest signal per symbol from Redis."""
+    """Latest signal per symbol from Redis (top-level keys only, no per-timeframe duplicates)."""
     redis = get_redis()
-    keys  = await redis.keys("signal:latest:*")
+    # Only read signal:latest:{symbol} keys (exactly 2 colons), not signal:latest:{symbol}:{tf}
+    all_keys = await redis.keys("signal:latest:*")
+    keys = [k for k in all_keys if k.count(":") == 2]
     signals = []
     for key in keys:
         raw = await redis.get(key)

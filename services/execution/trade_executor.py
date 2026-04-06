@@ -50,7 +50,7 @@ class TradeExecutor:
         Attempt to open a position based on the signal.
         Returns the Trade record on success, None if rejected or failed.
         """
-        atr = signal.indicators.get("atr", 0)
+        atr = signal.indicators.get("atr_14", 0)
         if not atr:
             log.warning("executor.no_atr", symbol=signal.trading_symbol, signal=signal.signal_type.value)
             return None
@@ -114,6 +114,7 @@ class TradeExecutor:
             quantity      = decision.position_size,
             trigger_price = decision.stop_loss,
             product       = PRODUCT,
+            direction     = direction,
             tag           = "BOT_SL",
             trade_id      = str(trade_id),
         )
@@ -125,6 +126,7 @@ class TradeExecutor:
             quantity    = decision.position_size,
             limit_price = decision.target,
             product     = PRODUCT,
+            direction   = direction,
             tag         = "BOT_TGT",
             trade_id    = str(trade_id),
         )
