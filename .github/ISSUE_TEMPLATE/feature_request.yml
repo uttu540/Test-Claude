@@ -1,0 +1,112 @@
+name: Feature Request
+description: Propose a new feature or enhancement
+title: "[Feature]: "
+labels: ["feature", "priority: medium"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Feature Request
+        Describe what you want built. The more specific the acceptance criteria, the better Claude can implement it.
+
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Target Phase
+      description: Which phase does this feature belong to?
+      options:
+        - "Phase 1: Foundation (Data pipeline, TA engine, Telegram)"
+        - "Phase 2: Intelligence (Claude AI, news, fundamentals)"
+        - "Phase 3: Strategy & Backtesting"
+        - "Phase 4: Paper Trading"
+        - "Phase 5: Semi-Automated Live Trading"
+        - "Phase 6: Full Automation + Groww"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component / Module
+      options:
+        - data_ingestion / websocket_feed
+        - data_ingestion / historical_seed
+        - technical_engine / indicators
+        - technical_engine / signal_generator
+        - execution / zerodha / authenticator
+        - execution / zerodha / order_manager
+        - execution / groww (new)
+        - ai_strategy (new)
+        - risk_engine (new)
+        - notifications / telegram_bot
+        - database / models
+        - backtesting (new)
+        - config / settings
+        - main.py (orchestration)
+        - infrastructure / docker
+        - tests
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Motivation
+      description: What problem does this solve? Why is it needed?
+      placeholder: "Currently the risk engine doesn't exist, so position sizing is unchecked before orders are placed."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: What should be built? Be specific about behaviour.
+      placeholder: |
+        Implement `services/risk_engine/engine.py` with:
+        - `check_pre_trade(symbol, qty, price)` → returns True/False
+        - Enforce daily loss limit (₹2,000)
+        - Enforce max open positions (8)
+        - Enforce max position size (10% of capital)
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: How do we know this feature is done? List specific, testable criteria.
+      placeholder: |
+        - [ ] Risk engine rejects orders when daily loss limit is breached
+        - [ ] Risk engine rejects orders when max positions (8) are open
+        - [ ] A rejected trade logs reason and sends Telegram alert
+        - [ ] Unit tests cover all 3 rejection scenarios
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context / References
+      description: Links to related issues, code files, or design decisions.
+      placeholder: "Related to code review finding #5 — risk_engine is empty."
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - "Critical — Blocking live trading"
+        - "High — Core feature for current phase"
+        - "Medium — Important but not blocking"
+        - "Low — Nice to have"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: claude_ready
+    attributes:
+      label: Ready for Claude Code?
+      description: Check when acceptance criteria are clear and the issue is ready to be implemented.
+      options:
+        - label: "Yes — add the `claude` label to trigger implementation"

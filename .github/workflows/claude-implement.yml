@@ -1,0 +1,171 @@
+name: Claude Code — Auto Implement
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+jobs:
+  claude-implement:
+    # Trigger on 'claude' label OR '@claude implement' comment
+    if: |
+      (github.event_name == 'issues' && github.event.label.name == 'claude') ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.state == 'open' &&
+       contains(github.event.comment.body, '@claude implement'))
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Extract issue details
+        id: issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER=${{ github.event.issue.number }}
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          ISSUE_BODY=$(gh issue view $ISSUE_NUMBER --json body --jq '.body')
+          ISSUE_LABELS=$(gh issue view $ISSUE_NUMBER --json labels --jq '[.labels[].name] | join(", ")')
+
+          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+          echo "issue_title=$ISSUE_TITLE" >> $GITHUB_OUTPUT
+          echo "branch_name=claude/issue-$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+
+          # Save body to file to preserve multiline content
+          echo "$ISSUE_BODY" > /tmp/issue_body.txt
+          echo "$ISSUE_LABELS" > /tmp/issue_labels.txt
+
+      - name: Mark issue as In Progress
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue edit ${{ steps.issue.outputs.issue_number }} \
+            --add-label "in-progress" \
+            --remove-label "claude"
+          gh issue comment ${{ steps.issue.outputs.issue_number }} \
+            --body "🤖 **Claude Code** has picked up this issue and is implementing a solution. A PR will be opened shortly."
+
+      - name: Create feature branch
+        run: |
+          git config user.name "claude-code[bot]"
+          git config user.email "claude-code[bot]@users.noreply.github.com"
+          git checkout -b ${{ steps.issue.outputs.branch_name }}
+
+      - name: Run Claude Code
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          ISSUE_NUMBER=${{ steps.issue.outputs.issue_number }}
+          ISSUE_TITLE="${{ steps.issue.outputs.issue_title }}"
+          ISSUE_BODY=$(cat /tmp/issue_body.txt)
+          ISSUE_LABELS=$(cat /tmp/issue_labels.txt)
+
+          claude --dangerously-skip-permissions -p "
+          You are implementing a GitHub issue for a Python algorithmic trading bot (uttu540/Test-Claude).
+
+          ## Issue #$ISSUE_NUMBER: $ISSUE_TITLE
+          **Labels:** $ISSUE_LABELS
+
+          ## Issue Description:
+          $ISSUE_BODY
+
+          ## Instructions:
+          1. Read the relevant source files before making changes
+          2. Implement the changes described in the issue
+          3. Follow the existing code style and patterns
+          4. Write focused, minimal changes — don't refactor beyond the issue scope
+          5. Add tests if the issue involves testable logic
+          6. Do NOT commit — just make the file changes
+
+          The codebase is in the current directory. Start by reading the relevant files, then implement the fix.
+          "
+
+      - name: Commit changes
+        id: commit
+        run: |
+          git config user.name "claude-code[bot]"
+          git config user.email "claude-code[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --staged --quiet; then
+            echo "no_changes=true" >> $GITHUB_OUTPUT
+            echo "No changes made by Claude."
+          else
+            git commit -m "fix: implement issue #${{ steps.issue.outputs.issue_number }}
+
+          Implements: ${{ steps.issue.outputs.issue_title }}
+
+          Co-authored-by: Claude Code <claude-code[bot]@users.noreply.github.com>"
+            echo "no_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push branch
+        if: steps.commit.outputs.no_changes == 'false'
+        run: git push origin ${{ steps.issue.outputs.branch_name }}
+
+      - name: Open Pull Request
+        if: steps.commit.outputs.no_changes == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER=${{ steps.issue.outputs.issue_number }}
+          ISSUE_TITLE="${{ steps.issue.outputs.issue_title }}"
+
+          gh pr create \
+            --title "fix: $ISSUE_TITLE (#$ISSUE_NUMBER)" \
+            --body "$(cat <<EOF
+          ## Summary
+          Automated implementation by Claude Code for issue #$ISSUE_NUMBER.
+
+          **Issue:** $ISSUE_TITLE
+
+          ## What changed
+          See the diff for details. Claude has read the issue requirements and implemented the necessary changes.
+
+          ## Review checklist
+          - [ ] Code change matches the issue acceptance criteria
+          - [ ] No unintended side effects
+          - [ ] Tests pass (run \`make test\` locally)
+          - [ ] Safe to merge
+
+          ---
+          Closes #$ISSUE_NUMBER
+          🤖 Implemented by [Claude Code](https://claude.ai/claude-code)
+          EOF
+          )" \
+            --head ${{ steps.issue.outputs.branch_name }} \
+            --base main \
+            --label "needs-review"
+
+          # Update issue labels
+          gh issue edit $ISSUE_NUMBER \
+            --add-label "needs-review" \
+            --remove-label "in-progress"
+
+      - name: Handle no-change case
+        if: steps.commit.outputs.no_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment ${{ steps.issue.outputs.issue_number }} \
+            --body "⚠️ **Claude Code** ran but made no file changes. The issue may need more detail in the description or acceptance criteria. Please review and re-add the \`claude\` label when ready."
+          gh issue edit ${{ steps.issue.outputs.issue_number }} \
+            --remove-label "in-progress" \
+            --add-label "blocked"

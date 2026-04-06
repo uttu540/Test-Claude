@@ -1,0 +1,119 @@
+name: Bug Report
+description: Something is broken or behaving incorrectly
+title: "[Bug]: "
+labels: ["bug", "priority: medium"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Bug Report
+        Please fill this out thoroughly so Claude can reproduce and fix the issue.
+
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Affected Phase
+      description: Which phase does this bug belong to?
+      options:
+        - "Phase 1: Foundation (Data pipeline, TA engine, Telegram)"
+        - "Phase 2: Intelligence (Claude AI, news, fundamentals)"
+        - "Phase 3: Strategy & Backtesting"
+        - "Phase 4: Paper Trading"
+        - "Phase 5: Semi-Automated Live Trading"
+        - "Phase 6: Full Automation + Groww"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which service or module is affected?
+      options:
+        - data_ingestion / websocket_feed
+        - data_ingestion / historical_seed
+        - technical_engine / indicators
+        - technical_engine / signal_generator
+        - execution / zerodha / authenticator
+        - execution / zerodha / order_manager
+        - execution / groww
+        - ai_strategy
+        - risk_engine
+        - notifications / telegram_bot
+        - database / models
+        - database / connection
+        - config / settings
+        - main.py (orchestration)
+        - docker / infrastructure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - "Critical — Data loss, money at risk, bot crashes"
+        - "High — Major feature broken, workaround needed"
+        - "Medium — Feature partially broken"
+        - "Low — Minor issue, cosmetic"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Clear and concise description of the bug.
+      placeholder: "When X happens, Y occurs instead of Z."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Exact steps to trigger the bug.
+      placeholder: |
+        1. Run `make dev`
+        2. Wait for first 15-min candle
+        3. Observe error in logs: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behaviour
+      placeholder: "Signal should be generated and sent to Telegram."
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behaviour
+      placeholder: "Bot crashes with `asyncio.InvalidStateError`."
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs / Stack Trace
+      description: Paste logs here. They will be formatted as code automatically.
+      render: shell
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "e.g. macOS 14, Python 3.11, APP_ENV=dev, Docker 24.x"
+
+  - type: checkboxes
+    id: claude_ready
+    attributes:
+      label: Ready for Claude Code?
+      description: Check this when the issue is fully described and ready to be implemented.
+      options:
+        - label: "Yes — add the `claude` label to trigger implementation"

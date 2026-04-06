@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Project Board (Kanban)
+    url: https://github.com/users/adityaoswal77/projects/1
+    about: View the development Kanban board — Backlog → Ready → In Progress → In Review → Done
+  - name: Phase Roadmap
+    url: https://github.com/uttu540/Test-Claude#phases
+    about: See all 6 phases and their current status
