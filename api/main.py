@@ -264,9 +264,11 @@ async def get_bot_status() -> dict:
     regime = await redis.get("market:regime") or "UNKNOWN"
     pnl    = await get_today_pnl()
 
+    _MODE_MAP = {"development": "DEV", "paper": "PAPER", "live": "LIVE"}
     return {
         "status":           "running",
         "env":              settings.app_env.value,
+        "mode":             _MODE_MAP.get(settings.app_env.value, "DEV"),
         "capital":          settings.total_capital,
         "daily_loss_limit": settings.daily_loss_limit_inr,
         "max_positions":    settings.max_open_positions,

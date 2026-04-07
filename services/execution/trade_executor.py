@@ -192,6 +192,7 @@ class TradeExecutor:
             strategy_name      = signal.signal_type.value,
             strategy_mode      = "INTRADAY",
             broker             = broker,
+            mode               = settings.app_env.value,
             entry_price        = signal.price_at_signal,
             entry_quantity     = decision.position_size,
             entry_time         = datetime.now(),

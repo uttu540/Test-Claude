@@ -80,8 +80,8 @@ class OrderManager:
         Place an order. Returns broker_order_id on success, None on failure.
         Records the attempt in database regardless of outcome.
         """
-        # In dev mode: simulate the order
-        if settings.is_dev:
+        # In dev/paper mode: simulate the order (never hit the real broker)
+        if settings.is_dev or settings.is_paper:
             return await self._simulate_order(
                 symbol, exchange, transaction_type, quantity,
                 order_type, product, price, trigger_price, tag, trade_id
@@ -237,7 +237,7 @@ class OrderManager:
 
     async def cancel_order(self, broker_order_id: str) -> bool:
         """Cancel an open order. Returns True on success."""
-        if settings.is_dev:
+        if settings.is_dev or settings.is_paper:
             log.info("order.cancel_simulated", broker_order_id=broker_order_id)
             return True
         try:
@@ -257,7 +257,7 @@ class OrderManager:
         quantity: int | None = None,
     ) -> bool:
         """Modify an open order (e.g., move stop loss)."""
-        if settings.is_dev:
+        if settings.is_dev or settings.is_paper:
             log.info("order.modify_simulated", broker_order_id=broker_order_id)
             return True
         try:
@@ -275,14 +275,14 @@ class OrderManager:
 
     async def get_positions(self) -> dict:
         """Fetch current open positions from Kite."""
-        if settings.is_dev:
+        if settings.is_dev or settings.is_paper:
             return {"net": [], "day": []}
         kite = await self._get_kite()
         return kite.positions()
 
     async def get_portfolio(self) -> list[dict]:
         """Fetch holdings (delivery/CNC positions)."""
-        if settings.is_dev:
+        if settings.is_dev or settings.is_paper:
             return []
         kite = await self._get_kite()
         return kite.holdings()

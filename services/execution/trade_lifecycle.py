@@ -71,12 +71,12 @@ class TradeLifecycleManager:
     async def run(self) -> None:
         """Main monitoring loop — runs until stopped."""
         self._running = True
-        interval = _DEV_POLL_INTERVAL if settings.is_dev else _LIVE_POLL_INTERVAL
+        interval = _DEV_POLL_INTERVAL if (settings.is_dev or settings.is_paper) else _LIVE_POLL_INTERVAL
         log.info("lifecycle.started", mode=settings.app_env.value, interval=interval)
 
         while self._running:
             try:
-                if settings.is_dev:
+                if settings.is_dev or settings.is_paper:
                     await self._check_via_ticks()
                 else:
                     await self._check_via_broker()
@@ -100,9 +100,18 @@ class TradeLifecycleManager:
         closed = 0
         for trade in open_trades:
             price = await self._get_current_price(trade["trading_symbol"])
-            if price:
-                await self._close_trade(trade, exit_price=price, reason=reason)
-                closed += 1
+            if price is None:
+                # No live tick in Redis (feed not running or symbol unsubscribed).
+                # Fall back to entry price so the trade is still closed at EOD
+                # rather than silently left open.
+                price = float(trade["entry_price"])
+                log.warning(
+                    "lifecycle.no_tick_fallback",
+                    symbol=trade["trading_symbol"],
+                    using_entry_price=price,
+                )
+            await self._close_trade(trade, exit_price=price, reason=reason)
+            closed += 1
         log.info("lifecycle.force_close_all", count=closed, reason=reason)
         return closed
 

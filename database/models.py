@@ -163,6 +163,7 @@ class Trade(Base):
     fundamental_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
 
     status: Mapped[str] = mapped_column(String(20), default="OPEN")           # OPEN, CLOSED
+    mode: Mapped[str] = mapped_column(String(20), default="live", server_default="live")  # development, paper, live
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

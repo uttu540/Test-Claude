@@ -221,7 +221,7 @@ async def job_square_off_intraday() -> None:
     from config.market_hours import is_trading_day
     if not is_trading_day():
         return
-    log.warning("scheduler.square_off_intraday", time="15:20")
+    log.warning("scheduler.square_off_intraday", time="15:12")
     if settings.is_live:
         from services.execution.zerodha.order_manager import OrderManager
         om = OrderManager()
@@ -247,7 +247,7 @@ async def job_eod_summary() -> None:
                         SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END) as wins,
                         SUM(CASE WHEN net_pnl < 0 THEN 1 ELSE 0 END) as losses,
                         COALESCE(SUM(net_pnl), 0) as net_pnl,
-                        COALESCE(SUM(brokerage + stt + exchange_charges + gst), 0) as charges
+                        COALESCE(SUM(brokerage + stt + exchange_charges + gst + sebi_charges + stamp_duty), 0) as charges
                     FROM trades
                     WHERE DATE(entry_time) = :today AND status = 'CLOSED'
                 """),
