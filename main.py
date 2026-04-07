@@ -217,7 +217,7 @@ async def job_market_open_briefing() -> None:
 
 
 async def job_square_off_intraday() -> None:
-    """3:20 PM IST — Square off all intraday positions and close them in DB."""
+    """3:12 PM IST — Square off all intraday positions and close them in DB."""
     from config.market_hours import is_trading_day
     if not is_trading_day():
         return
@@ -355,7 +355,7 @@ async def main() -> None:
     # Weekdays only (Mon=0 … Fri=4)
     scheduler.add_job(job_daily_auth,          CronTrigger(day_of_week="0-4", hour=8,  minute=30, timezone="Asia/Kolkata"))
     scheduler.add_job(job_market_open_briefing, CronTrigger(day_of_week="0-4", hour=9, minute=10, timezone="Asia/Kolkata"))
-    scheduler.add_job(job_square_off_intraday,  CronTrigger(day_of_week="0-4", hour=15, minute=20, timezone="Asia/Kolkata"))
+    scheduler.add_job(job_square_off_intraday,  CronTrigger(day_of_week="0-4", hour=15, minute=12, timezone="Asia/Kolkata"))
     scheduler.add_job(job_eod_summary,          CronTrigger(day_of_week="0-4", hour=16, minute=30, timezone="Asia/Kolkata"))
     scheduler.start()
 
