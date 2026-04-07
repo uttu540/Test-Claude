@@ -35,6 +35,7 @@ from database.connection import close_db, close_redis, get_redis, init_db
 from services.data_ingestion.historical_seed import HistoricalSeeder
 from services.data_ingestion.news_feed import get_news_service
 from services.data_ingestion.websocket_feed import FeedManager, OHLCVCandle
+from services.market_regime.detector import get_regime_detector
 from services.notifications.telegram_bot import get_notifier
 from services.execution.trade_executor import TradeExecutor
 from services.technical_engine.signal_generator import (
@@ -117,7 +118,22 @@ async def _run_signals(symbol: str) -> None:
         if not ohlcv_by_tf:
             return
 
-        signals = engine.analyse(symbol, ohlcv_by_tf)
+        # Update market regime when processing the market proxy (NIFTY 50 or any liquid index)
+        # Uses 1day data for a stable regime read; falls back to cached Redis value
+        REGIME_PROXY = "NIFTY 50"
+        redis = get_redis()
+        if symbol == REGIME_PROXY and "1day" in ohlcv_by_tf:
+            import json as _json
+            vix_raw   = await redis.get("market:tick:INDIA VIX")
+            india_vix = _json.loads(vix_raw).get("lp") if vix_raw else None
+            await get_regime_detector().detect_and_publish(
+                ohlcv_by_tf["1day"], india_vix=india_vix
+            )
+
+        # Read current regime for signal filtering
+        regime = await redis.get("market:regime") or "UNKNOWN"
+
+        signals = engine.analyse(symbol, ohlcv_by_tf, regime=regime)
 
         if signals:
             top = signals[0]   # Highest confidence signal
@@ -131,7 +147,6 @@ async def _run_signals(symbol: str) -> None:
             )
 
             # Publish to Redis for the API / dashboard and for AI tf_alignment context
-            redis = get_redis()
             import json
             signal_payload = json.dumps(top.to_dict())
             await redis.setex(f"signal:latest:{symbol}",              900, signal_payload)

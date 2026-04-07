@@ -8,12 +8,18 @@ certain technical conditions are met. The AI strategy engine decides
 whether to act on signals.
 
 Signal confidence is scored 0–100 based on multi-timeframe confluence.
+
+Phase 3 additions:
+  - ORB_BREAKOUT:  Opening Range Breakout (9:15–9:30 AM range, valid until 1 PM)
+  - VWAP_RECLAIM:  Price reclaims / breaks VWAP with volume confirmation
+  - RegimeFilter:  Gates signals by market regime before they reach Claude
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time
 from enum import Enum
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -49,6 +55,9 @@ class SignalType(str, Enum):
     # Volatility signals
     BB_SQUEEZE         = "BB_SQUEEZE"          # Bollinger Band width < 20th percentile
     BB_EXPANSION       = "BB_EXPANSION"        # BB width expanding after squeeze
+    # Phase 3 — Indian market strategies
+    ORB_BREAKOUT       = "ORB_BREAKOUT"        # Opening Range Breakout (9:15–9:30 range)
+    VWAP_RECLAIM       = "VWAP_RECLAIM"        # Price reclaims / breaks VWAP with volume
 
 
 @dataclass
@@ -78,6 +87,80 @@ class Signal:
         }
 
 
+# ─── Regime-Based Signal Filter ──────────────────────────────────────────────
+
+# Maps each market regime to the set of signal types that are valid in it.
+# None means "allow all" (used for UNKNOWN so we don't block during startup).
+_REGIME_ALLOWED: dict[str, set[str] | None] = {
+    "TRENDING_UP": {
+        "BREAKOUT_HIGH", "EMA_CROSSOVER_UP", "MACD_CROSS_UP",
+        "HIGH_RVOL", "BB_EXPANSION", "ABOVE_200_EMA",
+        "ORB_BREAKOUT", "VWAP_RECLAIM",
+    },
+    "TRENDING_DOWN": {
+        "BREAKOUT_LOW", "EMA_CROSSOVER_DOWN", "MACD_CROSS_DOWN",
+        "HIGH_RVOL", "BB_EXPANSION", "BELOW_200_EMA",
+        "ORB_BREAKOUT", "VWAP_RECLAIM",
+    },
+    "RANGING": {
+        "RSI_OVERSOLD", "RSI_OVERBOUGHT",
+        "BB_SQUEEZE", "BB_EXPANSION",
+        "VWAP_RECLAIM", "HIGH_RVOL",
+    },
+    "HIGH_VOLATILITY": {
+        "VWAP_RECLAIM",   # Only safest signal in high-fear environment
+    },
+    "UNKNOWN": None,      # Allow all — safe default during startup
+}
+
+# Maximum confidence cap per regime (prevents over-confidence in bad conditions)
+_REGIME_CONFIDENCE_CAP: dict[str, int] = {
+    "TRENDING_UP":    100,
+    "TRENDING_DOWN":  100,
+    "RANGING":        80,
+    "HIGH_VOLATILITY": 60,
+    "UNKNOWN":        100,
+}
+
+
+class RegimeFilter:
+    """
+    Gates signals by current market regime before they reach the AI layer.
+    Removes signals whose strategy type doesn't suit the current conditions,
+    and caps confidence in high-risk regimes.
+    """
+
+    def apply(self, signals: list[Signal], regime: str) -> list[Signal]:
+        allowed = _REGIME_ALLOWED.get(regime)
+        cap     = _REGIME_CONFIDENCE_CAP.get(regime, 100)
+
+        filtered: list[Signal] = []
+        for sig in signals:
+            if allowed is not None and sig.signal_type.value not in allowed:
+                log.debug(
+                    "regime_filter.blocked",
+                    symbol    = sig.trading_symbol,
+                    signal    = sig.signal_type.value,
+                    regime    = regime,
+                )
+                continue
+            # Apply confidence cap for unfavourable regimes
+            if sig.confidence > cap:
+                sig.confidence = cap
+            filtered.append(sig)
+
+        removed = len(signals) - len(filtered)
+        if removed:
+            log.info(
+                "regime_filter.applied",
+                regime  = regime,
+                total   = len(signals),
+                removed = removed,
+                kept    = len(filtered),
+            )
+        return filtered
+
+
 # ─── Per-timeframe Signal Detector ───────────────────────────────────────────
 
 class SignalDetector:
@@ -103,6 +186,8 @@ class SignalDetector:
         signals += self._momentum_signals(df, symbol, timeframe, price, latest)
         signals += self._volume_signals(df, symbol, timeframe, price, latest)
         signals += self._volatility_signals(df, symbol, timeframe, price, latest)
+        signals += self._orb_signals(df, symbol, timeframe, price, latest)
+        signals += self._vwap_signals(df, symbol, timeframe, price, latest)
 
         # Filter to only signals with confidence >= 40
         signals = [s for s in signals if s.confidence >= 40]
@@ -360,13 +445,163 @@ class SignalDetector:
 
         return signals
 
+    # ── Opening Range Breakout ────────────────────────────────────────────────
+
+    def _orb_signals(
+        self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
+    ) -> list[Signal]:
+        """
+        Opening Range Breakout — 9:15 to 9:30 AM range.
+        Only fires on 15min timeframe and between 9:30 AM–1:00 PM IST.
+        The first 15min candle of the day (9:15 open) establishes the range.
+        """
+        if tf != "15min":
+            return []
+
+        # Index must be datetime to check time-of-day
+        if not hasattr(df.index, "time"):
+            return []
+
+        try:
+            current_ts   = df.index[-1]
+            current_time = current_ts.time()
+        except Exception:
+            return []
+
+        # Only valid during 9:30 AM – 1:00 PM IST
+        if not (time(9, 30) <= current_time <= time(13, 0)):
+            return []
+
+        today        = current_ts.date()
+        today_df     = df[df.index.date == today]
+        if len(today_df) < 2:
+            return []   # Need at least 2 candles (ORB candle + current)
+
+        orb_candle = today_df.iloc[0]   # 9:15–9:30 candle
+        orb_high   = orb_candle["high"]
+        orb_low    = orb_candle["low"]
+        rvol       = latest.get("rvol", 1.0)
+
+        signals = []
+
+        # Bullish ORB breakout
+        if price > orb_high:
+            confidence = 65
+            if rvol > 1.5:                          confidence += 10
+            if rvol > 2.0:                          confidence += 10
+            if latest.get("above_200ema"):          confidence += 10
+            if latest.get("ema_stack") == 1:        confidence += 5
+            signals.append(Signal(
+                trading_symbol  = symbol,
+                timeframe       = tf,
+                signal_type     = SignalType.ORB_BREAKOUT,
+                direction       = Direction.BULLISH,
+                confidence      = min(confidence, 100),
+                price_at_signal = price,
+                indicators      = self._key_indicators(latest),
+                notes           = (
+                    f"ORB breakout above {orb_high:.2f} | "
+                    f"Range: {orb_high - orb_low:.2f} | RVOL {rvol:.1f}x"
+                ),
+            ))
+
+        # Bearish ORB breakdown
+        elif price < orb_low:
+            confidence = 65
+            if rvol > 1.5:                          confidence += 10
+            if rvol > 2.0:                          confidence += 10
+            if not latest.get("above_200ema"):      confidence += 10
+            if latest.get("ema_stack") == -1:       confidence += 5
+            signals.append(Signal(
+                trading_symbol  = symbol,
+                timeframe       = tf,
+                signal_type     = SignalType.ORB_BREAKOUT,
+                direction       = Direction.BEARISH,
+                confidence      = min(confidence, 100),
+                price_at_signal = price,
+                indicators      = self._key_indicators(latest),
+                notes           = (
+                    f"ORB breakdown below {orb_low:.2f} | "
+                    f"Range: {orb_high - orb_low:.2f} | RVOL {rvol:.1f}x"
+                ),
+            ))
+
+        return signals
+
+    # ── VWAP Reclaim / Rejection ──────────────────────────────────────────────
+
+    def _vwap_signals(
+        self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
+    ) -> list[Signal]:
+        """
+        VWAP Reclaim (bullish) — price crosses above VWAP with volume.
+        VWAP Rejection (bearish) — price crosses below VWAP with volume.
+
+        Only fires on intraday timeframes (1min, 5min, 15min) — VWAP is
+        not meaningful on daily/weekly data.
+        """
+        if tf not in ("1min", "5min", "15min"):
+            return []
+
+        if "vwap" not in df.columns or len(df) < 3:
+            return []
+
+        vwap      = df["vwap"].iloc[-1]
+        prev_vwap = df["vwap"].iloc[-2]
+        prev_close = df["close"].iloc[-2]
+        rvol      = latest.get("rvol", 1.0)
+
+        # Skip if VWAP is NaN (outside market hours or insufficient data)
+        if not vwap or pd.isna(vwap) or not prev_vwap or pd.isna(prev_vwap):
+            return []
+
+        signals = []
+
+        # Bullish: previous close was below VWAP, current close is above
+        if prev_close < prev_vwap and price > vwap:
+            confidence = 60
+            if rvol and rvol > 1.2:                 confidence += 10
+            if rvol and rvol > 1.8:                 confidence += 10
+            if latest.get("above_200ema"):          confidence += 10
+            if latest.get("rsi_zone") == 1:         confidence += 5   # neutral RSI
+            signals.append(Signal(
+                trading_symbol  = symbol,
+                timeframe       = tf,
+                signal_type     = SignalType.VWAP_RECLAIM,
+                direction       = Direction.BULLISH,
+                confidence      = min(confidence, 100),
+                price_at_signal = price,
+                indicators      = self._key_indicators(latest),
+                notes           = f"VWAP reclaim @ {vwap:.2f} | RVOL {rvol:.1f}x",
+            ))
+
+        # Bearish: previous close was above VWAP, current close is below
+        elif prev_close > prev_vwap and price < vwap:
+            confidence = 60
+            if rvol and rvol > 1.2:                 confidence += 10
+            if rvol and rvol > 1.8:                 confidence += 10
+            if not latest.get("above_200ema"):      confidence += 10
+            if latest.get("rsi_zone") == 1:         confidence += 5
+            signals.append(Signal(
+                trading_symbol  = symbol,
+                timeframe       = tf,
+                signal_type     = SignalType.VWAP_RECLAIM,
+                direction       = Direction.BEARISH,
+                confidence      = min(confidence, 100),
+                price_at_signal = price,
+                indicators      = self._key_indicators(latest),
+                notes           = f"VWAP rejection below {vwap:.2f} | RVOL {rvol:.1f}x",
+            ))
+
+        return signals
+
     @staticmethod
     def _key_indicators(latest: dict) -> dict:
         """Extract the most important indicator values for the signal snapshot."""
         keys = [
             "close", "ema_9", "ema_21", "ema_50", "ema_200",
             "rsi_14", "macd", "macd_signal", "macd_hist",
-            "atr_14", "atr_pct", "rvol",
+            "atr_14", "atr_pct", "rvol", "vwap",
             "bb_pct", "bb_width", "adx",
             "ema_stack", "above_200ema", "rsi_zone",
         ]
@@ -379,6 +614,7 @@ class MultiTimeframeSignalEngine:
     """
     Runs signal detection across multiple timeframes for a single symbol.
     Computes a confluence score: signals aligned across timeframes score higher.
+    Applies RegimeFilter before returning — only regime-appropriate signals pass.
     """
 
     TIMEFRAME_WEIGHTS = {
@@ -391,15 +627,18 @@ class MultiTimeframeSignalEngine:
 
     def __init__(self):
         self._detector = SignalDetector()
+        self._filter   = RegimeFilter()
 
     def analyse(
         self,
         symbol: str,
         ohlcv_by_tf: dict[str, pd.DataFrame],
+        regime: str = "UNKNOWN",
     ) -> list[Signal]:
         """
         Run detection on each timeframe and return a merged list of signals,
         with confidence scores adjusted for multi-timeframe alignment.
+        Applies regime filter: removes signals unsuitable for current market conditions.
         """
         all_signals: list[Signal] = []
         directions_by_tf: dict[str, Direction] = {}
@@ -417,6 +656,10 @@ class MultiTimeframeSignalEngine:
 
         # Boost confidence for signals whose direction aligns with higher timeframes
         all_signals = self._apply_confluence_boost(all_signals, directions_by_tf)
+
+        # Apply regime filter — remove signals that don't suit current conditions
+        all_signals = self._filter.apply(all_signals, regime)
+
         all_signals.sort(key=lambda s: s.confidence, reverse=True)
         return all_signals
 
