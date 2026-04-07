@@ -35,6 +35,7 @@ from database.connection import close_db, close_redis, get_redis, init_db
 from services.data_ingestion.historical_seed import HistoricalSeeder
 from services.data_ingestion.news_feed import get_news_service
 from services.data_ingestion.websocket_feed import FeedManager, OHLCVCandle
+from services.execution.trade_lifecycle import get_lifecycle_manager
 from services.market_regime.detector import get_regime_detector
 from services.notifications.telegram_bot import get_notifier
 from services.execution.trade_executor import TradeExecutor
@@ -216,7 +217,7 @@ async def job_market_open_briefing() -> None:
 
 
 async def job_square_off_intraday() -> None:
-    """3:20 PM IST — Square off all intraday positions."""
+    """3:20 PM IST — Square off all intraday positions and close them in DB."""
     from config.market_hours import is_trading_day
     if not is_trading_day():
         return
@@ -225,6 +226,9 @@ async def job_square_off_intraday() -> None:
         from services.execution.zerodha.order_manager import OrderManager
         om = OrderManager()
         await om.square_off_all_intraday()
+    # Close all remaining OPEN trades in DB at current market price
+    closed = await get_lifecycle_manager().close_all_open_trades(reason="TIME_EXIT")
+    log.info("scheduler.square_off_db_closed", count=closed)
 
 
 async def job_eod_summary() -> None:
@@ -318,6 +322,9 @@ async def startup() -> None:
     news_service = get_news_service()
     await news_service.start()
 
+    # 5. Trade lifecycle manager (monitors open trades, closes on SL/target hit)
+    asyncio.create_task(get_lifecycle_manager().run())
+
     log.info("startup.complete", env=settings.app_env.value)
 
 
@@ -325,6 +332,7 @@ async def shutdown(scheduler: AsyncIOScheduler) -> None:
     """Graceful shutdown."""
     log.info("shutdown.start")
     scheduler.shutdown(wait=False)
+    get_lifecycle_manager().stop()
     await get_news_service().stop()
     await close_db()
     await close_redis()
