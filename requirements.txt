@@ -24,9 +24,9 @@ playwright==1.44.0
 pyotp==2.9.0              # TOTP generation for 2FA
 
 # ── Technical Analysis ────────────────────────────────────────────────────────
-pandas==2.2.2
-numpy==1.26.4
-pandas-ta==0.3.14b        # 130+ indicators, pure Python
+pandas>=2.2.2
+numpy>=2.2.6
+pandas-ta                 # 130+ indicators, pure Python
 # TA-Lib requires system library: brew install ta-lib  →  then: pip install TA-Lib
 # TA-Lib==0.4.28
 

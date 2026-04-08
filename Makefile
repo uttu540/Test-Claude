@@ -51,7 +51,7 @@ clean:
 
 # ─── Python ───────────────────────────────────────────────────────────────────
 install:
-	pip install -r requirements.txt
+	pip3.12 install -r requirements.txt
 
 playwright:
 	playwright install chromium
@@ -77,7 +77,7 @@ db-stamp:
 # ─── First-time setup ─────────────────────────────────────────────────────────
 setup:
 	@echo "==> Installing Python dependencies..."
-	pip install -r requirements.txt
+	pip3.12 install -r requirements.txt
 	@echo "==> Starting Docker services..."
 	docker compose up -d
 	@echo "==> Waiting for DB to be ready..."
@@ -128,18 +128,18 @@ _check-env:
 
 # ─── Bot only (single process, useful for debugging) ──────────────────────────
 dev:
-	APP_ENV=development python main.py
+	APP_ENV=development python3.12 main.py
 
 paper:
-	APP_ENV=paper python main.py
+	APP_ENV=paper python3.12 main.py
 
 semi-auto:
-	APP_ENV=semi-auto python main.py
+	APP_ENV=semi-auto python3.12 main.py
 
 live:
 	@echo "⚠️  Starting in LIVE mode — real money at risk!"
 	@read -p "Type 'yes' to confirm: " confirm; \
-	if [ "$$confirm" = "yes" ]; then APP_ENV=live python main.py; fi
+	if [ "$$confirm" = "yes" ]; then APP_ENV=live python3.12 main.py; fi
 
 test:
-	pytest tests/ -v
+	python3.12 -m pytest tests/ -v
