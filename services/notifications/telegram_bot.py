@@ -57,8 +57,8 @@ class TelegramNotifier:
         self._bot: Bot | None = None
         self._chat_id = settings.telegram_chat_id
         self._enabled = bool(settings.telegram_bot_token and settings.telegram_chat_id)
-        # Tracks approval_id → message_id so we can edit after button press
-        self._approval_message_ids: dict[str, int] = {}
+        # Tracks approval_id → (message_id, symbol) so we can edit after button press
+        self._approval_message_ids: dict[str, tuple[int, str]] = {}
 
         if self._enabled:
             self._bot = Bot(token=settings.telegram_bot_token)
@@ -196,7 +196,7 @@ class TelegramNotifier:
                 parse_mode   = "Markdown",
                 reply_markup = keyboard,
             )
-            self._approval_message_ids[req.approval_id] = sent.message_id
+            self._approval_message_ids[req.approval_id] = (sent.message_id, req.symbol)
         except TelegramError as e:
             log.error("telegram.approval_send_failed", approval_id=req.approval_id, error=str(e))
 
@@ -204,9 +204,10 @@ class TelegramNotifier:
         """Edit the approval message to show it timed out (removes buttons)."""
         if not self._enabled or not self._bot:
             return
-        message_id = self._approval_message_ids.pop(approval_id, None)
-        if not message_id:
+        entry = self._approval_message_ids.pop(approval_id, None)
+        if not entry:
             return
+        message_id, _ = entry
         try:
             await self._bot.edit_message_text(
                 chat_id    = self._chat_id,
@@ -230,9 +231,10 @@ class TelegramNotifier:
         """Edit the approval message to show the final decision."""
         if not self._enabled or not self._bot:
             return
-        message_id = self._approval_message_ids.pop(approval_id, None)
-        if not message_id:
+        entry = self._approval_message_ids.pop(approval_id, None)
+        if not entry:
             return
+        message_id, _ = entry
         status = "✅ APPROVED" if approved else "❌ REJECTED"
         try:
             await self._bot.edit_message_text(
@@ -243,6 +245,11 @@ class TelegramNotifier:
             )
         except TelegramError:
             pass
+
+    def _get_approval_symbol(self, approval_id: str) -> str:
+        """Return the symbol stored for this approval_id, or '?' if not found."""
+        entry = self._approval_message_ids.get(approval_id)
+        return entry[1] if entry else "?"
 
     # ── Daily Summary ─────────────────────────────────────────────────────────
 
@@ -420,9 +427,7 @@ async def _handle_approval_callback(update: object, context: object) -> None:
     resolved = await resolve_approval(approval_id, approved)
     if resolved:
         notifier = get_notifier()
-        # Best-effort: extract symbol from the 4th word of the message text
-        words  = (query.message.text or "").split()
-        symbol = words[3] if len(words) > 3 else "?"
+        symbol = notifier._get_approval_symbol(approval_id)
         await notifier.send_approval_result(approval_id, symbol, approved, user_name)
         log.info("telegram.approval_resolved", action=action, approval_id=approval_id, user=user_name)
     else:

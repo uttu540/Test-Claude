@@ -126,7 +126,7 @@ class TradeExecutor:
             return None
 
         # ── 5. Record trade in DB ─────────────────────────────────────────────
-        trade = await self._record_trade(trade_id, signal, direction, decision, ai_decision)
+        trade = await self._record_trade(trade_id, signal, direction, decision, ai_decision, broker.BROKER)
 
         # ── 6. Stop-loss order ────────────────────────────────────────────────
         await broker.place_stop_loss(
@@ -195,6 +195,7 @@ class TradeExecutor:
         direction:   str,
         decision:    RiskDecision,
         ai_decision: AIDecision,
+        broker_name: str,
     ) -> Trade:
         rr = (
             abs(decision.target - signal.price_at_signal)
@@ -211,7 +212,7 @@ class TradeExecutor:
             direction           = direction,
             strategy_name       = signal.signal_type.value,
             strategy_mode       = "INTRADAY",
-            broker              = get_broker().BROKER,
+            broker              = broker_name,
             mode                = settings.app_env.value,
             entry_price         = signal.price_at_signal,
             entry_quantity      = decision.position_size,

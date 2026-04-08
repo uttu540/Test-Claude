@@ -134,26 +134,40 @@ async def get_positions() -> list[dict]:
 # ── Routes: Trades ─────────────────────────────────────────────────────────────
 
 @app.get("/api/trades")
-async def get_trades(limit: int = 50, offset: int = 0) -> list[dict]:
+async def get_trades(page: int = 1, per_page: int = 50) -> dict:
     """Paginated trade history, most recent first."""
+    offset = (max(page, 1) - 1) * per_page
     async for session in get_db_session():
+        total_result = await session.execute(text("SELECT COUNT(*) FROM trades"))
+        total = total_result.scalar() or 0
+
         result = await session.execute(
             text("""
                 SELECT
-                    id, trading_symbol, direction, strategy_name,
+                    id,
+                    trading_symbol      AS symbol,
+                    direction,
+                    strategy_name       AS strategy,
                     entry_price, entry_quantity, entry_time,
                     exit_price, exit_time, exit_reason,
-                    gross_pnl, net_pnl, risk_reward_actual,
+                    gross_pnl,
+                    net_pnl             AS pnl,
+                    risk_reward_actual  AS rr,
                     planned_stop_loss, planned_target_1,
-                    broker, status
+                    broker, status, mode
                 FROM trades
                 ORDER BY entry_time DESC
                 LIMIT :limit OFFSET :offset
             """),
-            {"limit": limit, "offset": offset},
+            {"limit": per_page, "offset": offset},
         )
-        return [_row_to_dict(r) for r in result.fetchall()]
-    return []
+        return {
+            "trades":   [_row_to_dict(r) for r in result.fetchall()],
+            "total":    total,
+            "page":     page,
+            "per_page": per_page,
+        }
+    return {"trades": [], "total": 0, "page": page, "per_page": per_page}
 
 
 @app.get("/api/trades/{trade_id}")
@@ -194,8 +208,11 @@ async def get_today_pnl() -> dict:
                     COUNT(*) FILTER (WHERE status = 'OPEN')         AS open_trades,
                     COALESCE(SUM(net_pnl) FILTER (WHERE status = 'CLOSED'), 0) AS net_pnl,
                     COALESCE(SUM(gross_pnl) FILTER (WHERE status = 'CLOSED'), 0) AS gross_pnl,
-                    COALESCE(SUM(brokerage + stt + exchange_charges + gst)
-                             FILTER (WHERE status = 'CLOSED'), 0)   AS total_charges
+                    COALESCE(SUM(
+                        COALESCE(brokerage,0) + COALESCE(stt,0) +
+                        COALESCE(exchange_charges,0) + COALESCE(gst,0) +
+                        COALESCE(sebi_charges,0) + COALESCE(stamp_duty,0)
+                    ) FILTER (WHERE status = 'CLOSED'), 0)          AS total_charges
                 FROM trades
                 WHERE DATE(entry_time) = :today
             """),
@@ -203,11 +220,13 @@ async def get_today_pnl() -> dict:
         )
         row = result.fetchone()
         data = _row_to_dict(row) if row else {}
-        data["trading_date"] = today.isoformat()
+        net_pnl_val = float(data.get("net_pnl", 0) or 0)
+        data["trading_date"]    = today.isoformat()
         data["daily_loss_limit"] = settings.daily_loss_limit_inr
-        data["capital"] = settings.total_capital
-        data["pnl_pct"] = (
-            float(data.get("net_pnl", 0)) / settings.total_capital * 100
+        data["daily_loss_used"] = abs(min(net_pnl_val, 0))
+        data["capital"]         = settings.total_capital
+        data["pnl_pct"]         = (
+            net_pnl_val / settings.total_capital * 100
             if settings.total_capital else 0
         )
         return data

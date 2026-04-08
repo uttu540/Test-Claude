@@ -121,7 +121,7 @@ export async function fetchBotStatus() {
 }
 
 // Expected shape: {
-//   mode: "DEV" | "PAPER" | "LIVE",
+//   mode: "DEV" | "PAPER" | "SEMI_AUTO" | "LIVE",
 //   capital: number,
 //   is_running: boolean,
 //   version: string

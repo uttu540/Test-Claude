@@ -7,8 +7,8 @@ Every broker (Zerodha, Groww, Paper) must implement this interface.
 TradeExecutor and TradeLifecycleManager only depend on this ABC —
 never on a concrete broker class.
 
-Adding a new broker (e.g. Angel One):
-  1. Create services/execution/angelone/order_manager.py
+Adding Groww (Phase 6):
+  1. Create services/execution/groww/order_manager.py
   2. Subclass BrokerInterface
   3. Implement the 6 abstract methods
   4. Register in broker_router.py

@@ -327,6 +327,11 @@ async def startup() -> None:
 
     # 6. Telegram approval polling (semi-auto mode only)
     if settings.is_semi_auto:
+        if not settings.authorized_telegram_ids:
+            log.warning(
+                "startup.semi_auto_no_auth",
+                reason="TELEGRAM_AUTHORIZED_IDS is empty — any Telegram user can approve trades!",
+            )
         from services.notifications.telegram_bot import start_approval_polling
         app_tg = await start_approval_polling()
         # Store on module for shutdown access

@@ -45,6 +45,21 @@ function RRCell({ rr }) {
   )
 }
 
+function ModeBadge({ mode }) {
+  const configs = {
+    development: { bg: 'bg-yellow-trade/10', text: 'text-yellow-trade', border: 'border-yellow-trade/20', label: 'DEV'   },
+    paper:       { bg: 'bg-blue-trade/10',   text: 'text-blue-trade',   border: 'border-blue-trade/20',   label: 'PAPER' },
+    'semi-auto': { bg: 'bg-purple-500/10',   text: 'text-purple-400',   border: 'border-purple-500/30',   label: 'SEMI'  },
+    live:        { bg: 'bg-red-trade/10',    text: 'text-red-trade',    border: 'border-red-trade/20',    label: 'LIVE'  },
+  }
+  const c = configs[mode] || { bg: 'bg-bg-card', text: 'text-text-muted', border: 'border-border', label: mode || '?' }
+  return (
+    <span className={`badge text-2xs ${c.bg} ${c.text} border ${c.border}`}>
+      {c.label}
+    </span>
+  )
+}
+
 function formatDateTime(isoString) {
   if (!isoString) return '—'
   try {
@@ -65,7 +80,7 @@ function formatDateTime(isoString) {
 function SkeletonRow() {
   return (
     <tr>
-      {Array.from({ length: 9 }).map((_, i) => (
+      {Array.from({ length: 10 }).map((_, i) => (
         <td key={i} className="td">
           <div className="skeleton h-4 w-16" />
         </td>
@@ -74,10 +89,10 @@ function SkeletonRow() {
   )
 }
 
-function EmptyState({ colSpan }) {
+function EmptyState() {
   return (
     <tr>
-      <td colSpan={colSpan} className="td text-center py-16">
+      <td colSpan={10} className="td text-center py-16">
         <div className="flex flex-col items-center gap-2 text-text-muted">
           <svg className="w-10 h-10 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
@@ -100,7 +115,7 @@ export default function TradesTable({ trades = [], loading = false, error = null
 
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[900px]">
+          <table className="w-full min-w-[960px]">
             <thead>
               <tr>
                 <th className="th">Symbol</th>
@@ -111,6 +126,7 @@ export default function TradesTable({ trades = [], loading = false, error = null
                 <th className="th text-right">P&L</th>
                 <th className="th text-right">R:R</th>
                 <th className="th">Status</th>
+                <th className="th">Mode</th>
                 <th className="th">Entry Time</th>
               </tr>
             </thead>
@@ -118,7 +134,7 @@ export default function TradesTable({ trades = [], loading = false, error = null
               {loading
                 ? Array.from({ length: 10 }).map((_, i) => <SkeletonRow key={i} />)
                 : trades.length === 0
-                ? <EmptyState colSpan={9} />
+                ? <EmptyState />
                 : trades.map((t, i) => {
                     const isProfit = t.pnl !== null && t.pnl > 0
                     const isLoss   = t.pnl !== null && t.pnl < 0
@@ -169,6 +185,9 @@ export default function TradesTable({ trades = [], loading = false, error = null
                         </td>
                         <td className="td">
                           <StatusBadge status={t.status} />
+                        </td>
+                        <td className="td">
+                          <ModeBadge mode={t.mode} />
                         </td>
                         <td className="td">
                           <span className="font-mono text-xs text-text-muted">
