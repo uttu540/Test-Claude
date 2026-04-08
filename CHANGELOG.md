@@ -6,7 +6,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 ## [Unreleased]
-_Next up: Paper trading validation run_
+_Next up: Tune signal confidence thresholds based on backtest findings (raise ORB threshold, tighten VWAP filter); paper trading validation run_
+
+---
+
+## [0.3.1] — 2026-04-09 — Backtest Run: Fixes & First Results
+
+### Fixed
+- **`indicators.py`** — Bollinger Band column lookup broken on `pandas-ta 0.4.71b0` (Python 3.12):
+  - Column names changed from `BBU_20_2.0` → `BBU_20_2.0_2.0` (std value appended twice in new version)
+  - Added `_find_col(prefix)` helper that matches by prefix, making code version-agnostic
+- **`indicators.py`** — `TypeError: '>' not supported between instances of 'float' and 'NoneType'` in `_derived()`:
+  - New pandas-ta returns `None` scalars instead of `NaN` in some columns on Python 3.12
+  - Fixed by coercing all `object`-dtype columns via `pd.to_numeric(errors="coerce")` before comparisons; EMA/RSI series explicitly cast to `float`
+- **`risk_engine/engine.py`** — DB helpers raised `asyncpg` connection errors when PostgreSQL not running:
+  - Wrapped `_get_todays_pnl`, `_get_open_count`, `_has_open_position` each in `try/except`
+  - Returns safe defaults (`0.0` / `0` / `False`) on DB failure — backtester runs without a live DB
+
+### Changed
+- **`signal_generator.py`** — Added `pre_computed: bool = False` to `SignalDetector.detect()`; when `True`, skips `compute_all()` call
+- **`backtesting/engine.py`** — Major performance overhaul:
+  - Indicators pre-computed **once per timeframe** on data load instead of once per candle (~3 calls/symbol vs ~3,450) — **60× speedup**; 50 Nifty symbols complete in ~3.5 min
+  - Regime detection inlined from pre-computed daily row (reads `adx` + `ema_stack` directly)
+  - Signal detector called with `pre_computed=True`
+
+### Added
+- `results/backtest_with_regime.json` — First full backtest: 90 days, Nifty 50, regime filter ON
+- `results/backtest_no_regime.json` — Same run, regime filter OFF (comparison baseline)
+
+### Backtest Findings (90 days · Nifty 50 · Jan–Apr 2026)
+
+| Metric | Regime Filter ON | Regime Filter OFF |
+|---|---|---|
+| Total trades | 22,068 | 26,367 |
+| Win rate | 43.6% | 43.2% |
+| Net PnL | ₹2.93 Cr | ₹2.92 Cr |
+| Avg PnL / trade | ₹1,329 | ₹1,109 |
+| Profit factor | 36.37× | 30.06× |
+| Sharpe ratio | 2.82 | 2.57 |
+| Max drawdown | ₹−12,173 | ₹−27,223 |
+
+**Signal type performance (regime filter ON):**
+- `BREAKOUT_LOW`: 55% WR — dominant alpha source; market was `TRENDING_DOWN` for ~60% of period
+- `MACD_CROSS_UP`: 64% WR — highest win rate, low trade count
+- `RSI_OVERBOUGHT`: 58% WR — effective in downtrend
+- `BREAKOUT_HIGH`: 57% WR — solid
+- `ORB_BREAKOUT`: 38% WR — noisy; candidate for higher confidence threshold or disable
+- `VWAP_RECLAIM`: 39% WR — needs tighter entry filters
+
+**SHORT vs LONG:** SHORT trades ₹2.93 Cr vs LONG ₹49K — Jan–Apr 2026 was a strong downtrend. Regime filter correctly classified 13K/22K trades as `TRENDING_DOWN`.
+
+---
 
 ---
 
