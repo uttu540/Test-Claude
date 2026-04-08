@@ -33,6 +33,7 @@ import structlog
 from config.settings import settings
 from services.market_regime.detector import MarketRegimeDetector
 from services.risk_engine.engine import RiskEngine
+from services.technical_engine.indicators import compute_all
 from services.technical_engine.signal_generator import (
     Direction,
     MultiTimeframeSignalEngine,
@@ -148,9 +149,22 @@ class BacktestEngine:
             log.warning("backtest.no_data", symbol=symbol)
             return []
 
+        # ── Pre-compute indicators ONCE per timeframe (major speedup) ─────────
+        # Indicators are computed on the full df; rolling functions are causal
+        # (only use past data), so no look-ahead bias is introduced.
+        precomputed: dict[str, pd.DataFrame] = {}
+        for tf, df in data.items():
+            try:
+                precomputed[tf] = compute_all(df)
+            except Exception as e:
+                log.warning("backtest.indicator_failed", symbol=symbol, tf=tf, error=str(e))
+
+        if not precomputed:
+            return []
+
         # Use 15min as the primary timeframe for signal scanning
-        primary_tf = "15min" if "15min" in data else list(data.keys())[0]
-        primary_df = data[primary_tf]
+        primary_tf = "15min" if "15min" in precomputed else list(precomputed.keys())[0]
+        primary_df = precomputed[primary_tf]
 
         # Filter to backtest date range
         primary_df = primary_df[
@@ -160,38 +174,72 @@ class BacktestEngine:
         if primary_df.empty:
             return []
 
-        trades: list[SimulatedTrade] = []
-        # Rolling window: feed candles up to each point to avoid look-ahead
-        window = 300
-        open_positions: set[str] = set()   # symbols with active simulated position
+        trades:         list[SimulatedTrade] = []
+        window          = 200           # lookback rows passed to signal detector
+        in_trade:       bool = False    # one-at-a-time position tracking
+        exit_after_idx: int  = -1      # index after which we're free to trade again
+
+        detector = self._signal_engine._detector
+        reg_filter = self._signal_engine._filter
 
         for i in range(window, len(primary_df)):
+            # Skip while we're in an open position
+            if in_trade and i <= exit_after_idx:
+                continue
+
+            cutoff = primary_df.index[i]
+
+            # Build per-timeframe slices from pre-computed data (no recomputation)
             snapshot: dict[str, pd.DataFrame] = {}
-            for tf, df in data.items():
-                # Align each timeframe to the current primary candle's timestamp
-                cutoff = primary_df.index[i]
+            for tf, df in precomputed.items():
                 tf_slice = df[df.index <= cutoff].tail(window)
-                if len(tf_slice) >= 30:
+                if len(tf_slice) >= 50:
                     snapshot[tf] = tf_slice
 
             if not snapshot:
                 continue
 
-            # Determine regime for this snapshot
+            # Determine regime from pre-computed daily data (last row only)
             regime = "UNKNOWN"
             if self._regime_aware and "1day" in snapshot:
-                regime = self._regime_detector.detect(snapshot["1day"])
+                day_latest = snapshot["1day"].iloc[-1]
+                adx = day_latest.get("adx") if hasattr(day_latest, "get") else day_latest["adx"] if "adx" in snapshot["1day"].columns else None
+                ema_stack = day_latest.get("ema_stack") if hasattr(day_latest, "get") else day_latest["ema_stack"] if "ema_stack" in snapshot["1day"].columns else None
+                if adx is not None and not pd.isna(adx):
+                    if adx >= 25:
+                        regime = "TRENDING_UP" if (ema_stack or 0) >= 0 else "TRENDING_DOWN"
+                    elif adx < 20:
+                        regime = "RANGING"
+                    else:
+                        regime = "TRENDING_UP" if (ema_stack or 0) >= 0 else "TRENDING_DOWN"
 
-            # Detect signals
-            signals = self._signal_engine.analyse(symbol, snapshot, regime=regime)
-            if not signals or symbol in open_positions:
+            # Detect signals using pre-computed data (skip compute_all)
+            all_signals = []
+            for tf, tf_df in snapshot.items():
+                sigs = detector.detect(
+                    tf_df, symbol, tf,
+                    pre_computed=True,
+                )
+                all_signals.extend(sigs)
+
+            if not all_signals:
                 continue
 
-            top = signals[0]
+            # Confluence boost + regime filter (same logic as MultiTimeframeSignalEngine)
+            directions_by_tf = {}
+            for s in all_signals:
+                directions_by_tf[s.timeframe] = s.direction
+            all_signals = self._signal_engine._apply_confluence_boost(all_signals, directions_by_tf)
+            all_signals = reg_filter.apply(all_signals, regime)
+            all_signals.sort(key=lambda s: s.confidence, reverse=True)
+
+            if not all_signals:
+                continue
+
+            top = all_signals[0]
             if top.confidence < 65:
                 continue
 
-            # Simulate risk engine
             atr = top.indicators.get("atr_14", 0)
             if not atr:
                 continue
@@ -205,21 +253,23 @@ class BacktestEngine:
             if not risk_dec.approved:
                 continue
 
-            # Simulate the trade on subsequent candles
-            future_candles = primary_df.iloc[i + 1:]
+            # Simulate exit on raw (uncomputed) candles to avoid indicator columns
+            raw_primary = data.get(primary_tf, primary_df)
+            future_raw = raw_primary[raw_primary.index > cutoff]
             trade = self._simulate_exit(
                 signal       = top,
                 risk_dec     = risk_dec,
-                future_df    = future_candles,
+                future_df    = future_raw,
                 regime       = regime,
-                entry_date   = primary_df.index[i].date(),
+                entry_date   = cutoff.date() if hasattr(cutoff, "date") else cutoff,
             )
             if trade:
                 trades.append(trade)
-                open_positions.add(symbol)
-                # Release position after exit
-                if trade.exit_reason != "OPEN":
-                    open_positions.discard(symbol)
+                in_trade = True
+                # Mark roughly how many candles until the trade resolves
+                exit_after_idx = i + trade.holding_candles
+
+            in_trade = False  # reset for next signal
 
         return trades
 

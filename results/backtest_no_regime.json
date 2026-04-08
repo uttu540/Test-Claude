@@ -1,0 +1,141 @@
+{
+  "start_date": "2026-01-09",
+  "end_date": "2026-04-09",
+  "symbols": 50,
+  "total_trades": 26367,
+  "winning": 11379,
+  "losing": 14988,
+  "net_pnl": 29249538.96,
+  "gross_pnl": 29249538.96,
+  "avg_pnl": 1109.32,
+  "best_trade": 60333.55,
+  "worst_trade": -553.0,
+  "profit_factor": 30.06,
+  "max_drawdown": -27221.77,
+  "sharpe_ratio": 2.57,
+  "win_rate": 0.4316,
+  "avg_rr": 1.2,
+  "by_signal": {
+    "BB_EXPANSION": {
+      "trades": 497,
+      "wins": 248,
+      "win_rate": 0.499,
+      "net_pnl": 4279.34,
+      "avg_pnl": 8.61
+    },
+    "BB_SQUEEZE": {
+      "trades": 663,
+      "wins": 343,
+      "win_rate": 0.5173,
+      "net_pnl": 17943.28,
+      "avg_pnl": 27.06
+    },
+    "BREAKOUT_HIGH": {
+      "trades": 1578,
+      "wins": 734,
+      "win_rate": 0.4651,
+      "net_pnl": 18044.1,
+      "avg_pnl": 11.43
+    },
+    "BREAKOUT_LOW": {
+      "trades": 4669,
+      "wins": 2457,
+      "win_rate": 0.5262,
+      "net_pnl": 29085705.04,
+      "avg_pnl": 6229.54
+    },
+    "EMA_CROSSOVER_DOWN": {
+      "trades": 1057,
+      "wins": 523,
+      "win_rate": 0.4948,
+      "net_pnl": 11700.31,
+      "avg_pnl": 11.07
+    },
+    "EMA_CROSSOVER_UP": {
+      "trades": 685,
+      "wins": 273,
+      "win_rate": 0.3985,
+      "net_pnl": 2953.77,
+      "avg_pnl": 4.31
+    },
+    "HIGH_RVOL": {
+      "trades": 1722,
+      "wins": 848,
+      "win_rate": 0.4925,
+      "net_pnl": 42133.54,
+      "avg_pnl": 24.47
+    },
+    "MACD_CROSS_DOWN": {
+      "trades": 62,
+      "wins": 30,
+      "win_rate": 0.4839,
+      "net_pnl": 2436.42,
+      "avg_pnl": 39.3
+    },
+    "MACD_CROSS_UP": {
+      "trades": 114,
+      "wins": 55,
+      "win_rate": 0.4825,
+      "net_pnl": 4180.4,
+      "avg_pnl": 36.67
+    },
+    "ORB_BREAKOUT": {
+      "trades": 10198,
+      "wins": 3778,
+      "win_rate": 0.3705,
+      "net_pnl": 7400.9,
+      "avg_pnl": 0.73
+    },
+    "RSI_OVERBOUGHT": {
+      "trades": 85,
+      "wins": 45,
+      "win_rate": 0.5294,
+      "net_pnl": 3215.22,
+      "avg_pnl": 37.83
+    },
+    "RSI_OVERSOLD": {
+      "trades": 397,
+      "wins": 248,
+      "win_rate": 0.6247,
+      "net_pnl": 22694.5,
+      "avg_pnl": 57.16
+    },
+    "VWAP_RECLAIM": {
+      "trades": 4640,
+      "wins": 1797,
+      "win_rate": 0.3873,
+      "net_pnl": 26852.14,
+      "avg_pnl": 5.79
+    }
+  },
+  "by_regime": {
+    "UNKNOWN": {
+      "trades": 26367,
+      "wins": 11379,
+      "win_rate": 0.4316,
+      "net_pnl": 29249538.96,
+      "avg_pnl": 1109.32
+    }
+  },
+  "by_direction": {
+    "LONG": {
+      "trades": 10267,
+      "wins": 4049,
+      "win_rate": 0.3944,
+      "net_pnl": 57375.52,
+      "avg_pnl": 5.59
+    },
+    "SHORT": {
+      "trades": 16100,
+      "wins": 7330,
+      "win_rate": 0.4553,
+      "net_pnl": 29192163.44,
+      "avg_pnl": 1813.18
+    }
+  },
+  "by_exit": {
+    "TARGET": 6362,
+    "MAX_HOLD": 7098,
+    "STOP": 12907
+  }
+}

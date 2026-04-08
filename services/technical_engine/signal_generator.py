@@ -194,6 +194,7 @@ class SignalDetector:
         timeframe: str,
         enabled_strategies: set[str] | None = None,
         min_confidence: int = 40,
+        pre_computed: bool = False,
     ) -> list[Signal]:
         if len(df) < 50:   # Need enough history for reliable indicators
             return []
@@ -203,7 +204,9 @@ class SignalDetector:
             "breakout", "ema", "momentum", "volume", "volatility", "orb", "vwap"
         }
 
-        df = compute_all(df, self._cfg)
+        # Skip indicator computation if caller already pre-computed them (e.g. backtesting)
+        if not pre_computed:
+            df = compute_all(df, self._cfg)
         signals: list[Signal] = []
         latest = get_latest(df)
         price  = latest.get("close", 0)

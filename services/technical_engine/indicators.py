@@ -177,15 +177,30 @@ def _momentum(df: pd.DataFrame, cfg: IndicatorConfig) -> pd.DataFrame:
 
 # ─── Volatility ───────────────────────────────────────────────────────────────
 
+def _find_col(df_cols, prefix: str) -> str | None:
+    """Find a column by prefix — handles pandas-ta version differences in naming."""
+    for c in df_cols:
+        if c.startswith(prefix):
+            return c
+    return None
+
+
 def _volatility(df: pd.DataFrame, cfg: IndicatorConfig) -> pd.DataFrame:
-    # Bollinger Bands
+    # Bollinger Bands — column names differ across pandas-ta versions
+    # (e.g. BBU_20_2.0  vs  BBU_20_2.0_2.0 in 0.4.71b0)
     bb = ta.bbands(df["close"], length=cfg.bb_period, std=cfg.bb_std)
     if bb is not None:
-        df["bb_upper"]  = bb[f"BBU_{cfg.bb_period}_{cfg.bb_std}"]
-        df["bb_mid"]    = bb[f"BBM_{cfg.bb_period}_{cfg.bb_std}"]
-        df["bb_lower"]  = bb[f"BBL_{cfg.bb_period}_{cfg.bb_std}"]
-        df["bb_width"]  = bb[f"BBB_{cfg.bb_period}_{cfg.bb_std}"]   # (upper-lower)/mid
-        df["bb_pct"]    = bb[f"BBP_{cfg.bb_period}_{cfg.bb_std}"]   # 0=lower, 1=upper
+        prefix = f"{cfg.bb_period}_{cfg.bb_std}"
+        bbu = _find_col(bb.columns, f"BBU_{prefix}")
+        bbm = _find_col(bb.columns, f"BBM_{prefix}")
+        bbl = _find_col(bb.columns, f"BBL_{prefix}")
+        bbb = _find_col(bb.columns, f"BBB_{prefix}")
+        bbp = _find_col(bb.columns, f"BBP_{prefix}")
+        if bbu: df["bb_upper"] = bb[bbu]
+        if bbm: df["bb_mid"]   = bb[bbm]
+        if bbl: df["bb_lower"] = bb[bbl]
+        if bbb: df["bb_width"] = bb[bbb]
+        if bbp: df["bb_pct"]   = bb[bbp]
 
     # ATR (Average True Range)
     df[f"atr_{cfg.atr_period}"] = ta.atr(
@@ -252,11 +267,17 @@ def _support_resistance(df: pd.DataFrame, cfg: IndicatorConfig) -> pd.DataFrame:
 def _derived(df: pd.DataFrame, cfg: IndicatorConfig) -> pd.DataFrame:
     """Derived columns that combine multiple indicators."""
 
+    # Coerce any Python None → np.nan so comparisons don't raise TypeError
+    # (pandas-ta 0.4.71b0 can return None scalars instead of NaN in some columns)
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     # EMA stack direction:  +1 = bullish (fast > mid > slow), -1 = bearish, 0 = mixed
     if all(c in df.columns for c in [f"ema_{cfg.ema_fast}", f"ema_{cfg.ema_mid}", f"ema_{cfg.ema_slow}"]):
-        fast  = df[f"ema_{cfg.ema_fast}"]
-        mid   = df[f"ema_{cfg.ema_mid}"]
-        slow  = df[f"ema_{cfg.ema_slow}"]
+        fast  = df[f"ema_{cfg.ema_fast}"].astype(float)
+        mid   = df[f"ema_{cfg.ema_mid}"].astype(float)
+        slow  = df[f"ema_{cfg.ema_slow}"].astype(float)
         df["ema_stack"] = np.where(
             (fast > mid) & (mid > slow),  1,
             np.where((fast < mid) & (mid < slow), -1, 0),
@@ -264,14 +285,16 @@ def _derived(df: pd.DataFrame, cfg: IndicatorConfig) -> pd.DataFrame:
 
     # Price position relative to 200 EMA
     if f"ema_{cfg.ema_trend}" in df.columns:
-        df["above_200ema"] = (df["close"] > df[f"ema_{cfg.ema_trend}"]).astype(int)
+        ema_trend = df[f"ema_{cfg.ema_trend}"].astype(float)
+        df["above_200ema"] = (df["close"].astype(float) > ema_trend).astype(int)
 
     # RSI zone: 0=oversold(<30), 1=neutral, 2=overbought(>70)
     rsi_col = f"rsi_{cfg.rsi_period}"
     if rsi_col in df.columns:
+        rsi = df[rsi_col].astype(float)
         df["rsi_zone"] = np.where(
-            df[rsi_col] < 30, 0,
-            np.where(df[rsi_col] > 70, 2, 1),
+            rsi < 30, 0,
+            np.where(rsi > 70, 2, 1),
         )
 
     # MACD momentum direction: +1 = histogram growing, -1 = shrinking

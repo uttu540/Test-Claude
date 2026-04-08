@@ -126,27 +126,36 @@ class RiskEngine:
 
     async def _get_todays_pnl(self) -> float:
         today = date.today()
-        async for session in get_db_session():
-            result = await session.execute(
-                text("SELECT COALESCE(SUM(net_pnl), 0) FROM trades WHERE DATE(entry_time) = :today AND status = 'CLOSED'"),
-                {"today": today},
-            )
-            return float(result.scalar() or 0)
+        try:
+            async for session in get_db_session():
+                result = await session.execute(
+                    text("SELECT COALESCE(SUM(net_pnl), 0) FROM trades WHERE DATE(entry_time) = :today AND status = 'CLOSED'"),
+                    {"today": today},
+                )
+                return float(result.scalar() or 0)
+        except Exception:
+            pass
         return 0.0
 
     async def _get_open_count(self) -> int:
-        async for session in get_db_session():
-            result = await session.execute(
-                text("SELECT COUNT(*) FROM trades WHERE status = 'OPEN'")
-            )
-            return int(result.scalar() or 0)
+        try:
+            async for session in get_db_session():
+                result = await session.execute(
+                    text("SELECT COUNT(*) FROM trades WHERE status = 'OPEN'")
+                )
+                return int(result.scalar() or 0)
+        except Exception:
+            pass
         return 0
 
     async def _has_open_position(self, symbol: str) -> bool:
-        async for session in get_db_session():
-            result = await session.execute(
-                text("SELECT COUNT(*) FROM trades WHERE trading_symbol = :sym AND status = 'OPEN'"),
-                {"sym": symbol},
-            )
-            return int(result.scalar() or 0) > 0
+        try:
+            async for session in get_db_session():
+                result = await session.execute(
+                    text("SELECT COUNT(*) FROM trades WHERE trading_symbol = :sym AND status = 'OPEN'"),
+                    {"sym": symbol},
+                )
+                return int(result.scalar() or 0) > 0
+        except Exception:
+            pass
         return False
