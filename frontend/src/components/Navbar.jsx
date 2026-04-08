@@ -129,6 +129,7 @@ export default function Navbar({ wsStatus }) {
             { to: '/trades',     label: 'Trades',    end: false },
             { to: '/pnl',        label: 'P&L',       end: false },
             { to: '/changelog',  label: 'Guide',     end: false },
+            { to: '/settings',   label: 'Settings',  end: false },
           ].map(({ to, label, end }) => (
             <NavLink
               key={to}

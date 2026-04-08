@@ -107,8 +107,10 @@ async def _run_signals(symbol: str) -> None:
     """Run multi-timeframe signal detection for a symbol."""
     try:
         import pandas as pd
+        from config.bot_config import get_bot_config
 
-        engine = MultiTimeframeSignalEngine()
+        cfg = await get_bot_config()
+        engine = MultiTimeframeSignalEngine(config=cfg)
         ohlcv_by_tf: dict[str, pd.DataFrame] = {}
 
         for tf, candles in _candle_buffer.get(symbol, {}).items():
@@ -161,8 +163,9 @@ async def _run_signals(symbol: str) -> None:
                     json.dumps(sig.to_dict()),
                 )
 
-            # Execute trade if signal confidence meets threshold
-            if top.confidence >= 65:
+            # Execute trade if signal confidence meets threshold (reads from live config)
+            confidence_threshold = cfg.get("confidence_threshold", 65)
+            if top.confidence >= confidence_threshold:
                 executor = TradeExecutor()
                 await executor.execute(top)
 

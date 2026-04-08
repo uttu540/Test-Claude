@@ -128,11 +128,26 @@ class RegimeFilter:
     Gates signals by current market regime before they reach the AI layer.
     Removes signals whose strategy type doesn't suit the current conditions,
     and caps confidence in high-risk regimes.
+
+    Accepts an optional config dict (from bot_config) — if present, uses the
+    configured allowed-signals list and confidence cap instead of hardcoded defaults.
     """
 
+    def __init__(self, config: dict | None = None):
+        self._config = config or {}
+
     def apply(self, signals: list[Signal], regime: str) -> list[Signal]:
-        allowed = _REGIME_ALLOWED.get(regime)
-        cap     = _REGIME_CONFIDENCE_CAP.get(regime, 100)
+        # Allowed signals: config override → hardcoded default → None (allow all)
+        cfg_sig_key = f"regime_{regime.lower()}_signals"
+        cfg_sig_val = self._config.get(cfg_sig_key)
+        if cfg_sig_val is not None:
+            allowed = set(cfg_sig_val.split(",")) if cfg_sig_val else None
+        else:
+            allowed = _REGIME_ALLOWED.get(regime)
+
+        # Confidence cap: config override → hardcoded default
+        cfg_cap_key = f"regime_cap_{regime.lower()}"
+        cap = int(self._config.get(cfg_cap_key, _REGIME_CONFIDENCE_CAP.get(regime, 100)))
 
         filtered: list[Signal] = []
         for sig in signals:
@@ -172,25 +187,37 @@ class SignalDetector:
     def __init__(self, cfg: IndicatorConfig = IndicatorConfig()):
         self._cfg = cfg
 
-    def detect(self, df: pd.DataFrame, symbol: str, timeframe: str) -> list[Signal]:
+    def detect(
+        self,
+        df: pd.DataFrame,
+        symbol: str,
+        timeframe: str,
+        enabled_strategies: set[str] | None = None,
+        min_confidence: int = 40,
+    ) -> list[Signal]:
         if len(df) < 50:   # Need enough history for reliable indicators
             return []
+
+        # Default: all strategies enabled
+        enabled = enabled_strategies or {
+            "breakout", "ema", "momentum", "volume", "volatility", "orb", "vwap"
+        }
 
         df = compute_all(df, self._cfg)
         signals: list[Signal] = []
         latest = get_latest(df)
         price  = latest.get("close", 0)
 
-        signals += self._breakout_signals(df, symbol, timeframe, price, latest)
-        signals += self._ema_signals(df, symbol, timeframe, price, latest)
-        signals += self._momentum_signals(df, symbol, timeframe, price, latest)
-        signals += self._volume_signals(df, symbol, timeframe, price, latest)
-        signals += self._volatility_signals(df, symbol, timeframe, price, latest)
-        signals += self._orb_signals(df, symbol, timeframe, price, latest)
-        signals += self._vwap_signals(df, symbol, timeframe, price, latest)
+        if "breakout"   in enabled: signals += self._breakout_signals(df, symbol, timeframe, price, latest)
+        if "ema"        in enabled: signals += self._ema_signals(df, symbol, timeframe, price, latest)
+        if "momentum"   in enabled: signals += self._momentum_signals(df, symbol, timeframe, price, latest)
+        if "volume"     in enabled: signals += self._volume_signals(df, symbol, timeframe, price, latest)
+        if "volatility" in enabled: signals += self._volatility_signals(df, symbol, timeframe, price, latest)
+        if "orb"        in enabled: signals += self._orb_signals(df, symbol, timeframe, price, latest)
+        if "vwap"       in enabled: signals += self._vwap_signals(df, symbol, timeframe, price, latest)
 
-        # Filter to only signals with confidence >= 40
-        signals = [s for s in signals if s.confidence >= 40]
+        # Filter to only signals above the minimum confidence threshold
+        signals = [s for s in signals if s.confidence >= min_confidence]
 
         if signals:
             log.debug(
@@ -615,9 +642,13 @@ class MultiTimeframeSignalEngine:
     Runs signal detection across multiple timeframes for a single symbol.
     Computes a confluence score: signals aligned across timeframes score higher.
     Applies RegimeFilter before returning — only regime-appropriate signals pass.
+
+    Accepts an optional config dict (from bot_config) so all parameters can be
+    changed at runtime via the dashboard without restarting the bot.
     """
 
-    TIMEFRAME_WEIGHTS = {
+    # Default weights — overridden per-instance when config is provided
+    _DEFAULT_TF_WEIGHTS = {
         "1min":  0.5,
         "5min":  1.0,
         "15min": 1.5,
@@ -625,9 +656,42 @@ class MultiTimeframeSignalEngine:
         "1day":  3.0,
     }
 
-    def __init__(self):
-        self._detector = SignalDetector()
-        self._filter   = RegimeFilter()
+    def __init__(self, config: dict | None = None):
+        self._config = config or {}
+
+        # Build IndicatorConfig from config, falling back to defaults
+        from services.technical_engine.indicators import IndicatorConfig
+        ind_cfg = IndicatorConfig(
+            ema_fast          = int(self._config.get("ema_fast",          9)),
+            ema_mid           = int(self._config.get("ema_mid",           21)),
+            ema_slow          = int(self._config.get("ema_slow",          50)),
+            ema_trend         = int(self._config.get("ema_trend",         200)),
+            rsi_period        = int(self._config.get("rsi_period",        14)),
+            macd_fast         = int(self._config.get("macd_fast",         12)),
+            macd_slow         = int(self._config.get("macd_slow",         26)),
+            macd_signal       = int(self._config.get("macd_signal_period", 9)),
+            bb_period         = int(self._config.get("bb_period",         20)),
+            bb_std            = float(self._config.get("bb_std",          2.0)),
+            atr_period        = int(self._config.get("atr_period",        14)),
+        )
+
+        self._detector = SignalDetector(cfg=ind_cfg)
+        self._filter   = RegimeFilter(config=self._config)
+
+    @property
+    def _timeframe_weights(self) -> dict[str, float]:
+        return {
+            "1min":  float(self._config.get("tw_1min",  0.5)),
+            "5min":  float(self._config.get("tw_5min",  1.0)),
+            "15min": float(self._config.get("tw_15min", 1.5)),
+            "1hr":   float(self._config.get("tw_1hr",   2.0)),
+            "1day":  float(self._config.get("tw_1day",  3.0)),
+        }
+
+    @property
+    def _enabled_strategies(self) -> set[str]:
+        names = ["breakout", "ema", "momentum", "volume", "volatility", "orb", "vwap"]
+        return {n for n in names if self._config.get(f"strategy_{n}", True)}
 
     def analyse(
         self,
@@ -640,16 +704,21 @@ class MultiTimeframeSignalEngine:
         with confidence scores adjusted for multi-timeframe alignment.
         Applies regime filter: removes signals unsuitable for current market conditions.
         """
+        min_conf  = int(self._config.get("signal_min_confidence", 40))
+        enabled   = self._enabled_strategies
         all_signals: list[Signal] = []
         directions_by_tf: dict[str, Direction] = {}
 
         for tf, df in ohlcv_by_tf.items():
             if df is None or df.empty:
                 continue
-            signals = self._detector.detect(df, symbol, tf)
+            signals = self._detector.detect(
+                df, symbol, tf,
+                enabled_strategies=enabled,
+                min_confidence=min_conf,
+            )
             all_signals.extend(signals)
             if signals:
-                # Dominant direction for this timeframe
                 bull = sum(1 for s in signals if s.direction == Direction.BULLISH)
                 bear = sum(1 for s in signals if s.direction == Direction.BEARISH)
                 directions_by_tf[tf] = Direction.BULLISH if bull > bear else Direction.BEARISH
@@ -669,6 +738,7 @@ class MultiTimeframeSignalEngine:
         directions: dict[str, Direction],
     ) -> list[Signal]:
         higher_tfs = ["1day", "1hr", "15min"]
+        weights    = self._timeframe_weights
 
         for signal in signals:
             aligned_weight = 0.0
@@ -677,14 +747,13 @@ class MultiTimeframeSignalEngine:
             for htf in higher_tfs:
                 if htf == signal.timeframe or htf not in directions:
                     continue
-                w = self.TIMEFRAME_WEIGHTS.get(htf, 1.0)
+                w = weights.get(htf, 1.0)
                 total_weight += w
                 if directions[htf] == signal.direction:
                     aligned_weight += w
 
             if total_weight > 0:
                 confluence_ratio = aligned_weight / total_weight
-                # Boost up to +20 points for full alignment
                 boost = int(confluence_ratio * 20)
                 signal.confidence = min(signal.confidence + boost, 100)
 

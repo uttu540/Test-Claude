@@ -334,6 +334,29 @@ async def get_bot_status() -> dict:
     }
 
 
+# ── Routes: Config ────────────────────────────────────────────────────────────
+
+@app.get("/api/config")
+async def get_config() -> dict:
+    """Return the current bot configuration (merged defaults + Redis overrides)."""
+    from config.bot_config import get_bot_config
+    return await get_bot_config()
+
+
+@app.post("/api/config")
+async def update_config(updates: dict) -> dict:
+    """Merge updates into the bot config and persist to Redis. Returns full config."""
+    from config.bot_config import set_bot_config
+    return await set_bot_config(updates)
+
+
+@app.get("/api/config/schema")
+async def get_config_schema() -> dict:
+    """Return the schema for all config parameters (types, ranges, labels, groups)."""
+    from config.bot_config import get_config_schema
+    return get_config_schema()
+
+
 # ── Routes: Controls ──────────────────────────────────────────────────────────
 
 @app.post("/api/bot/square-off")

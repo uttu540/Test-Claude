@@ -3,6 +3,12 @@
         dev paper semi-auto live test \
         start start-dev start-paper start-semi-auto start-live setup
 
+# ─── Venv paths (no manual activation needed) ─────────────────────────────────
+PYTHON  = venv/bin/python3
+PIP     = venv/bin/pip
+HONCHO  = venv/bin/honcho
+ALEMBIC = venv/bin/alembic
+
 # ─── Default ──────────────────────────────────────────────────────────────────
 help:
 	@echo ""
@@ -51,39 +57,43 @@ clean:
 
 # ─── Python ───────────────────────────────────────────────────────────────────
 install:
-	pip3.12 install -r requirements.txt
+	$(PIP) install --upgrade setuptools
+	$(PIP) install -r requirements.txt
 
 playwright:
-	playwright install chromium
+	$(PYTHON) -m playwright install chromium
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 db-init:
-	alembic upgrade head
+	$(ALEMBIC) upgrade head
 	@echo "✅ Database schema created"
 
 db-upgrade:
-	alembic upgrade head
+	$(ALEMBIC) upgrade head
 
 db-downgrade:
-	alembic downgrade -1
+	$(ALEMBIC) downgrade -1
 
 db-history:
-	alembic history --verbose
+	$(ALEMBIC) history --verbose
 
 db-stamp:
-	alembic stamp 001
+	$(ALEMBIC) stamp 001
 	@echo "✅ Existing DB stamped at migration 001 — run 'make db-upgrade' to apply newer migrations"
 
 # ─── First-time setup ─────────────────────────────────────────────────────────
 setup:
+	@echo "==> Creating virtual environment..."
+	python3 -m venv venv
 	@echo "==> Installing Python dependencies..."
-	pip3.12 install -r requirements.txt
+	venv/bin/pip install --upgrade setuptools pip
+	venv/bin/pip install -r requirements.txt
 	@echo "==> Starting Docker services..."
 	docker compose up -d
 	@echo "==> Waiting for DB to be ready..."
 	@sleep 3
 	@echo "==> Running database migrations..."
-	alembic upgrade head
+	venv/bin/alembic upgrade head
 	@echo "==> Installing frontend dependencies..."
 	cd frontend && npm install
 	@echo ""
@@ -94,52 +104,56 @@ setup:
 
 # ─── One-command start (bot + API + frontend via honcho) ──────────────────────
 # honcho reads Procfile and streams all three processes with colour prefixes.
-# Install: pip install honcho  (already in requirements.txt)
+# venv is used automatically — no need to activate it manually.
 
 start: start-dev
 
 start-dev: _check-env
 	@echo "==> Starting in DEVELOPMENT mode (mock feed, paper orders)..."
-	APP_ENV=development honcho start
+	APP_ENV=development $(HONCHO) start
 
 start-paper: _check-env
 	@echo "==> Starting in PAPER mode (real feed, simulated orders)..."
-	APP_ENV=paper honcho start
+	APP_ENV=paper $(HONCHO) start
 
 start-semi-auto: _check-env
-	@echo "🟣 Starting in SEMI-AUTO mode — Telegram approval required per trade"
+	@echo "==> Starting in SEMI-AUTO mode — Telegram approval required per trade"
 	@echo "   Ensure TELEGRAM_BOT_TOKEN and TELEGRAM_AUTHORIZED_IDS are set."
-	APP_ENV=semi-auto honcho start
+	APP_ENV=semi-auto $(HONCHO) start
 
 start-live: _check-env
 	@echo "⚠️  Starting in LIVE mode — real money at risk!"
 	@read -p "Type 'yes' to confirm: " confirm; \
-	if [ "$$confirm" = "yes" ]; then APP_ENV=live honcho start; fi
+	if [ "$$confirm" = "yes" ]; then APP_ENV=live $(HONCHO) start; fi
 
 # ─── Internal: pre-flight checks ──────────────────────────────────────────────
 _check-env:
+	@if [ ! -f venv/bin/python3 ]; then \
+		echo "❌ venv not found. Run: make setup"; \
+		exit 1; \
+	fi
 	@if [ ! -f .env ]; then \
 		echo "❌ .env file not found. Run: cp .env.example .env"; \
 		exit 1; \
 	fi
 	@docker compose ps --services --filter status=running | grep -q db || \
 		(echo "==> Docker not running, starting now..." && docker compose up -d && sleep 3)
-	@alembic upgrade head 2>/dev/null || true
+	@$(ALEMBIC) upgrade head 2>/dev/null || true
 
 # ─── Bot only (single process, useful for debugging) ──────────────────────────
 dev:
-	APP_ENV=development python3.12 main.py
+	APP_ENV=development $(PYTHON) main.py
 
 paper:
-	APP_ENV=paper python3.12 main.py
+	APP_ENV=paper $(PYTHON) main.py
 
 semi-auto:
-	APP_ENV=semi-auto python3.12 main.py
+	APP_ENV=semi-auto $(PYTHON) main.py
 
 live:
 	@echo "⚠️  Starting in LIVE mode — real money at risk!"
 	@read -p "Type 'yes' to confirm: " confirm; \
-	if [ "$$confirm" = "yes" ]; then APP_ENV=live python3.12 main.py; fi
+	if [ "$$confirm" = "yes" ]; then APP_ENV=live $(PYTHON) main.py; fi
 
 test:
-	python3.12 -m pytest tests/ -v
+	$(PYTHON) -m pytest tests/ -v

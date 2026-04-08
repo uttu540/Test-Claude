@@ -114,6 +114,20 @@ export async function fetchPnLHistory(days = 30) {
   return request(`/api/pnl/history?days=${days}`)
 }
 
+// ─── Config ──────────────────────────────────────────────────────────────────
+
+export async function fetchConfig() {
+  return request('/api/config')
+}
+
+export async function updateConfig(updates) {
+  return request('/api/config', { method: 'POST', body: JSON.stringify(updates) })
+}
+
+export async function fetchConfigSchema() {
+  return request('/api/config/schema')
+}
+
 // ─── Bot Control ─────────────────────────────────────────────────────────────
 
 export async function squareOffAll() {

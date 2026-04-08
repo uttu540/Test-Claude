@@ -7,6 +7,7 @@ import PnLHistory from './pages/PnLHistory'
 import Changelog from './pages/Changelog'
 import Positions from './pages/Positions'
 import Signals from './pages/Signals'
+import Settings from './pages/Settings'
 
 /**
  * Inner app — rendered inside BrowserRouter so hooks can use router context.
@@ -27,6 +28,7 @@ function AppInner() {
           <Route path="/trades"     element={<Trades />} />
           <Route path="/pnl"        element={<PnLHistory />} />
           <Route path="/changelog"  element={<Changelog />} />
+          <Route path="/settings"   element={<Settings />} />
           <Route
             path="*"
             element={
