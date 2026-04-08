@@ -21,12 +21,12 @@
   }
 
   ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 5px;
+    height: 5px;
   }
 
   ::-webkit-scrollbar-track {
-    background: #0f0f0f;
+    background: transparent;
   }
 
   ::-webkit-scrollbar-thumb {
@@ -39,17 +39,21 @@
   }
 
   ::selection {
-    background: rgba(59, 130, 246, 0.3);
+    background: rgba(59, 130, 246, 0.25);
   }
 }
 
 @layer components {
   .card {
     @apply bg-bg-card border border-border rounded-xl;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.03);
   }
 
   .card-glass {
-    @apply rounded-xl border border-white/5 bg-white/[0.03] backdrop-blur-sm;
+    @apply rounded-xl;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(8px);
   }
 
   .table-row-hover {
@@ -61,29 +65,36 @@
   }
 
   .btn {
-    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-offset-bg-primary disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer;
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium
+      transition-all duration-150 cursor-pointer
+      focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-offset-bg-primary
+      disabled:opacity-50 disabled:cursor-not-allowed;
   }
 
   .btn-danger {
-    @apply btn bg-red-trade/10 text-red-trade border border-red-trade/30 hover:bg-red-trade hover:text-white focus:ring-red-trade;
+    @apply btn bg-red-trade/10 text-red-trade border border-red-trade/30
+      hover:bg-red-trade hover:text-white focus:ring-red-trade;
   }
 
   .btn-primary {
-    @apply btn bg-blue-trade/10 text-blue-trade border border-blue-trade/30 hover:bg-blue-trade hover:text-white focus:ring-blue-trade;
+    @apply btn bg-blue-trade/10 text-blue-trade border border-blue-trade/30
+      hover:bg-blue-trade hover:text-white focus:ring-blue-trade;
   }
 
   .th {
-    @apply text-left text-2xs font-semibold text-text-muted uppercase tracking-widest px-3 py-2.5 border-b border-border;
+    @apply text-left text-2xs font-semibold text-text-muted uppercase tracking-wider
+      px-3 py-3 border-b border-border bg-bg-hover/40;
   }
 
   .td {
-    @apply px-3 py-2.5 text-sm border-b border-border/40;
+    @apply px-3 py-2.5 text-sm border-b border-border/30;
   }
 
   .skeleton {
     @apply animate-pulse bg-bg-hover rounded-md;
   }
 
+  /* Page-level layout helpers */
   .page-header {
     @apply flex items-center justify-between mb-5;
   }
@@ -129,25 +140,9 @@
   .tab-inactive {
     @apply text-text-muted hover:text-text-secondary border-b-2 border-transparent;
   }
-
-  .stat-accent-green {
-    border-left: 3px solid #22c55e;
-  }
-
-  .stat-accent-red {
-    border-left: 3px solid #ef4444;
-  }
-
-  .stat-accent-blue {
-    border-left: 3px solid #3b82f6;
-  }
-
-  .stat-accent-neutral {
-    border-left: 3px solid #2a2a2a;
-  }
 }
 
-/* Recharts custom overrides */
+/* ── Recharts dark-theme overrides ────────────────────────────────────────── */
 .recharts-tooltip-wrapper {
   outline: none !important;
 }
@@ -155,9 +150,10 @@
 .recharts-default-tooltip {
   background: #1a1a1a !important;
   border: 1px solid #2a2a2a !important;
-  border-radius: 6px !important;
+  border-radius: 8px !important;
   font-family: 'JetBrains Mono', monospace !important;
   font-size: 12px !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5) !important;
 }
 
 .recharts-tooltip-label {

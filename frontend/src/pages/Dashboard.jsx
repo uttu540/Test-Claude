@@ -200,12 +200,12 @@ export default function Dashboard() {
   const pnlSign    = netPnl >= 0 ? '+' : ''
 
   return (
-    <div className="p-5 space-y-5 animate-fade-in max-w-screen-2xl mx-auto">
+    <div className="p-5 space-y-4 animate-fade-in max-w-screen-2xl mx-auto">
 
       {/* ── Top bar: regime + refresh ── */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <h1 className="text-base font-semibold text-text-primary">Dashboard</h1>
+          <h1 className="page-title">Dashboard</h1>
           <RegimeBadge regime={regime} loading={pnlLoading} />
         </div>
         <button
@@ -272,17 +272,17 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* ── Daily loss bar + sparkline ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+      {/* ── Sparkline + loss bar ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-3">
+        <div className="lg:col-span-3">
+          <PnLSparkline data={pnlSeries} loading={pnlLoading} />
+        </div>
         <div className="lg:col-span-2">
           <PnLBar
             used={lossUsed}
             limit={lossLimit}
             loading={pnlLoading}
           />
-        </div>
-        <div>
-          <PnLSparkline data={pnlSeries} loading={pnlLoading} />
         </div>
       </div>
 

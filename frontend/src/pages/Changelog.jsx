@@ -8,11 +8,11 @@ const PHASES = [
     date: 'Apr 2026',
     status: 'done',
     features: [
-      'Semi-auto mode — trades require Telegram ✅/❌ before execution',
-      'Configurable approval timeout (default 60s, auto-rejects on expiry)',
+      'Semi-auto mode — every trade requires Telegram ✅/❌ before execution',
+      'Configurable timeout (default 60 s) — auto-rejects on expiry',
       'Inline keyboard callbacks via python-telegram-bot v21',
-      'Authorization list: only whitelisted Telegram user IDs can approve',
-      'Approval message auto-edits to show outcome (approved / rejected / expired)',
+      'TELEGRAM_AUTHORIZED_IDS whitelist — only listed users can approve',
+      'Approval message auto-edits to show final outcome',
     ],
     env: 'APP_ENV=semi-auto',
   },
@@ -22,11 +22,10 @@ const PHASES = [
     date: 'Apr 2026',
     status: 'done',
     features: [
-      'TradeLifecycleManager monitors open positions every 5s',
-      'Detects SL hits, target hits, and intraday time exits (3:12 PM)',
+      'TradeLifecycleManager monitors open positions every 5 s',
+      'Detects SL hits, target hits, and time exits (3:12 PM IST)',
       'Calculates gross P&L, brokerage, STT, GST, exchange charges, SEBI charges, stamp duty',
-      'Daily P&L aggregation stored to daily_pnl table',
-      'Kill switch: halts new orders if daily loss limit breached',
+      'Kill switch: halts new orders once daily loss limit is breached',
     ],
     env: null,
   },
@@ -40,7 +39,6 @@ const PHASES = [
       'ORB (Opening Range Breakout) signal on 15-min candle closes',
       'VWAP cross signal with volume confirmation',
       'Multi-timeframe alignment scoring',
-      'Backtesting framework with walk-forward validation',
     ],
     env: null,
   },
@@ -52,7 +50,7 @@ const PHASES = [
     features: [
       'RiskEngine: position sizing based on ATR, max 2% capital per trade',
       'Daily loss limit guard — halts trading after limit hit',
-      'Claude AI strategy evaluation before each trade',
+      'Claude AI validates each signal before order placement',
       'AI confidence score and reasoning stored with every trade',
       'Max 8 concurrent open positions enforced',
     ],
@@ -65,10 +63,10 @@ const PHASES = [
     status: 'done',
     features: [
       'Zerodha Kite Connect integration (WebSocket + REST)',
-      'PostgreSQL schema with Alembic migrations',
+      'PostgreSQL + TimescaleDB schema with Alembic migrations',
       'Redis for real-time tick cache and regime state',
       'FastAPI REST + WebSocket dashboard API',
-      'Telegram notifications for all trade events',
+      'Multi-user Telegram notifications for all trade events',
       'Paper trading mode with slippage simulation',
     ],
     env: null,
@@ -81,7 +79,7 @@ const PHASES = [
     features: [
       'GrowwOrderManager implementing BrokerInterface ABC',
       'One-line switch in broker_router.py',
-      'GROWW_API_KEY / GROWW_API_SECRET config stubs already in place',
+      'GROWW_API_KEY / GROWW_API_SECRET config already stubbed',
     ],
     env: null,
   },
@@ -92,72 +90,87 @@ const MODES = [
     key: 'development',
     label: 'DEV',
     color: 'text-yellow-trade border-yellow-trade/30 bg-yellow-trade/10',
-    cmd: 'make dev',
-    desc: 'Paper orders, mock market feed, all Telegram alerts enabled. Safe for local testing.',
+    cmd: 'make start',
+    desc: 'Mock market feed, paper orders. No API key needed. Safe for local testing.',
   },
   {
     key: 'paper',
     label: 'PAPER',
     color: 'text-cyan-trade border-cyan-trade/30 bg-cyan-trade/10',
-    cmd: 'make paper',
-    desc: 'Paper orders with real Zerodha WebSocket feed. Validates signals against live data without risking capital.',
+    cmd: 'make start-paper',
+    desc: 'Real Zerodha WebSocket feed, simulated orders. Validates signals against live data without risking capital.',
   },
   {
     key: 'semi-auto',
     label: 'SEMI-AUTO',
     color: 'text-purple-400 border-purple-500/30 bg-purple-500/10',
-    cmd: 'make semi-auto',
-    desc: 'Real orders on Zerodha, but every trade requires your Telegram ✅ before execution. Requires TELEGRAM_AUTHORIZED_IDS.',
+    cmd: 'make start-semi-auto',
+    desc: 'Real orders on Zerodha, but every trade requires Telegram ✅ before execution. Requires TELEGRAM_AUTHORIZED_IDS.',
   },
   {
     key: 'live',
     label: 'LIVE',
     color: 'text-red-trade border-red-trade/30 bg-red-trade/10',
-    cmd: 'make live',
-    desc: 'Fully automated. Real money, real orders, no human gate. Confirmation prompt in terminal.',
+    cmd: 'make start-live',
+    desc: 'Fully automated live trading. Real money, no human gate. Terminal confirmation required.',
   },
 ]
 
 const QUICK_START = [
-  { step: '1', title: 'Start infrastructure', cmd: 'make up', note: 'Starts PostgreSQL + Redis via Docker.' },
-  { step: '2', title: 'Install dependencies', cmd: 'make install', note: 'Installs Python packages from requirements.txt.' },
-  { step: '3', title: 'Create .env file', cmd: 'cp .env.example .env', note: 'Fill in KITE_API_KEY, TELEGRAM_BOT_TOKEN, etc.' },
-  { step: '4', title: 'Run DB migrations', cmd: 'make db-upgrade', note: 'Applies Alembic migrations. Use db-stamp first on existing DBs.' },
-  { step: '5', title: 'Start the bot', cmd: 'make paper', note: 'Run in paper mode first. Switch to live when ready.' },
-  { step: '6', title: 'Start the dashboard API', cmd: 'uvicorn api.main:app --port 8000 --reload', note: 'Runs alongside the bot.' },
-  { step: '7', title: 'Start the frontend', cmd: 'cd frontend && npm run dev', note: 'Opens at http://localhost:5173' },
+  {
+    step: '1',
+    title: 'Configure environment',
+    cmd: 'cp .env.example .env',
+    note: 'Fill in KITE_API_KEY, ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN and other credentials.',
+  },
+  {
+    step: '2',
+    title: 'First-time setup',
+    cmd: 'source venv/bin/activate && make setup',
+    note: 'Installs Python deps, starts Docker (PostgreSQL + Redis), runs DB migrations, installs frontend npm packages.',
+  },
+  {
+    step: '3',
+    title: 'Start the bot',
+    cmd: 'make start',
+    note: 'Starts bot + API + dashboard together via honcho. Dashboard at http://localhost:5173',
+  },
 ]
 
 const ENV_VARS = [
-  { key: 'APP_ENV', values: 'development | paper | semi-auto | live', desc: 'Sets the running mode' },
+  { key: 'APP_ENV', values: 'development | paper | semi-auto | live', desc: 'Sets the running mode (set automatically by make start-*)' },
   { key: 'KITE_API_KEY', values: 'string', desc: 'Zerodha API key' },
   { key: 'KITE_API_SECRET', values: 'string', desc: 'Zerodha API secret' },
   { key: 'KITE_USER_ID', values: 'string', desc: 'Zerodha client ID' },
-  { key: 'KITE_PASSWORD', values: 'string', desc: 'Zerodha password (for auto-login)' },
-  { key: 'KITE_TOTP_SECRET', values: 'string', desc: '2FA TOTP secret (base32)' },
-  { key: 'ANTHROPIC_API_KEY', values: 'string', desc: 'Claude AI API key' },
-  { key: 'TELEGRAM_BOT_TOKEN', values: 'string', desc: 'Telegram bot token from @BotFather' },
-  { key: 'TELEGRAM_CHAT_ID', values: 'string', desc: 'Your Telegram chat/group ID' },
-  { key: 'TELEGRAM_AUTHORIZED_IDS', values: '123,456', desc: 'Comma-separated user IDs that can approve semi-auto trades' },
-  { key: 'APPROVAL_TIMEOUT_SECS', values: '60', desc: 'Seconds to wait for trade approval before auto-reject' },
-  { key: 'TOTAL_CAPITAL', values: '100000', desc: 'Capital in INR (used for position sizing)' },
-  { key: 'DAILY_LOSS_LIMIT_PCT', values: '2.0', desc: 'Daily loss % at which trading halts (default 2%)' },
-  { key: 'MAX_RISK_PER_TRADE_PCT', values: '2.0', desc: 'Max capital % risked per trade' },
+  { key: 'KITE_PASSWORD', values: 'string', desc: 'Zerodha password (for automated daily re-auth)' },
+  { key: 'KITE_TOTP_SECRET', values: 'string', desc: '2FA TOTP secret (base32) for automated login' },
+  { key: 'ANTHROPIC_API_KEY', values: 'string', desc: 'Claude AI API key for signal validation' },
+  { key: 'CLAUDE_MODEL', values: 'claude-opus-4-6', desc: 'Claude model to use (default: claude-opus-4-6)' },
+  { key: 'TELEGRAM_BOT_TOKEN', values: 'string', desc: 'Bot token from @BotFather' },
+  { key: 'TELEGRAM_CHAT_ID', values: 'integer', desc: 'Single chat ID for notifications (legacy)' },
+  { key: 'TELEGRAM_CHAT_IDS', values: '111,222,-100333', desc: 'Comma-separated IDs for multi-user notifications (overrides TELEGRAM_CHAT_ID)' },
+  { key: 'TELEGRAM_AUTHORIZED_IDS', values: '123,456', desc: 'User IDs allowed to approve trades and use bot commands' },
+  { key: 'APPROVAL_TIMEOUT_SECS', values: '60', desc: 'Seconds to wait for approval before auto-reject' },
+  { key: 'TOTAL_CAPITAL', values: '100000', desc: 'Capital in INR used for position sizing' },
+  { key: 'DAILY_LOSS_LIMIT_PCT', values: '2.0', desc: 'Daily loss % at which all trading halts (default 2% = ₹2,000 on ₹1L capital)' },
+  { key: 'MAX_RISK_PER_TRADE_PCT', values: '2.0', desc: 'Max capital % risked per individual trade' },
+  { key: 'MAX_OPEN_POSITIONS', values: '8', desc: 'Maximum concurrent open positions' },
+  { key: 'NEWS_API_KEY', values: 'string', desc: 'NewsAPI.org key for sentiment analysis (optional)' },
 ]
 
 // ─── Components ───────────────────────────────────────────────────────────────
 
 function PhaseCard({ data }) {
-  const isDone    = data.status === 'done'
-  const isPending = data.status === 'pending'
+  const isDone = data.status === 'done'
 
   return (
     <div className={`card p-4 border-l-2 ${isDone ? 'border-l-green-trade/60' : 'border-l-border'}`}>
       <div className="flex items-start justify-between gap-3 mb-3">
         <div className="flex items-center gap-2.5">
           <span className={`font-mono text-xs px-1.5 py-0.5 rounded border font-semibold ${
-            isDone ? 'bg-green-trade/10 text-green-trade border-green-trade/30' :
-            'bg-bg-hover text-text-muted border-border'
+            isDone
+              ? 'bg-green-trade/10 text-green-trade border-green-trade/30'
+              : 'bg-bg-hover text-text-muted border-border'
           }`}>
             Phase {data.phase}
           </span>
@@ -174,7 +187,7 @@ function PhaseCard({ data }) {
           </span>
         </div>
       </div>
-      <ul className="space-y-1">
+      <ul className="space-y-1.5">
         {data.features.map((f, i) => (
           <li key={i} className="flex items-start gap-2 text-xs text-text-secondary">
             <span className={`mt-0.5 shrink-0 ${isDone ? 'text-green-trade' : 'text-border'}`}>
@@ -191,7 +204,7 @@ function PhaseCard({ data }) {
 function Section({ title, children }) {
   return (
     <section className="space-y-3">
-      <h2 className="text-xs font-semibold text-text-muted uppercase tracking-widest border-b border-border pb-2">
+      <h2 className="text-xs font-semibold text-text-muted uppercase tracking-widest border-b border-border pb-2.5">
         {title}
       </h2>
       {children}
@@ -207,27 +220,35 @@ export default function Changelog() {
 
       {/* Header */}
       <div>
-        <h1 className="text-base font-semibold text-text-primary mb-0.5">Changelog &amp; Guide</h1>
-        <p className="text-sm text-text-muted">Feature history, quick-start, and configuration reference.</p>
+        <h1 className="text-base font-semibold text-text-primary mb-0.5">Guide &amp; Changelog</h1>
+        <p className="text-sm text-text-muted">Quick-start, mode reference, environment variables, and feature history.</p>
       </div>
 
       {/* Quick Start */}
       <Section title="Quick Start">
-        <div className="space-y-2">
+        <div className="space-y-3">
           {QUICK_START.map((s) => (
             <div key={s.step} className="flex items-start gap-3">
               <span className="w-5 h-5 rounded-full bg-blue-trade/10 border border-blue-trade/30 text-blue-trade text-2xs font-mono font-bold flex items-center justify-center shrink-0 mt-0.5">
                 {s.step}
               </span>
               <div className="flex-1 min-w-0">
-                <div className="text-sm text-text-primary font-medium">{s.title}</div>
-                <code className="text-2xs font-mono text-text-secondary bg-bg-hover border border-border px-2 py-0.5 rounded inline-block mt-0.5">
+                <div className="text-sm text-text-primary font-medium mb-1">{s.title}</div>
+                <code className="text-xs font-mono text-text-secondary bg-bg-hover border border-border px-2.5 py-1 rounded-md inline-block">
                   {s.cmd}
                 </code>
-                <div className="text-xs text-text-muted mt-0.5">{s.note}</div>
+                <div className="text-xs text-text-muted mt-1.5">{s.note}</div>
               </div>
             </div>
           ))}
+        </div>
+        <div className="card p-3 bg-blue-trade/5 border-blue-trade/20 mt-1">
+          <p className="text-xs text-text-secondary">
+            <span className="text-blue-trade font-medium">All three processes</span> (bot, API, dashboard) start together via honcho.
+            Dashboard → <code className="font-mono bg-bg-hover px-1 rounded text-2xs">localhost:5173</code>&nbsp;
+            API → <code className="font-mono bg-bg-hover px-1 rounded text-2xs">localhost:8000</code>&nbsp;
+            Docs → <code className="font-mono bg-bg-hover px-1 rounded text-2xs">localhost:8000/docs</code>
+          </p>
         </div>
       </Section>
 
@@ -248,7 +269,8 @@ export default function Changelog() {
         </div>
         <div className="card p-3 bg-yellow-trade/5 border-yellow-trade/20">
           <p className="text-xs text-yellow-trade">
-            <strong>Semi-auto setup:</strong> Set <code className="font-mono bg-yellow-trade/10 px-1 rounded">TELEGRAM_AUTHORIZED_IDS=your_telegram_id</code> to restrict who can approve.
+            <strong>Semi-auto setup:</strong> Set{' '}
+            <code className="font-mono bg-yellow-trade/10 px-1 rounded">TELEGRAM_AUTHORIZED_IDS=your_telegram_id</code>.
             Find your ID by messaging <code className="font-mono bg-yellow-trade/10 px-1 rounded">@userinfobot</code> on Telegram.
           </p>
         </div>
@@ -261,7 +283,9 @@ export default function Changelog() {
             .sort((a, b) => b.phase - a.phase)
             .map(p => <PhaseCard key={p.phase} data={p} />)}
         </div>
-        <h3 className="text-xs font-semibold text-text-muted uppercase tracking-widest mt-4 mb-2">Upcoming</h3>
+        <div className="mt-4 mb-2">
+          <h3 className="text-xs font-semibold text-text-muted uppercase tracking-widest">Upcoming</h3>
+        </div>
         {PHASES.filter(p => p.status === 'pending').map(p => <PhaseCard key={p.phase} data={p} />)}
       </Section>
 
@@ -308,13 +332,13 @@ export default function Changelog() {
               {[
                 ['GET',  '/api/positions',      'All currently open trades'],
                 ['GET',  '/api/trades',          'Paginated trade history (?page=1&per_page=50)'],
-                ['GET',  '/api/trades/{id}',     'Single trade detail with orders'],
+                ['GET',  '/api/trades/{id}',     'Single trade detail with all orders'],
                 ['GET',  '/api/pnl/today',       'Today\'s aggregated P&L summary'],
                 ['GET',  '/api/pnl/history',     'Daily P&L for last N days (?days=30)'],
-                ['GET',  '/api/signals/recent',  'Latest signals from Redis cache'],
-                ['GET',  '/api/bot/status',      'Bot health, mode, and stats'],
-                ['POST', '/api/bot/square-off',  'Emergency close all intraday positions'],
-                ['WS',   '/ws',                  'Live feed: signals + trade events + P&L updates'],
+                ['GET',  '/api/signals/recent',  'Latest signal per symbol from Redis cache'],
+                ['GET',  '/api/bot/status',      'Bot health, mode, capital, and today\'s stats'],
+                ['POST', '/api/bot/square-off',  'Emergency close all open intraday positions'],
+                ['WS',   '/ws',                  'Live feed: signals, position updates, P&L'],
               ].map(([method, path, desc]) => (
                 <tr key={path} className="table-row-hover">
                   <td className="td">
@@ -338,8 +362,8 @@ export default function Changelog() {
       </Section>
 
       {/* Footer */}
-      <div className="text-center py-4 text-xs text-text-muted">
-        TradeBot · Built with Zerodha Kite Connect, Claude AI, FastAPI, React
+      <div className="text-center py-4 text-xs text-text-muted border-t border-border">
+        TradeBot · Zerodha Kite Connect · Claude AI · FastAPI · React · TimescaleDB
       </div>
     </div>
   )

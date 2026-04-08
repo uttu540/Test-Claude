@@ -8,17 +8,6 @@ export function StatCardSkeleton() {
   )
 }
 
-/**
- * StatCard
- * Props:
- *   label      — string
- *   value      — string | number (already formatted)
- *   sub        — optional subtitle string
- *   trend      — 'up' | 'down' | 'neutral' (colors the value)
- *   icon       — optional JSX element
- *   accent     — optional tailwind color class for left border
- *   loading    — boolean
- */
 export default function StatCard({ label, value, sub, trend = 'neutral', icon, accent, loading }) {
   if (loading) return <StatCardSkeleton />
 
@@ -28,19 +17,23 @@ export default function StatCard({ label, value, sub, trend = 'neutral', icon, a
     neutral: 'text-text-primary',
   }[trend] || 'text-text-primary'
 
-  const borderColor = accent || (trend === 'up' ? 'border-l-green-trade' : trend === 'down' ? 'border-l-red-trade' : 'border-l-border')
+  const borderColor = accent || (
+    trend === 'up' ? 'border-l-green-trade' :
+    trend === 'down' ? 'border-l-red-trade' :
+    'border-l-border'
+  )
 
   return (
-    <div className={`card p-4 flex flex-col gap-1 border-l-2 ${borderColor}`}>
+    <div className={`card p-4 border-l-2 ${borderColor} flex flex-col gap-1`}>
       <div className="flex items-center justify-between">
-        <span className="text-xs font-medium text-text-muted uppercase tracking-widest">{label}</span>
-        {icon && <span className="text-text-muted opacity-60">{icon}</span>}
+        <span className="section-label">{label}</span>
+        {icon && <span className="text-text-muted opacity-50">{icon}</span>}
       </div>
-      <div className={`font-mono text-2xl font-semibold tracking-tight ${trendColor}`}>
+      <div className={`font-mono text-xl font-semibold tracking-tight leading-tight ${trendColor}`}>
         {value}
       </div>
       {sub && (
-        <div className="text-xs text-text-muted">{sub}</div>
+        <div className="text-2xs text-text-muted">{sub}</div>
       )}
     </div>
   )

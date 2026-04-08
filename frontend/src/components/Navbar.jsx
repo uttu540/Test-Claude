@@ -106,19 +106,22 @@ export default function Navbar({ wsStatus }) {
 
   return (
     <>
-      <nav className="sticky top-0 z-50 h-14 bg-bg-card border-b border-border flex items-center px-4 gap-4">
+      <nav className="sticky top-0 z-50 h-13 bg-bg-card border-b border-border flex items-center px-4 gap-3"
+           style={{ height: '52px' }}>
         {/* Logo */}
-        <div className="flex items-center gap-2 mr-2 shrink-0">
-          <div className="w-7 h-7 rounded bg-blue-trade/20 border border-blue-trade/30 flex items-center justify-center">
-            <span className="text-blue-trade text-xs font-bold font-mono">TB</span>
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="w-6 h-6 rounded-md bg-blue-trade/20 border border-blue-trade/30 flex items-center justify-center">
+            <span className="text-blue-trade text-2xs font-bold font-mono">TB</span>
           </div>
-          <span className="font-semibold text-sm tracking-wide text-text-primary hidden sm:block">
+          <span className="font-semibold text-sm text-text-primary hidden md:block">
             TradeBot
           </span>
         </div>
 
+        <div className="w-px h-5 bg-border shrink-0" />
+
         {/* Nav links */}
-        <div className="flex items-center gap-0.5">
+        <div className="flex items-center gap-0.5 overflow-x-auto scrollbar-none">
           {[
             { to: '/',           label: 'Dashboard', end: true  },
             { to: '/positions',  label: 'Positions', end: false },
@@ -132,7 +135,7 @@ export default function Navbar({ wsStatus }) {
               to={to}
               end={end}
               className={({ isActive }) =>
-                `px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+                `px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-colors ${
                   isActive
                     ? 'bg-blue-trade/10 text-blue-trade'
                     : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
@@ -148,43 +151,43 @@ export default function Navbar({ wsStatus }) {
         <div className="flex-1" />
 
         {/* IST Clock */}
-        <div className="hidden lg:flex flex-col items-end">
-          <span className="font-mono text-sm text-text-primary tracking-wider">{istTime}</span>
+        <div className="hidden xl:flex flex-col items-end shrink-0">
+          <span className="font-mono text-xs text-text-primary tracking-wider">{istTime}</span>
           <span className="text-2xs text-text-muted">{istDate} IST</span>
         </div>
 
-        <div className="w-px h-6 bg-border" />
+        <div className="hidden xl:block w-px h-5 bg-border" />
 
         {/* WS Status */}
         <WsStatusDot status={wsStatus} />
 
-        <div className="w-px h-6 bg-border" />
+        <div className="w-px h-5 bg-border" />
 
         {/* Mode badge */}
-        <div className={`badge ${modeConfig.bg} ${modeConfig.text} border ${modeConfig.border}`}>
+        <div className={`badge ${modeConfig.bg} ${modeConfig.text} border ${modeConfig.border} shrink-0`}>
           <span className={`w-1.5 h-1.5 rounded-full ${modeConfig.dot}`} />
-          {modeConfig.label}
+          <span className="hidden sm:inline">{modeConfig.label}</span>
         </div>
 
         {/* Capital */}
-        <div className="hidden md:flex flex-col items-end">
+        <div className="hidden lg:flex flex-col items-end shrink-0">
           <span className="text-2xs text-text-muted uppercase tracking-wide">Capital</span>
-          <span className="font-mono text-sm text-text-primary">
+          <span className="font-mono text-xs text-text-primary">
             ₹{capital.toLocaleString('en-IN')}
           </span>
         </div>
 
-        <div className="w-px h-6 bg-border" />
+        <div className="w-px h-5 bg-border shrink-0" />
 
         {/* Square Off */}
         <button
           onClick={() => setShowConfirm(true)}
-          className="btn-danger text-xs shrink-0"
+          className="btn-danger text-xs shrink-0 py-1 px-2.5"
         >
-          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
           </svg>
-          Square Off All
+          <span className="hidden sm:inline">Square Off</span>
         </button>
       </nav>
 
