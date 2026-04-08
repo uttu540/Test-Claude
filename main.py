@@ -222,10 +222,9 @@ async def job_square_off_intraday() -> None:
     if not is_trading_day():
         return
     log.warning("scheduler.square_off_intraday", time="15:12")
-    if settings.is_live:
-        from services.execution.zerodha.order_manager import OrderManager
-        om = OrderManager()
-        await om.square_off_all_intraday()
+    if settings.uses_real_broker:
+        from services.execution.broker_router import get_broker
+        await get_broker().square_off_all_intraday()
     # Close all remaining OPEN trades in DB at current market price
     closed = await get_lifecycle_manager().close_all_open_trades(reason="TIME_EXIT")
     log.info("scheduler.square_off_db_closed", count=closed)
@@ -277,6 +276,7 @@ def _print_banner() -> None:
     env_colours = {
         "development": "yellow",
         "paper":       "cyan",
+        "semi-auto":   "magenta",
         "live":        "red",
     }
     colour = env_colours.get(settings.app_env.value, "white")
@@ -325,6 +325,15 @@ async def startup() -> None:
     # 5. Trade lifecycle manager (monitors open trades, closes on SL/target hit)
     asyncio.create_task(get_lifecycle_manager().run())
 
+    # 6. Telegram approval polling (semi-auto mode only)
+    if settings.is_semi_auto:
+        from services.notifications.telegram_bot import start_approval_polling
+        app_tg = await start_approval_polling()
+        # Store on module for shutdown access
+        import main as _self
+        _self._telegram_app = app_tg
+        log.info("startup.semi_auto_polling", status="started")
+
     log.info("startup.complete", env=settings.app_env.value)
 
 
@@ -334,6 +343,13 @@ async def shutdown(scheduler: AsyncIOScheduler) -> None:
     scheduler.shutdown(wait=False)
     get_lifecycle_manager().stop()
     await get_news_service().stop()
+    # Stop Telegram approval polling if running
+    if settings.is_semi_auto:
+        import main as _self
+        tg_app = getattr(_self, "_telegram_app", None)
+        if tg_app:
+            from services.notifications.telegram_bot import stop_approval_polling
+            await stop_approval_polling(tg_app)
     await close_db()
     await close_redis()
     log.info("shutdown.complete")

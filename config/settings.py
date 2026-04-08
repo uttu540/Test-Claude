@@ -15,8 +15,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class AppEnv(str, Enum):
     DEVELOPMENT = "development"
-    PAPER = "paper"          # Paper trading: real signals, simulated orders
-    LIVE = "live"            # Real money — be careful
+    PAPER       = "paper"       # Paper trading: real signals, simulated orders
+    SEMI_AUTO   = "semi-auto"   # Human approval required before each live trade
+    LIVE        = "live"        # Full automation — real money
 
 
 class Settings(BaseSettings):
@@ -53,17 +54,22 @@ class Settings(BaseSettings):
     kite_password: str = ""
     kite_totp_secret: str = ""
 
-    # ── Groww ─────────────────────────────────────────────────────────────────
+    # ── Groww (Phase 6) ───────────────────────────────────────────────────────
     groww_api_key: str = ""
     groww_api_secret: str = ""
 
     # ── Anthropic / Claude ────────────────────────────────────────────────────
     anthropic_api_key: str = ""
-    claude_model: str = "claude-opus-4-5"
+    claude_model: str = "claude-opus-4-6"
 
     # ── Telegram ──────────────────────────────────────────────────────────────
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    # Semi-auto: comma-separated Telegram user IDs allowed to approve trades
+    # e.g. TELEGRAM_AUTHORIZED_IDS=123456789,987654321
+    telegram_authorized_ids: str = ""
+    # How long to wait for approval before auto-rejecting (seconds)
+    approval_timeout_secs: int = 60
 
     # ── News API ──────────────────────────────────────────────────────────────
     news_api_key: str = ""
@@ -74,6 +80,10 @@ class Settings(BaseSettings):
         return self.app_env == AppEnv.LIVE
 
     @property
+    def is_semi_auto(self) -> bool:
+        return self.app_env == AppEnv.SEMI_AUTO
+
+    @property
     def is_paper(self) -> bool:
         return self.app_env == AppEnv.PAPER
 
@@ -82,18 +92,30 @@ class Settings(BaseSettings):
         return self.app_env == AppEnv.DEVELOPMENT
 
     @property
+    def uses_real_broker(self) -> bool:
+        """True when orders go to a real broker (live or semi-auto)."""
+        return self.app_env in (AppEnv.LIVE, AppEnv.SEMI_AUTO)
+
+    @property
+    def uses_simulated_broker(self) -> bool:
+        """True when orders are simulated (dev or paper)."""
+        return self.app_env in (AppEnv.DEVELOPMENT, AppEnv.PAPER)
+
+    @property
+    def authorized_telegram_ids(self) -> list[str]:
+        """Parsed list of Telegram user IDs allowed to approve trades."""
+        return [x.strip() for x in self.telegram_authorized_ids.split(",") if x.strip()]
+
+    @property
     def max_risk_per_trade_inr(self) -> float:
-        """Max INR amount to risk per trade."""
         return self.total_capital * (self.max_risk_per_trade_pct / 100)
 
     @property
     def daily_loss_limit_inr(self) -> float:
-        """Halt trading if this INR loss is hit in a day."""
         return self.total_capital * (self.daily_loss_limit_pct / 100)
 
     @property
     def max_position_size_inr(self) -> float:
-        """Max INR in a single open position."""
         return self.total_capital * (self.max_position_size_pct / 100)
 
     @field_validator("log_level")

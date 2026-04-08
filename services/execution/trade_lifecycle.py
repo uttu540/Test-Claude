@@ -71,12 +71,12 @@ class TradeLifecycleManager:
     async def run(self) -> None:
         """Main monitoring loop — runs until stopped."""
         self._running = True
-        interval = _DEV_POLL_INTERVAL if (settings.is_dev or settings.is_paper) else _LIVE_POLL_INTERVAL
+        interval = _DEV_POLL_INTERVAL if settings.uses_simulated_broker else _LIVE_POLL_INTERVAL
         log.info("lifecycle.started", mode=settings.app_env.value, interval=interval)
 
         while self._running:
             try:
-                if settings.is_dev or settings.is_paper:
+                if settings.uses_simulated_broker:
                     await self._check_via_ticks()
                 else:
                     await self._check_via_broker()
@@ -166,19 +166,18 @@ class TradeLifecycleManager:
 
     async def _check_via_broker(self) -> None:
         """
-        Live/paper: poll Kite order book for completed SL/target orders.
+        Live/semi-auto: poll broker order book for completed SL/target orders.
         Matches orders by parent_trade_id stored in our Order table.
         """
         try:
-            from services.execution.zerodha.order_manager import OrderManager
-            om = OrderManager()
-            kite = await om._get_kite()
-            kite_orders = kite.orders()
+            from services.execution.broker_router import get_broker
+            broker      = get_broker()
+            kite_orders = await broker.get_open_orders()
         except Exception as e:
             log.warning("lifecycle.broker_poll_failed", error=str(e))
             return
 
-        # Build a map of broker_order_id → kite order
+        # Build a map of broker_order_id → broker order dict
         kite_map = {o["order_id"]: o for o in kite_orders}
 
         open_trades = await self._load_open_trades()
@@ -253,8 +252,8 @@ class TradeLifecycleManager:
     async def _cancel_sibling_order(self, trade_id: str, skip_broker_id: str) -> None:
         """Cancel the other leg (SL if target hit, or target if SL hit)."""
         try:
-            from services.execution.zerodha.order_manager import OrderManager
-            om = OrderManager()
+            from services.execution.broker_router import get_broker
+            om = get_broker()
 
             async for session in get_db_session():
                 result = await session.execute(

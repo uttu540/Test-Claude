@@ -18,6 +18,13 @@ const MODE_CONFIG = {
     border: 'border-cyan-trade/30',
     dot: 'bg-cyan-trade',
   },
+  SEMI_AUTO: {
+    label: 'SEMI-AUTO',
+    bg: 'bg-purple-500/10',
+    text: 'text-purple-400',
+    border: 'border-purple-500/30',
+    dot: 'bg-purple-400',
+  },
   LIVE: {
     label: 'LIVE',
     bg: 'bg-red-trade/10',

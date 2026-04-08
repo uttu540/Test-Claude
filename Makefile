@@ -1,4 +1,4 @@
-.PHONY: help up down db-migrate db-upgrade install dev logs ps clean
+.PHONY: help up down db-migrate db-upgrade install dev paper semi-auto live logs ps clean db-stamp
 
 # ─── Default ──────────────────────────────────────────────────────────────────
 help:
@@ -15,6 +15,9 @@ help:
 	@echo "  make db-upgrade  Apply pending Alembic migrations"
 	@echo "  make dev         Start the bot in development mode"
 	@echo "  make paper       Start in paper trading mode"
+	@echo "  make semi-auto   Start in semi-auto mode (Telegram approval gate)"
+	@echo "  make live        Start in live trading mode (real money)"
+	@echo "  make db-stamp    Stamp existing DB as migration 001 (skip initial)"
 	@echo "  make clean       Stop Docker + remove volumes (CAUTION)"
 	@echo ""
 
@@ -58,6 +61,10 @@ db-downgrade:
 db-history:
 	alembic history --verbose
 
+db-stamp:
+	alembic stamp 001
+	@echo "✅ Existing DB stamped at migration 001 — run 'make db-upgrade' to apply newer migrations"
+
 # ─── Bot ──────────────────────────────────────────────────────────────────────
 dev:
 	APP_ENV=development python main.py
@@ -65,7 +72,15 @@ dev:
 paper:
 	APP_ENV=paper python main.py
 
+semi-auto:
+	@echo "🟣 Starting in SEMI-AUTO mode — trades require Telegram approval"
+	@echo "   Ensure TELEGRAM_BOT_TOKEN and TELEGRAM_AUTHORIZED_IDS are set in .env"
+	APP_ENV=semi-auto python main.py
+
 live:
 	@echo "⚠️  Starting in LIVE mode — real money at risk!"
 	@read -p "Type 'yes' to confirm: " confirm; \
 	if [ "$$confirm" = "yes" ]; then APP_ENV=live python main.py; fi
+
+test:
+	pytest tests/ -v

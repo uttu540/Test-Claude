@@ -1,22 +1,22 @@
 """
 services/execution/zerodha/order_manager.py
 ────────────────────────────────────────────
-Zerodha Kite Connect order placement and management.
+Zerodha Kite Connect broker implementation.
 
-All order placements go through the Risk Engine first.
-This module ONLY handles the broker communication layer.
+Implements BrokerInterface for live and semi-auto modes.
+This module never contains paper/dev simulation logic — that lives in
+PaperBroker. Call get_broker() from broker_router instead of instantiating
+this class directly.
 
-Important Kite Connect order types used:
-  - LIMIT:  Standard limit order
-  - MARKET: Market order (fast fills, use sparingly)
-  - SL-M:   Stop-loss market (guaranteed execution at stop trigger)
-  - SL:     Stop-loss limit (limit price at stop trigger)
+Kite Connect order types used:
+  LIMIT   — standard limit order
+  MARKET  — market order (fast fills; used for entry)
+  SL-M    — stop-loss market (guaranteed execution at stop trigger)
+  SL      — stop-loss limit (limit price at stop trigger)
 """
 from __future__ import annotations
 
-import json
 import uuid
-from datetime import datetime
 from typing import Any
 
 import structlog
@@ -30,23 +30,34 @@ from kiteconnect.exceptions import (
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config.settings import settings
-from database.connection import get_db_session, get_redis
-from database.models import Order
+from database.connection import get_redis
+from services.execution.broker_interface import BrokerInterface
 from services.notifications.telegram_bot import get_notifier
 
 log = structlog.get_logger(__name__)
 
 
-class OrderManager:
+class ZerodhaOrderManager(BrokerInterface):
     """
-    Handles order placement, modification, and cancellation via Kite Connect.
-    Logs every order to database and Redis regardless of success/failure.
+    Live broker: Zerodha Kite Connect v5.
+
+    Inherits from BrokerInterface:
+      - place_stop_loss()  — calls place_order(SL-M)
+      - place_target()     — calls place_order(LIMIT)
+      - _record_order()    — persists to DB
+
+    Implements abstract methods:
+      - place_order, cancel_order, modify_order
+      - get_positions, get_portfolio, get_open_orders
+      - square_off_all_intraday
     """
 
     BROKER = "ZERODHA"
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._kite: KiteConnect | None = None
+
+    # ── Auth ──────────────────────────────────────────────────────────────────
 
     async def _get_kite(self) -> KiteConnect:
         """Return authenticated KiteConnect instance (reads token from Redis)."""
@@ -60,47 +71,41 @@ class OrderManager:
         self._kite.set_access_token(token)
         return self._kite
 
-    # ── Order Placement ───────────────────────────────────────────────────────
+    # ── BrokerInterface: place_order ──────────────────────────────────────────
 
     async def place_order(
         self,
         symbol:           str,
         exchange:         str,
-        transaction_type: str,        # "BUY" or "SELL"
+        transaction_type: str,
         quantity:         int,
-        order_type:       str,        # "LIMIT", "MARKET", "SL", "SL-M"
-        product:          str,        # "MIS" (intraday), "CNC" (delivery), "NRML" (F&O)
-        price:            float = 0,  # For LIMIT orders
-        trigger_price:    float = 0,  # For SL/SL-M orders
+        order_type:       str,
+        product:          str,
+        price:            float = 0,
+        trigger_price:    float = 0,
         tag:              str   = "",
         validity:         str   = "DAY",
         trade_id:         str | None = None,
     ) -> str | None:
         """
-        Place an order. Returns broker_order_id on success, None on failure.
-        Records the attempt in database regardless of outcome.
+        Place a live order via Kite Connect.
+        Returns broker_order_id on success, None on failure.
+        Records the attempt in DB regardless of outcome.
         """
-        # In dev/paper mode: simulate the order (never hit the real broker)
-        if settings.is_dev or settings.is_paper:
-            return await self._simulate_order(
-                symbol, exchange, transaction_type, quantity,
-                order_type, product, price, trigger_price, tag, trade_id
-            )
-
         order_db_id = str(uuid.uuid4())
 
         try:
             kite = await self._get_kite()
 
             params: dict[str, Any] = {
-                "tradingsymbol":   symbol,
-                "exchange":        exchange,
+                "tradingsymbol":    symbol,
+                "exchange":         exchange,
                 "transaction_type": transaction_type,
-                "quantity":        quantity,
-                "order_type":      order_type,
-                "product":         product,
-                "validity":        validity,
-                "tag":             tag or "TRADING_BOT",     # SEBI: all algo orders must be tagged
+                "quantity":         quantity,
+                "order_type":       order_type,
+                "product":          product,
+                "validity":         validity,
+                "tag":              tag or "TRADING_BOT",  # SEBI: algo orders must be tagged
             }
             if order_type in ("LIMIT", "SL"):
                 params["price"] = price
@@ -124,14 +129,13 @@ class OrderManager:
                 tag              = tag,
                 trade_id         = trade_id,
             )
-
             log.info(
                 "order.placed",
-                symbol=symbol,
-                direction=transaction_type,
-                qty=quantity,
-                price=price or "MARKET",
-                broker_id=broker_order_id,
+                symbol    = symbol,
+                direction = transaction_type,
+                qty       = quantity,
+                price     = price or "MARKET",
+                broker_id = broker_order_id,
             )
             return broker_order_id
 
@@ -153,8 +157,7 @@ class OrderManager:
                 trade_id         = trade_id,
                 rejection_reason = str(e),
             )
-            notifier = get_notifier()
-            await notifier.system_error("OrderManager", f"Order rejected: {symbol} | {e}")
+            await get_notifier().system_error("OrderManager", f"Order rejected: {symbol} | {e}")
             return None
 
         except TokenException:
@@ -174,72 +177,9 @@ class OrderManager:
         """Place order with automatic retry on transient network errors."""
         return kite.place_order(variety=kite.VARIETY_REGULAR, **params)
 
-    # ── Stop Loss & Target Orders ─────────────────────────────────────────────
-
-    async def place_stop_loss(
-        self,
-        symbol:        str,
-        exchange:      str,
-        quantity:      int,
-        trigger_price: float,
-        product:       str,
-        direction:     str = "LONG",   # "LONG" or "SHORT"
-        tag:           str = "",
-        trade_id:      str | None = None,
-    ) -> str | None:
-        """
-        Place a Stop-Loss Market (SL-M) order.
-        SL-M guarantees execution at market price when trigger is hit.
-        LONG stop = SELL to close; SHORT stop = BUY to close.
-        """
-        transaction_type = "SELL" if direction == "LONG" else "BUY"
-        return await self.place_order(
-            symbol           = symbol,
-            exchange         = exchange,
-            transaction_type = transaction_type,
-            quantity         = quantity,
-            order_type       = "SL-M",
-            product          = product,
-            trigger_price    = trigger_price,
-            tag              = tag,
-            trade_id         = trade_id,
-        )
-
-    async def place_target(
-        self,
-        symbol:        str,
-        exchange:      str,
-        quantity:      int,
-        limit_price:   float,
-        product:       str,
-        direction:     str = "LONG",   # "LONG" or "SHORT"
-        tag:           str = "",
-        trade_id:      str | None = None,
-    ) -> str | None:
-        """
-        Place a LIMIT order for take-profit.
-        LONG target = SELL to close; SHORT target = BUY to close.
-        """
-        transaction_type = "SELL" if direction == "LONG" else "BUY"
-        return await self.place_order(
-            symbol           = symbol,
-            exchange         = exchange,
-            transaction_type = transaction_type,
-            quantity         = quantity,
-            order_type       = "LIMIT",
-            product          = product,
-            price            = limit_price,
-            tag              = tag,
-            trade_id         = trade_id,
-        )
-
-    # ── Order Management ──────────────────────────────────────────────────────
+    # ── BrokerInterface: order management ─────────────────────────────────────
 
     async def cancel_order(self, broker_order_id: str) -> bool:
-        """Cancel an open order. Returns True on success."""
-        if settings.is_dev or settings.is_paper:
-            log.info("order.cancel_simulated", broker_order_id=broker_order_id)
-            return True
         try:
             kite = await self._get_kite()
             kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=broker_order_id)
@@ -252,14 +192,10 @@ class OrderManager:
     async def modify_order(
         self,
         broker_order_id: str,
-        price: float | None = None,
-        trigger_price: float | None = None,
-        quantity: int | None = None,
+        price:           float | None = None,
+        trigger_price:   float | None = None,
+        quantity:        int   | None = None,
     ) -> bool:
-        """Modify an open order (e.g., move stop loss)."""
-        if settings.is_dev or settings.is_paper:
-            log.info("order.modify_simulated", broker_order_id=broker_order_id)
-            return True
         try:
             kite   = await self._get_kite()
             params = {"order_id": broker_order_id, "variety": kite.VARIETY_REGULAR}
@@ -273,32 +209,33 @@ class OrderManager:
             log.error("order.modify_failed", broker_order_id=broker_order_id, error=str(e))
             return False
 
+    # ── BrokerInterface: portfolio ─────────────────────────────────────────────
+
     async def get_positions(self) -> dict:
-        """Fetch current open positions from Kite."""
-        if settings.is_dev or settings.is_paper:
-            return {"net": [], "day": []}
         kite = await self._get_kite()
         return kite.positions()
 
     async def get_portfolio(self) -> list[dict]:
-        """Fetch holdings (delivery/CNC positions)."""
-        if settings.is_dev or settings.is_paper:
-            return []
         kite = await self._get_kite()
         return kite.holdings()
 
-    # ── Square Off All (Emergency) ────────────────────────────────────────────
+    async def get_open_orders(self) -> list[dict]:
+        """Return today's full order list from Kite (used by lifecycle manager)."""
+        try:
+            kite = await self._get_kite()
+            return kite.orders()
+        except Exception as e:
+            log.warning("order.fetch_failed", error=str(e))
+            return []
+
+    # ── BrokerInterface: square off ───────────────────────────────────────────
 
     async def square_off_all_intraday(self) -> None:
-        """
-        Market-sell all open MIS (intraday) positions.
-        Called automatically at 3:20 PM or on kill switch.
-        """
+        """Market-sell all open MIS positions. Called at 3:12 PM or on kill switch."""
         log.warning("order.square_off_all_intraday", reason="called")
         positions = await self.get_positions()
-        day_positions = positions.get("day", [])
 
-        for pos in day_positions:
+        for pos in positions.get("day", []):
             if pos["product"] == "MIS" and pos["quantity"] != 0:
                 qty  = abs(pos["quantity"])
                 side = "SELL" if pos["quantity"] > 0 else "BUY"
@@ -313,72 +250,6 @@ class OrderManager:
                 )
                 log.info("order.squared_off", symbol=pos["tradingsymbol"], qty=qty)
 
-    # ── Dev Simulation ────────────────────────────────────────────────────────
 
-    async def _simulate_order(
-        self, symbol, exchange, tx_type, qty, order_type, product,
-        price, trigger_price, tag, trade_id
-    ) -> str:
-        """Simulate an order fill in dev/paper mode."""
-        fake_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
-        log.info(
-            "order.simulated",
-            symbol=symbol,
-            direction=tx_type,
-            qty=qty,
-            price=price or "MARKET",
-            order_id=fake_id,
-        )
-        await self._record_order(
-            internal_id      = str(uuid.uuid4()),
-            broker_order_id  = fake_id,
-            symbol           = symbol,
-            exchange         = exchange,
-            transaction_type = tx_type,
-            order_type       = order_type,
-            product          = product,
-            quantity         = qty,
-            price            = price,
-            trigger_price    = trigger_price,
-            status           = "COMPLETE",
-            tag              = tag or "PAPER",
-            trade_id         = trade_id,
-        )
-        return fake_id
-
-    # ── Database Recording ────────────────────────────────────────────────────
-
-    async def _record_order(self, **kwargs) -> None:
-        """Persist order record to database (best-effort — never blocks execution)."""
-        try:
-            async for session in get_db_session():
-                order = Order(
-                    id               = uuid.UUID(kwargs["internal_id"]),
-                    broker           = self.BROKER,
-                    broker_order_id  = kwargs.get("broker_order_id"),
-                    trading_symbol   = kwargs["symbol"],
-                    exchange         = kwargs["exchange"],
-                    transaction_type = kwargs["transaction_type"],
-                    order_type       = kwargs["order_type"],
-                    product          = kwargs["product"],
-                    quantity         = kwargs["quantity"],
-                    price            = kwargs.get("price") or None,
-                    trigger_price    = kwargs.get("trigger_price") or None,
-                    status           = kwargs.get("status", "PENDING"),
-                    tag              = kwargs.get("tag"),
-                    parent_trade_id  = uuid.UUID(kwargs["trade_id"]) if kwargs.get("trade_id") else None,
-                    rejection_reason = kwargs.get("rejection_reason"),
-                )
-                try:
-                    session.add(order)
-                    await session.commit()
-                except Exception:
-                    await session.rollback()
-                    raise
-        except Exception as e:
-            log.error(
-                "order.record_failed",
-                symbol=kwargs.get("symbol"),
-                broker_order_id=kwargs.get("broker_order_id"),
-                error=str(e),
-            )
+# ── Backwards-compatible alias (used in authenticator + old imports) ──────────
+OrderManager = ZerodhaOrderManager
