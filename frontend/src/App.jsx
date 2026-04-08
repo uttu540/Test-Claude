@@ -1,9 +1,10 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
-import { useCallback } from 'react'
 import { useWebSocket } from './ws'
 import Navbar from './components/Navbar'
 import Dashboard from './pages/Dashboard'
 import Trades from './pages/Trades'
+import PnLHistory from './pages/PnLHistory'
+import Changelog from './pages/Changelog'
 
 /**
  * Inner app — rendered inside BrowserRouter so hooks can use router context.
@@ -11,7 +12,6 @@ import Trades from './pages/Trades'
  * Dashboard and Trades open their own connections for live data.
  */
 function AppInner() {
-  // No-op message handler — we only care about wsStatus for the Navbar dot.
   const { wsStatus } = useWebSocket(null)
 
   return (
@@ -19,8 +19,10 @@ function AppInner() {
       <Navbar wsStatus={wsStatus} />
       <main>
         <Routes>
-          <Route path="/"       element={<Dashboard />} />
-          <Route path="/trades" element={<Trades />} />
+          <Route path="/"          element={<Dashboard />} />
+          <Route path="/trades"    element={<Trades />} />
+          <Route path="/pnl"       element={<PnLHistory />} />
+          <Route path="/changelog" element={<Changelog />} />
           <Route
             path="*"
             element={

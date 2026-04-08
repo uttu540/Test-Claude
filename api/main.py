@@ -220,12 +220,45 @@ async def get_today_pnl() -> dict:
         )
         row = result.fetchone()
         data = _row_to_dict(row) if row else {}
+
+        # Derived fields the frontend expects
+        total   = int(data.get("total_trades", 0) or 0)
+        winning = int(data.get("winning", 0) or 0)
+        data["win_rate"]    = round(winning / total * 100, 1) if total else 0.0
+        data["trades_today"] = total
+
+        # Intraday cumulative P&L series for sparkline [{time, pnl}, ...]
+        series_rows = await session.execute(
+            text("""
+                SELECT exit_time, net_pnl
+                FROM trades
+                WHERE DATE(entry_time) = :today
+                  AND status = 'CLOSED'
+                  AND exit_time IS NOT NULL
+                ORDER BY exit_time
+            """),
+            {"today": today},
+        )
+        running = 0.0
+        pnl_series: list[dict] = []
+        for sr in series_rows.fetchall():
+            running += float(sr.net_pnl or 0)
+            pnl_series.append({
+                "time": sr.exit_time.strftime("%H:%M"),
+                "pnl":  round(running, 2),
+            })
+        data["pnl_series"] = pnl_series
+
+        # Market regime from Redis
+        redis = get_redis()
+        data["market_regime"] = await redis.get("market:regime") or "UNKNOWN"
+
         net_pnl_val = float(data.get("net_pnl", 0) or 0)
-        data["trading_date"]    = today.isoformat()
+        data["trading_date"]     = today.isoformat()
         data["daily_loss_limit"] = settings.daily_loss_limit_inr
-        data["daily_loss_used"] = abs(min(net_pnl_val, 0))
-        data["capital"]         = settings.total_capital
-        data["pnl_pct"]         = (
+        data["daily_loss_used"]  = abs(min(net_pnl_val, 0))
+        data["capital"]          = settings.total_capital
+        data["pnl_pct"]          = (
             net_pnl_val / settings.total_capital * 100
             if settings.total_capital else 0
         )
@@ -302,10 +335,9 @@ async def get_bot_status() -> dict:
 @app.post("/api/bot/square-off")
 async def square_off_all() -> dict:
     """Emergency square off all intraday positions."""
-    if settings.is_live:
-        from services.execution.zerodha.order_manager import OrderManager
-        om = OrderManager()
-        await om.square_off_all_intraday()
+    if settings.uses_real_broker:
+        from services.execution.broker_router import get_broker
+        await get_broker().square_off_all_intraday()
     await manager.broadcast({"type": "system", "data": {"event": "square_off_triggered"}})
     return {"status": "ok", "message": "Square off initiated"}
 

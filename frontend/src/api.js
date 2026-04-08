@@ -110,6 +110,10 @@ export async function fetchTrades({ page = 1, per_page = 50 } = {}) {
 //   per_page: number
 // }
 
+export async function fetchPnLHistory(days = 30) {
+  return request(`/api/pnl/history?days=${days}`)
+}
+
 // ─── Bot Control ─────────────────────────────────────────────────────────────
 
 export async function squareOffAll() {

@@ -119,31 +119,27 @@ export default function Navbar({ wsStatus }) {
 
         {/* Nav links */}
         <div className="flex items-center gap-0.5">
-          <NavLink
-            to="/"
-            end
-            className={({ isActive }) =>
-              `px-3 py-1.5 rounded text-sm font-medium transition-colors ${
-                isActive
-                  ? 'bg-blue-trade/10 text-blue-trade'
-                  : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
-              }`
-            }
-          >
-            Dashboard
-          </NavLink>
-          <NavLink
-            to="/trades"
-            className={({ isActive }) =>
-              `px-3 py-1.5 rounded text-sm font-medium transition-colors ${
-                isActive
-                  ? 'bg-blue-trade/10 text-blue-trade'
-                  : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
-              }`
-            }
-          >
-            Trades
-          </NavLink>
+          {[
+            { to: '/',          label: 'Dashboard', end: true  },
+            { to: '/trades',    label: 'Trades',    end: false },
+            { to: '/pnl',       label: 'P&L',       end: false },
+            { to: '/changelog', label: 'Guide',     end: false },
+          ].map(({ to, label, end }) => (
+            <NavLink
+              key={to}
+              to={to}
+              end={end}
+              className={({ isActive }) =>
+                `px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+                  isActive
+                    ? 'bg-blue-trade/10 text-blue-trade'
+                    : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
+                }`
+              }
+            >
+              {label}
+            </NavLink>
+          ))}
         </div>
 
         {/* Spacer */}
