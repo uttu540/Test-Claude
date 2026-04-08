@@ -64,9 +64,16 @@ class Settings(BaseSettings):
 
     # ── Telegram ──────────────────────────────────────────────────────────────
     telegram_bot_token: str = ""
+    # Single chat ID (legacy / default)
     telegram_chat_id: str = ""
-    # Semi-auto: comma-separated Telegram user IDs allowed to approve trades
+    # Multi-user: comma-separated chat IDs that receive all notifications.
+    # If set, overrides telegram_chat_id.
+    # e.g. TELEGRAM_CHAT_IDS=111111111,222222222,-100333333333
+    # (-100... prefix = group/channel)
+    telegram_chat_ids: str = ""
+    # Comma-separated Telegram user IDs allowed to approve trades + use commands
     # e.g. TELEGRAM_AUTHORIZED_IDS=123456789,987654321
+    # Leave empty = any user can interact (only safe on private bots)
     telegram_authorized_ids: str = ""
     # How long to wait for approval before auto-rejecting (seconds)
     approval_timeout_secs: int = 60
@@ -103,8 +110,17 @@ class Settings(BaseSettings):
 
     @property
     def authorized_telegram_ids(self) -> list[str]:
-        """Parsed list of Telegram user IDs allowed to approve trades."""
+        """Parsed list of Telegram user IDs allowed to approve trades and use commands."""
         return [x.strip() for x in self.telegram_authorized_ids.split(",") if x.strip()]
+
+    @property
+    def notification_chat_ids(self) -> list[str]:
+        """All chat IDs that receive bot notifications. Supports groups and individuals."""
+        if self.telegram_chat_ids.strip():
+            return [x.strip() for x in self.telegram_chat_ids.split(",") if x.strip()]
+        if self.telegram_chat_id.strip():
+            return [self.telegram_chat_id.strip()]
+        return []
 
     @property
     def max_risk_per_trade_inr(self) -> float:

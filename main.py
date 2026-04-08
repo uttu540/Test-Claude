@@ -325,19 +325,18 @@ async def startup() -> None:
     # 5. Trade lifecycle manager (monitors open trades, closes on SL/target hit)
     asyncio.create_task(get_lifecycle_manager().run())
 
-    # 6. Telegram approval polling (semi-auto mode only)
-    if settings.is_semi_auto:
-        if not settings.authorized_telegram_ids:
+    # 6. Telegram polling — commands (/status, /pnl, /positions) available in all
+    #    modes; approval callbacks only triggered in semi-auto mode.
+    if settings.telegram_bot_token:
+        if settings.is_semi_auto and not settings.authorized_telegram_ids:
             log.warning(
                 "startup.semi_auto_no_auth",
                 reason="TELEGRAM_AUTHORIZED_IDS is empty — any Telegram user can approve trades!",
             )
-        from services.notifications.telegram_bot import start_approval_polling
-        app_tg = await start_approval_polling()
-        # Store on module for shutdown access
+        from services.notifications.telegram_bot import start_telegram_polling
+        app_tg = await start_telegram_polling()
         import main as _self
         _self._telegram_app = app_tg
-        log.info("startup.semi_auto_polling", status="started")
 
     log.info("startup.complete", env=settings.app_env.value)
 
@@ -348,13 +347,13 @@ async def shutdown(scheduler: AsyncIOScheduler) -> None:
     scheduler.shutdown(wait=False)
     get_lifecycle_manager().stop()
     await get_news_service().stop()
-    # Stop Telegram approval polling if running
-    if settings.is_semi_auto:
+    # Stop Telegram polling if running
+    if settings.telegram_bot_token:
         import main as _self
         tg_app = getattr(_self, "_telegram_app", None)
         if tg_app:
-            from services.notifications.telegram_bot import stop_approval_polling
-            await stop_approval_polling(tg_app)
+            from services.notifications.telegram_bot import stop_telegram_polling
+            await stop_telegram_polling(tg_app)
     await close_db()
     await close_redis()
     log.info("shutdown.complete")
