@@ -71,8 +71,10 @@ class HistoricalSeeder:
 
     async def create_hypertable(self) -> None:
         """Create the TimescaleDB ohlcv hypertable if it doesn't exist."""
+        statements = [s.strip() for s in OHLCV_TABLE_DDL.split(";") if s.strip()]
         async with await get_db_session().__anext__() as session:
-            await session.execute(text(OHLCV_TABLE_DDL))
+            for stmt in statements:
+                await session.execute(text(stmt))
             await session.commit()
         log.info("historical_seed.hypertable", status="ready")
 

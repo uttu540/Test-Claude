@@ -105,7 +105,11 @@ async def _redis_broadcast_loop() -> None:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _row_to_dict(row) -> dict:
-    return dict(row._mapping)
+    from decimal import Decimal
+    result = {}
+    for k, v in row._mapping.items():
+        result[k] = float(v) if isinstance(v, Decimal) else v
+    return result
 
 
 # ── Routes: Positions ──────────────────────────────────────────────────────────
