@@ -3,6 +3,50 @@
 
 const PHASES = [
   {
+    phase: 8,
+    label: 'Runtime Config & Settings UI',
+    date: 'Apr 2026',
+    status: 'done',
+    features: [
+      'config/bot_config.py — 35 parameters stored in Redis, applied without restart',
+      'Settings page with toggles, number inputs, and signal pill selectors',
+      'Strategy on/off switches, indicator periods, timeframe weights, regime caps',
+      'GET/POST /api/config and GET /api/config/schema endpoints',
+      'Makefile uses venv automatically — no manual activation needed',
+      'Daily Guide tab in Settings with startup, modes, and Telegram command reference',
+    ],
+    env: null,
+  },
+  {
+    phase: 7,
+    label: 'Frontend Overhaul',
+    date: 'Apr 2026',
+    status: 'done',
+    features: [
+      'Dedicated Positions page with card layout, R:R ratio, risk amount',
+      'Dedicated Signals page with direction filter, symbol search, confidence bars, indicators popover',
+      'P&L History page with daily bar chart and trade table',
+      'Fixed field name bugs: trading_symbol, entry_quantity, planned_stop_loss, planned_target_1',
+      'Fixed signal payload keys: signal (not signal_type), timestamp (not time)',
+      'Navbar UI polish, IST clock, WS status dot, Square Off modal',
+    ],
+    env: null,
+  },
+  {
+    phase: 6,
+    label: 'Broker Abstraction & Migrations',
+    date: 'Apr 2026',
+    status: 'done',
+    features: [
+      'BrokerInterface ABC — swap brokers with one config change',
+      'ZerodhaOrderManager and MockOrderManager implementations',
+      'Alembic migrations for schema versioning',
+      'honcho Procfile — one command starts bot + API + frontend',
+      'make setup / make start one-command workflow',
+    ],
+    env: null,
+  },
+  {
     phase: 5,
     label: 'Human Approval Gate',
     date: 'Apr 2026',
@@ -126,8 +170,8 @@ const QUICK_START = [
   {
     step: '2',
     title: 'First-time setup',
-    cmd: 'source venv/bin/activate && make setup',
-    note: 'Installs Python deps, starts Docker (PostgreSQL + Redis), runs DB migrations, installs frontend npm packages.',
+    cmd: 'make setup',
+    note: 'Creates venv, installs Python deps, starts Docker (PostgreSQL + Redis), runs DB migrations, installs frontend npm packages.',
   },
   {
     step: '3',
@@ -338,6 +382,9 @@ export default function Changelog() {
                 ['GET',  '/api/signals/recent',  'Latest signal per symbol from Redis cache'],
                 ['GET',  '/api/bot/status',      'Bot health, mode, capital, and today\'s stats'],
                 ['POST', '/api/bot/square-off',  'Emergency close all open intraday positions'],
+                ['GET',  '/api/config',           'Current bot configuration (all 35 parameters)'],
+                ['POST', '/api/config',           'Update config — changes apply on next signal cycle'],
+                ['GET',  '/api/config/schema',    'Parameter schema with types, ranges, and labels'],
                 ['WS',   '/ws',                  'Live feed: signals, position updates, P&L'],
               ].map(([method, path, desc]) => (
                 <tr key={path} className="table-row-hover">
