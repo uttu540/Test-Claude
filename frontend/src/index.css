@@ -45,7 +45,11 @@
 
 @layer components {
   .card {
-    @apply bg-bg-card border border-border rounded-lg;
+    @apply bg-bg-card border border-border rounded-xl;
+  }
+
+  .card-glass {
+    @apply rounded-xl border border-white/5 bg-white/[0.03] backdrop-blur-sm;
   }
 
   .table-row-hover {
@@ -53,15 +57,19 @@
   }
 
   .badge {
-    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium font-mono tracking-wide;
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium font-mono tracking-wide;
   }
 
   .btn {
-    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-offset-bg-primary disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-offset-bg-primary disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer;
   }
 
   .btn-danger {
     @apply btn bg-red-trade/10 text-red-trade border border-red-trade/30 hover:bg-red-trade hover:text-white focus:ring-red-trade;
+  }
+
+  .btn-primary {
+    @apply btn bg-blue-trade/10 text-blue-trade border border-blue-trade/30 hover:bg-blue-trade hover:text-white focus:ring-blue-trade;
   }
 
   .th {
@@ -69,11 +77,23 @@
   }
 
   .td {
-    @apply px-3 py-2.5 text-sm border-b border-border/50;
+    @apply px-3 py-2.5 text-sm border-b border-border/40;
   }
 
   .skeleton {
-    @apply animate-pulse bg-bg-hover rounded;
+    @apply animate-pulse bg-bg-hover rounded-md;
+  }
+
+  .page-header {
+    @apply flex items-center justify-between mb-5;
+  }
+
+  .page-title {
+    @apply text-base font-semibold text-text-primary;
+  }
+
+  .section-label {
+    @apply text-2xs font-semibold text-text-muted uppercase tracking-widest;
   }
 }
 
@@ -91,11 +111,15 @@
   }
 
   .glow-green {
-    box-shadow: 0 0 12px rgba(34, 197, 94, 0.25);
+    box-shadow: 0 0 16px rgba(34, 197, 94, 0.2), 0 0 4px rgba(34, 197, 94, 0.1);
   }
 
   .glow-red {
-    box-shadow: 0 0 12px rgba(239, 68, 68, 0.25);
+    box-shadow: 0 0 16px rgba(239, 68, 68, 0.2), 0 0 4px rgba(239, 68, 68, 0.1);
+  }
+
+  .glow-blue {
+    box-shadow: 0 0 16px rgba(59, 130, 246, 0.15), 0 0 4px rgba(59, 130, 246, 0.08);
   }
 
   .tab-active {
@@ -104,6 +128,22 @@
 
   .tab-inactive {
     @apply text-text-muted hover:text-text-secondary border-b-2 border-transparent;
+  }
+
+  .stat-accent-green {
+    border-left: 3px solid #22c55e;
+  }
+
+  .stat-accent-red {
+    border-left: 3px solid #ef4444;
+  }
+
+  .stat-accent-blue {
+    border-left: 3px solid #3b82f6;
+  }
+
+  .stat-accent-neutral {
+    border-left: 3px solid #2a2a2a;
   }
 }
 

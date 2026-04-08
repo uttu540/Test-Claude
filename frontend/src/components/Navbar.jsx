@@ -120,10 +120,12 @@ export default function Navbar({ wsStatus }) {
         {/* Nav links */}
         <div className="flex items-center gap-0.5">
           {[
-            { to: '/',          label: 'Dashboard', end: true  },
-            { to: '/trades',    label: 'Trades',    end: false },
-            { to: '/pnl',       label: 'P&L',       end: false },
-            { to: '/changelog', label: 'Guide',     end: false },
+            { to: '/',           label: 'Dashboard', end: true  },
+            { to: '/positions',  label: 'Positions', end: false },
+            { to: '/signals',    label: 'Signals',   end: false },
+            { to: '/trades',     label: 'Trades',    end: false },
+            { to: '/pnl',        label: 'P&L',       end: false },
+            { to: '/changelog',  label: 'Guide',     end: false },
           ].map(({ to, label, end }) => (
             <NavLink
               key={to}

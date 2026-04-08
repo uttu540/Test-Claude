@@ -28,7 +28,7 @@ function DirectionBadge({ direction }) {
 function SkeletonRow() {
   return (
     <tr>
-      {Array.from({ length: 7 }).map((_, i) => (
+      {Array.from({ length: 8 }).map((_, i) => (
         <td key={i} className="td">
           <div className="skeleton h-4 w-16" />
         </td>
@@ -40,7 +40,7 @@ function SkeletonRow() {
 function EmptyState() {
   return (
     <tr>
-      <td colSpan={7} className="td text-center py-12">
+      <td colSpan={8} className="td text-center py-12">
         <div className="flex flex-col items-center gap-2 text-text-muted">
           <svg className="w-8 h-8 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 10V7" />
@@ -60,6 +60,20 @@ function PriceMono({ price, decimals = 2 }) {
       ₹{Number(price).toLocaleString('en-IN', { minimumFractionDigits: decimals })}
     </span>
   )
+}
+
+function formatTime(isoString) {
+  if (!isoString) return '—'
+  try {
+    return new Date(isoString).toLocaleTimeString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    })
+  } catch {
+    return '—'
+  }
 }
 
 export default function PositionsTable({ positions = [], loading = false, error = null }) {
@@ -82,16 +96,17 @@ export default function PositionsTable({ positions = [], loading = false, error 
       )}
 
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[700px]">
+        <table className="w-full min-w-[750px]">
           <thead>
             <tr>
               <th className="th">Symbol</th>
               <th className="th">Direction</th>
-              <th className="th text-right">Entry</th>
-              <th className="th text-right">Current P&L</th>
+              <th className="th text-right">Entry Price</th>
+              <th className="th text-right">Qty</th>
               <th className="th text-right">Stop Loss</th>
               <th className="th text-right">Target</th>
-              <th className="th text-right">Qty</th>
+              <th className="th text-right">Risk (₹)</th>
+              <th className="th text-right">Entry Time</th>
             </tr>
           </thead>
           <tbody>
@@ -99,48 +114,45 @@ export default function PositionsTable({ positions = [], loading = false, error 
               ? Array.from({ length: 3 }).map((_, i) => <SkeletonRow key={i} />)
               : positions.length === 0
               ? <EmptyState />
-              : positions.map((p, i) => {
-                  const pnl = p.pnl ?? 0
-                  const rowBg =
-                    pnl > 0
-                      ? 'hover:bg-green-muted/30'
-                      : pnl < 0
-                      ? 'hover:bg-red-muted/30'
-                      : 'hover:bg-bg-hover'
-
-                  return (
-                    <tr key={i} className={`transition-colors duration-100 ${rowBg} animate-fade-in`}>
-                      <td className="td">
-                        <div className="flex flex-col">
-                          <span className="font-mono font-semibold text-text-primary text-sm">
-                            {p.symbol}
-                          </span>
-                          {p.strategy && (
-                            <span className="text-2xs text-text-muted">{p.strategy}</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="td">
-                        <DirectionBadge direction={p.direction} />
-                      </td>
-                      <td className="td text-right">
-                        <PriceMono price={p.entry_price} />
-                      </td>
-                      <td className="td text-right">
-                        <PnLCell pnl={pnl} />
-                      </td>
-                      <td className="td text-right">
-                        <PriceMono price={p.stop_loss} />
-                      </td>
-                      <td className="td text-right">
-                        <PriceMono price={p.target} />
-                      </td>
-                      <td className="td text-right">
-                        <span className="font-mono text-sm text-text-secondary">{p.qty}</span>
-                      </td>
-                    </tr>
-                  )
-                })}
+              : positions.map((p, i) => (
+                  <tr key={p.id ?? i} className="table-row-hover animate-fade-in">
+                    <td className="td">
+                      <div className="flex flex-col">
+                        <span className="font-mono font-semibold text-text-primary text-sm">
+                          {p.trading_symbol}
+                        </span>
+                        {p.strategy_name && (
+                          <span className="text-2xs text-text-muted">{p.strategy_name}</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="td">
+                      <DirectionBadge direction={p.direction} />
+                    </td>
+                    <td className="td text-right">
+                      <PriceMono price={p.entry_price} />
+                    </td>
+                    <td className="td text-right">
+                      <span className="font-mono text-sm text-text-secondary">
+                        {p.entry_quantity ?? '—'}
+                      </span>
+                    </td>
+                    <td className="td text-right">
+                      <PriceMono price={p.planned_stop_loss} />
+                    </td>
+                    <td className="td text-right">
+                      <PriceMono price={p.planned_target_1} />
+                    </td>
+                    <td className="td text-right">
+                      <PnLCell pnl={p.initial_risk_amount ? -Math.abs(p.initial_risk_amount) : null} />
+                    </td>
+                    <td className="td text-right">
+                      <span className="font-mono text-xs text-text-muted">
+                        {formatTime(p.entry_time)}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
           </tbody>
         </table>
       </div>

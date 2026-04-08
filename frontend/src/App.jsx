@@ -5,11 +5,13 @@ import Dashboard from './pages/Dashboard'
 import Trades from './pages/Trades'
 import PnLHistory from './pages/PnLHistory'
 import Changelog from './pages/Changelog'
+import Positions from './pages/Positions'
+import Signals from './pages/Signals'
 
 /**
  * Inner app — rendered inside BrowserRouter so hooks can use router context.
  * A single WebSocket is opened here purely to drive the Navbar status dot.
- * Dashboard and Trades open their own connections for live data.
+ * Individual pages open their own connections for live data.
  */
 function AppInner() {
   const { wsStatus } = useWebSocket(null)
@@ -19,10 +21,12 @@ function AppInner() {
       <Navbar wsStatus={wsStatus} />
       <main>
         <Routes>
-          <Route path="/"          element={<Dashboard />} />
-          <Route path="/trades"    element={<Trades />} />
-          <Route path="/pnl"       element={<PnLHistory />} />
-          <Route path="/changelog" element={<Changelog />} />
+          <Route path="/"           element={<Dashboard />} />
+          <Route path="/positions"  element={<Positions />} />
+          <Route path="/signals"    element={<Signals />} />
+          <Route path="/trades"     element={<Trades />} />
+          <Route path="/pnl"        element={<PnLHistory />} />
+          <Route path="/changelog"  element={<Changelog />} />
           <Route
             path="*"
             element={

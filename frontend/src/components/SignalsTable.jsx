@@ -64,7 +64,7 @@ function formatTime(isoString) {
       hour12: false,
     })
   } catch {
-    return isoString
+    return '—'
   }
 }
 
@@ -131,20 +131,20 @@ export default function SignalsTable({ signals = [], loading = false, error = nu
                     </td>
                     <td className="td">
                       <span className="text-xs text-text-secondary font-medium uppercase tracking-wide">
-                        {s.signal_type}
+                        {s.signal ?? s.signal_type ?? '—'}
                       </span>
                     </td>
                     <td className="td">
-                      <ConfidencePip value={s.confidence} />
+                      <ConfidencePip value={s.confidence ?? 0} />
                     </td>
                     <td className="td text-right">
                       <span className="font-mono text-sm text-text-primary">
-                        ₹{Number(s.price).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        {s.price != null ? `₹${Number(s.price).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—'}
                       </span>
                     </td>
                     <td className="td text-right">
                       <span className="font-mono text-xs text-text-muted">
-                        {formatTime(s.time)}
+                        {formatTime(s.timestamp ?? s.time)}
                       </span>
                     </td>
                   </tr>
