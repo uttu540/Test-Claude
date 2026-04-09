@@ -122,6 +122,15 @@ class ZerodhaAuthenticator:
 
                 await page.wait_for_timeout(3000)
 
+                # Zerodha may land on /connect/authorize — click the Authorise button if present
+                if "connect/authorize" in page.url:
+                    try:
+                        await page.click('button[type="submit"]', timeout=8_000)
+                        await page.wait_for_load_state("networkidle", timeout=15_000)
+                        await page.wait_for_timeout(2000)
+                    except Exception:
+                        pass  # Button may not be present — continue anyway
+
                 # Wait for redirect to our redirect URL containing request_token
                 current_url = page.url
                 request_token = self._extract_request_token(current_url)
