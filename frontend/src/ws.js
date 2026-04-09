@@ -5,6 +5,7 @@ const WS_URL = 'ws://localhost:8000/ws'
 const RECONNECT_DELAY_MS     = 3000
 const MAX_RECONNECT_DELAY_MS = 30000
 const BACKOFF_FACTOR         = 1.5
+const HEARTBEAT_INTERVAL_MS  = 30000
 
 /**
  * Low-level WebSocket client with auto-reconnect and exponential back-off.
@@ -15,10 +16,11 @@ const BACKOFF_FACTOR         = 1.5
  *   client.send(data)     // JSON-serialises data before sending
  */
 export function createWsClient({ onMessage, onStatus } = {}) {
-  let socket        = null
+  let socket         = null
   let reconnectTimer = null
-  let delay         = RECONNECT_DELAY_MS
-  let destroyed     = false
+  let heartbeatTimer = null
+  let delay          = RECONNECT_DELAY_MS
+  let destroyed      = false
 
   function notify(status) {
     onStatus?.(status)
@@ -32,17 +34,19 @@ export function createWsClient({ onMessage, onStatus } = {}) {
 
     try {
       socket = new WebSocket(WS_URL)
-    } catch (err) {
-      console.warn('[WS] Constructor failed:', err.message)
+    } catch {
       scheduleReconnect()
       return
     }
 
     socket.onopen = () => {
       if (destroyed) { socket.close(); return }
-      console.log('[WS] Connected')
       delay = RECONNECT_DELAY_MS
       notify('connected')
+      // Send periodic keep-alive pings so the server's receive_text() loop doesn't block
+      heartbeatTimer = setInterval(() => {
+        if (socket?.readyState === WebSocket.OPEN) socket.send('ping')
+      }, HEARTBEAT_INTERVAL_MS)
     }
 
     socket.onmessage = ({ data }) => {
@@ -58,9 +62,10 @@ export function createWsClient({ onMessage, onStatus } = {}) {
       // onerror is always followed by onclose — no action needed here
     }
 
-    socket.onclose = ({ code }) => {
+    socket.onclose = () => {
+      clearInterval(heartbeatTimer)
+      heartbeatTimer = null
       if (destroyed) return
-      console.log(`[WS] Closed (${code})`)
       notify('disconnected')
       scheduleReconnect()
     }
@@ -68,7 +73,6 @@ export function createWsClient({ onMessage, onStatus } = {}) {
 
   function scheduleReconnect() {
     if (destroyed || reconnectTimer) return
-    console.log(`[WS] Retry in ${delay}ms`)
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null
       delay = Math.min(delay * BACKOFF_FACTOR, MAX_RECONNECT_DELAY_MS)
@@ -79,7 +83,9 @@ export function createWsClient({ onMessage, onStatus } = {}) {
   function disconnect() {
     destroyed = true
     clearTimeout(reconnectTimer)
+    clearInterval(heartbeatTimer)
     reconnectTimer = null
+    heartbeatTimer = null
     if (socket) {
       socket.onclose = null   // prevent re-schedule
       socket.close()

@@ -54,7 +54,6 @@ class ConnectionManager:
         self._clients.append(ws)
 
     def disconnect(self, ws: WebSocket) -> None:
-        self._clients.discard(ws) if hasattr(self._clients, "discard") else None
         if ws in self._clients:
             self._clients.remove(ws)
 
@@ -78,6 +77,7 @@ manager = ConnectionManager()
 async def startup() -> None:
     await init_db()
     asyncio.create_task(_redis_broadcast_loop())
+    asyncio.create_task(_db_broadcast_loop())
 
 
 async def _redis_broadcast_loop() -> None:
@@ -87,8 +87,8 @@ async def _redis_broadcast_loop() -> None:
     seen: dict[str, str] = {}
     while True:
         try:
-            # Only watch top-level signal keys (not per-timeframe duplicates)
-            keys = [k for k in await redis.keys("signal:latest:*")
+            # Use SCAN instead of KEYS to avoid blocking on large keyspaces
+            keys = [k async for k in redis.scan_iter("signal:latest:*")
                     if k.count(":") == 2]
             for key in keys:
                 raw = await redis.get(key)
@@ -100,6 +100,21 @@ async def _redis_broadcast_loop() -> None:
         except Exception as e:
             log.warning("api.broadcast_error", error=str(e))
             await asyncio.sleep(5)
+
+
+async def _db_broadcast_loop() -> None:
+    """Periodically push positions and P&L snapshots to all WebSocket clients."""
+    while True:
+        try:
+            await asyncio.sleep(10)
+            if not manager._clients:
+                continue
+            positions = await get_positions()
+            pnl       = await get_today_pnl()
+            await manager.broadcast({"type": "positions_update", "data": positions})
+            await manager.broadcast({"type": "pnl_update",       "data": pnl})
+        except Exception as e:
+            log.warning("api.db_broadcast_error", error=str(e))
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -283,7 +298,7 @@ async def get_pnl_history(days: int = 30) -> list[dict]:
                     COALESCE(SUM(net_pnl), 0) AS net_pnl
                 FROM trades
                 WHERE status = 'CLOSED'
-                  AND entry_time >= NOW() - MAKE_INTERVAL(days => :days)
+                  AND exit_time >= NOW() - MAKE_INTERVAL(days => :days)
                 GROUP BY DATE(entry_time)
                 ORDER BY trading_date DESC
             """),
@@ -382,5 +397,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
         while True:
             await ws.receive_text()   # Keep-alive ping from client
-    except WebSocketDisconnect:
+    except Exception:
+        # Catches WebSocketDisconnect, RuntimeError on unclean close, and init errors
+        pass
+    finally:
         manager.disconnect(ws)

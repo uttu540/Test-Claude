@@ -10,6 +10,22 @@ _Next up: Tune signal confidence thresholds based on backtest findings (raise OR
 
 ---
 
+## [0.4.2] — 2026-04-09 — WebSocket & Dashboard Live-Update Fixes
+
+### Fixed
+- **[#27] `api/main.py`** — `ConnectionManager.disconnect()` had dead code: called `.discard()` on a `list` (set method), which always evaluated to `None`. Removed the dead line; `remove()` path was already correct.
+- **[#28] `api/main.py`** — Dashboard `positions_update` and `pnl_update` WebSocket messages were never sent. Added `_db_broadcast_loop` background task that pushes live positions and P&L to all clients every 10 seconds. Dashboard now reflects new trades and closed positions without a manual refresh.
+- **[#29] `api/main.py`** — WebSocket endpoint only caught `WebSocketDisconnect`; unclean disconnects (network drop, browser close without close frame) raised `RuntimeError` that escaped uncaught, leaving `disconnect()` never called. Fixed with `except Exception / finally: manager.disconnect(ws)`.
+- **[#29] `frontend/src/ws.js`** — Client never sent any messages, causing the server's `receive_text()` loop to block indefinitely. Added a 30-second heartbeat: client sends `"ping"` every 30s while connected. Heartbeat timer is properly cleared on close and on manual disconnect.
+- **[#30] `api/main.py`** — `/api/pnl/history` filtered by `entry_time` instead of `exit_time`. Trades entered before the window but closed within it were excluded. Fixed to filter by `exit_time`.
+- **[#31] `frontend/src/components/PositionsTable.jsx`** — Risk (₹) column used `PnLCell` with a negated value, displaying the risk amount in red as if it were a realised loss. Changed to `PriceMono` (neutral styling).
+
+### Changed
+- **`api/main.py`** — Redis `KEYS` replaced with `scan_iter` in `_redis_broadcast_loop` to avoid blocking on large keyspaces.
+- **`frontend/src/ws.js`** — Removed stale `console.log` / `console.warn` calls.
+
+---
+
 ## [0.3.1] — 2026-04-09 — Backtest Run: Fixes & First Results
 
 ### Fixed

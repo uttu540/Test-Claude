@@ -144,7 +144,7 @@ export default function PositionsTable({ positions = [], loading = false, error 
                       <PriceMono price={p.planned_target_1} />
                     </td>
                     <td className="td text-right">
-                      <PnLCell pnl={p.initial_risk_amount ? -Math.abs(p.initial_risk_amount) : null} />
+                      <PriceMono price={p.initial_risk_amount} />
                     </td>
                     <td className="td text-right">
                       <span className="font-mono text-xs text-text-muted">
