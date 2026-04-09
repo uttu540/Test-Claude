@@ -128,6 +128,7 @@ export default function Navbar({ wsStatus }) {
             { to: '/signals',    label: 'Signals',   end: false },
             { to: '/trades',     label: 'Trades',    end: false },
             { to: '/pnl',        label: 'P&L',       end: false },
+            { to: '/logs',       label: 'Logs',      end: false },
             { to: '/changelog',  label: 'Guide',     end: false },
             { to: '/settings',   label: 'Settings',  end: false },
           ].map(({ to, label, end }) => (

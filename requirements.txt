@@ -31,7 +31,7 @@ pandas-ta                 # 130+ indicators, pure Python
 # TA-Lib==0.4.28
 
 # ── Data & Markets ────────────────────────────────────────────────────────────
-yfinance==0.2.40          # fallback OHLCV data (no API key needed)
+yfinance==1.2.1           # fallback OHLCV data (no API key needed)
 nsepython==2.9            # NSE India: option chains, FII/DII, indices
 
 # ── AI ────────────────────────────────────────────────────────────────────────

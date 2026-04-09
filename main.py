@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import signal
 import sys
 from collections import deque
@@ -46,17 +47,43 @@ from services.technical_engine.signal_generator import (
 
 # ─── Logging Setup ────────────────────────────────────────────────────────────
 
+# Queue for shipping log records to Redis (drained by _log_publisher_task)
+_log_queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
+
+
+class _RedisQueueProcessor:
+    """Structlog processor: captures event dicts and enqueues for Redis publish."""
+    def __call__(self, logger, method, event_dict):
+        try:
+            _log_queue.put_nowait(dict(event_dict))
+        except asyncio.QueueFull:
+            pass
+        return event_dict
+
+
 structlog.configure(
     processors=[
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
+        _RedisQueueProcessor(),
         structlog.dev.ConsoleRenderer(colors=True),
     ],
     wrapper_class=structlog.stdlib.BoundLogger,
     context_class=dict,
     logger_factory=structlog.stdlib.LoggerFactory(),
 )
+
+
+async def _log_publisher_task() -> None:
+    """Drain _log_queue and PUBLISH each record to Redis logs:stream channel."""
+    redis = get_redis()
+    while True:
+        try:
+            event = await _log_queue.get()
+            await redis.publish("logs:stream", _json.dumps(event, default=str))
+        except Exception:
+            pass
 
 log     = structlog.get_logger("main")
 console = Console()
@@ -304,10 +331,11 @@ async def startup() -> None:
     log.info("startup.db_init")
     await init_db()
 
-    # 2. Redis health check
+    # 2. Redis health check + start log publisher
     redis = get_redis()
     await redis.ping()
     log.info("startup.redis_ok")
+    asyncio.create_task(_log_publisher_task())
 
     # 3. Seed historical data (skips if already seeded today)
     last_seed = await redis.get("meta:last_seed_date")

@@ -78,6 +78,7 @@ async def startup() -> None:
     await init_db()
     asyncio.create_task(_redis_broadcast_loop())
     asyncio.create_task(_db_broadcast_loop())
+    asyncio.create_task(_log_broadcast_loop())
 
 
 async def _redis_broadcast_loop() -> None:
@@ -100,6 +101,28 @@ async def _redis_broadcast_loop() -> None:
         except Exception as e:
             log.warning("api.broadcast_error", error=str(e))
             await asyncio.sleep(5)
+
+
+async def _log_broadcast_loop() -> None:
+    """Subscribe to Redis logs:stream and forward each record to WebSocket clients."""
+    redis = get_redis()
+    pubsub = redis.pubsub()
+    await pubsub.subscribe("logs:stream")
+    try:
+        async for message in pubsub.listen():
+            if message["type"] != "message":
+                continue
+            if not manager._clients:
+                continue
+            try:
+                data = json.loads(message["data"])
+                await manager.broadcast({"type": "log", "data": data})
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning("api.log_broadcast_error", error=str(e))
+    finally:
+        await pubsub.unsubscribe("logs:stream")
 
 
 async def _db_broadcast_loop() -> None:
