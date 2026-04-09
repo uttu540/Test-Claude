@@ -132,7 +132,7 @@ NEWS_API_KEY=...          # NewsAPI.org for sentiment (free tier works)
 | Signals | `/signals` | Real-time signals with direction filter, confidence bars, indicator details |
 | Trades | `/trades` | Full trade history (paginated) |
 | P&L History | `/pnl` | Daily P&L bar chart (last N days) |
-| Guide | `/changelog` | Setup guide and changelog |
+| Guide | `/changelog` | Quick-start, **glossary of all terms**, mode reference, env vars, changelog |
 
 The navbar shows:
 - IST clock (live)
@@ -140,6 +140,28 @@ The navbar shows:
 - Trading mode badge (DEV / PAPER / SEMI-AUTO / LIVE)
 - Capital
 - **Square Off All** button (emergency close all intraday positions)
+
+---
+
+## Key Terms
+
+Full plain-English definitions are available in the dashboard at **Guide → Glossary** (`/changelog`). Quick reference:
+
+| Term | Meaning |
+|------|---------|
+| **Market Regime** | Bot's classification of current market: `TRENDING_UP`, `TRENDING_DOWN`, `RANGING`, `HIGH_VOLATILITY`. Signals are filtered by regime. |
+| **Signal** | A trading opportunity detected by the technical engine. Has a direction (LONG/SHORT), confidence (0–100), and signal type. |
+| **Confidence** | 0–100 score. Below 50 → skipped before Claude AI. Below 55 → skipped even if Claude approves. |
+| **Signal Type** | Pattern that triggered the signal: `BREAKOUT_HIGH/LOW`, `EMA_CROSS_UP/DOWN`, `MACD_CROSS_UP/DOWN`, `RSI_OVERSOLD/OVERBOUGHT`, `ORB_BREAKOUT`, `VWAP_RECLAIM`, `BB_SQUEEZE` |
+| **ATR** | Average True Range — how much a stock moves per candle. SL = 1.5× ATR, Target = 3× ATR. |
+| **R:R** | Risk:Reward ratio. Default 2:1 — target is twice as far as the stop-loss. |
+| **SL** | Stop-loss — the price at which the trade exits automatically to cap losses. |
+| **Square Off** | Closing all intraday positions. Auto-triggered at 3:12 PM IST; also available as an emergency button in the navbar. |
+| **VWAP** | Volume Weighted Average Price — institutional benchmark price for the day. |
+| **ORB** | Opening Range Breakout — breakout above/below the 9:15–9:30 AM high/low. |
+| **Sharpe Ratio** | Risk-adjusted return. > 1 is good; > 2 is excellent. |
+| **Profit Factor** | Gross profit ÷ gross loss. > 1.5 is a healthy system. |
+| **Max Drawdown** | Largest peak-to-trough loss over a period. Lower is better. |
 
 ---
 

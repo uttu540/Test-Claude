@@ -10,6 +10,18 @@ _Next up: Tune signal confidence thresholds based on backtest findings (raise OR
 
 ---
 
+## [0.4.3] — 2026-04-09 — Docs & Glossary
+
+### Added
+- **`frontend/src/pages/Changelog.jsx`** — Full glossary of all technical terms shown in the dashboard, organized into five categories: Dashboard, Signals, Trades & Risk, Indicators, Performance Metrics. Each term has a one-line plain-English summary and a detailed explanation. Accessible at `/changelog` → Glossary section.
+- **`README.md`** — Key Terms quick-reference table covering all dashboard terms (Market Regime, Signal, ATR, R:R, VWAP, ORB, Sharpe, Profit Factor, Max Drawdown, etc.)
+
+### Changed
+- **`frontend/src/pages/Changelog.jsx`** — Added Phase 9 entry documenting the 0.4.2 WebSocket fixes
+- **`README.md`** — Guide page description updated to mention the in-app glossary
+
+---
+
 ## [0.4.2] — 2026-04-09 — WebSocket & Dashboard Live-Update Fixes
 
 ### Fixed
