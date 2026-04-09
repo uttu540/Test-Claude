@@ -732,6 +732,15 @@ class MultiTimeframeSignalEngine:
         # Apply regime filter — remove signals that don't suit current conditions
         all_signals = self._filter.apply(all_signals, regime)
 
+        # Apply per-signal-type minimum confidence overrides (from backtest findings)
+        orb_min  = int(self._config.get("orb_min_confidence",  70))
+        vwap_min = int(self._config.get("vwap_min_confidence", 70))
+        all_signals = [
+            s for s in all_signals
+            if not (s.signal_type == SignalType.ORB_BREAKOUT  and s.confidence < orb_min)
+            and not (s.signal_type == SignalType.VWAP_RECLAIM and s.confidence < vwap_min)
+        ]
+
         all_signals.sort(key=lambda s: s.confidence, reverse=True)
         return all_signals
 

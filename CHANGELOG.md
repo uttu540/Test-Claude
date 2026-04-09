@@ -6,7 +6,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 ## [Unreleased]
-_Next up: Tune signal confidence thresholds based on backtest findings (raise ORB threshold, tighten VWAP filter); paper trading validation run_
+_Next up: Paper trading validation run (#33) — 2-week gate before live_
+
+---
+
+## [0.4.4] — 2026-04-09 — Signal Threshold Tuning (Backtest-Driven)
+
+### Changed
+- **`config/bot_config.py`** — Added two new per-signal confidence floor parameters, tunable live from the Settings dashboard:
+  - `orb_min_confidence` (default **70**, was effectively 65) — raised based on backtest ORB win rate of 38%, which is marginal at 2:1 R:R
+  - `vwap_min_confidence` (default **70**, was effectively 60) — raised based on backtest VWAP_RECLAIM win rate of 39%
+- **`services/technical_engine/signal_generator.py`** — Applied per-signal-type minimum confidence filter in `MultiTimeframeSignalEngine.analyse()` after regime filter. ORB and VWAP signals below their respective floors are now dropped before reaching Claude AI.
+
+### Closed stale issues
+- #10 Backtesting framework — shipped in v0.3.0
+- #11 DailyPnL materialisation — shipped in v0.4.0
+- #12 Paper trading infrastructure — shipped in v0.4.0
+- #13 Human approval gate (semi-auto) — shipped in v0.3.0
+
+### Production roadmap issues opened
+- #32 Signal threshold tuning (this change)
+- #33 Paper trading validation run (2-week gate)
+- #34 CORS tighten for production
+- #35 Server deployment + process supervisor
+- #36 Kite re-auth failure handling + retry
+- #37 Database backups (daily pg_dump)
+- #38 External health monitoring
+- #39 Semi-auto live run (first 2 weeks on real capital)
+- #40 Fully automated live mode
 
 ---
 

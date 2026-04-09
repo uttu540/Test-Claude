@@ -66,6 +66,23 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "label": "VWAP Reclaim / Rejection", "desc": "Price crossing VWAP with volume confirmation.",
         "group": "strategies",
     },
+    # ── Per-signal minimum confidence overrides ────────────────────────────────
+    # Backtest finding (90d, Nifty 50, Apr 2026): ORB WR=38%, VWAP WR=39% at
+    # default thresholds. Raising their floors to 70+ filters low-quality setups.
+    "orb_min_confidence": {
+        "default": 70, "type": "int", "min": 50, "max": 100, "step": 5,
+        "label": "ORB Min Confidence",
+        "desc": "ORB signals below this are dropped regardless of global threshold. "
+                "Backtest WR was 38% at default — raised to 70 to filter weak setups.",
+        "group": "strategies",
+    },
+    "vwap_min_confidence": {
+        "default": 70, "type": "int", "min": 50, "max": 100, "step": 5,
+        "label": "VWAP Min Confidence",
+        "desc": "VWAP_RECLAIM signals below this are dropped. "
+                "Backtest WR was 39% at default — raised to 70 to require stronger confirmation.",
+        "group": "strategies",
+    },
     # ── EMA periods ───────────────────────────────────────────────────────────
     "ema_fast":  {"default": 9,   "type": "int", "min": 3,  "max": 50,  "step": 1, "label": "EMA Fast",        "group": "indicators"},
     "ema_mid":   {"default": 21,  "type": "int", "min": 5,  "max": 100, "step": 1, "label": "EMA Mid",         "group": "indicators"},
