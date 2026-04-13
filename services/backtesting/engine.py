@@ -32,7 +32,7 @@ import structlog
 
 from config.settings import settings
 from services.market_regime.detector import MarketRegimeDetector
-from services.risk_engine.engine import RiskEngine
+from services.risk_engine.engine import RiskDecision, RiskEngine
 from services.technical_engine.indicators import compute_all
 from services.technical_engine.signal_generator import (
     Direction,
@@ -92,19 +92,29 @@ class BacktestEngine:
 
     def __init__(
         self,
-        symbols:    list[str],
-        start_date: date,
-        end_date:   date,
-        timeframes: list[str] | None = None,
-        regime_aware: bool = True,
+        symbols:              list[str],
+        start_date:           date,
+        end_date:             date,
+        timeframes:           list[str] | None = None,
+        regime_aware:         bool = True,
+        min_confidence:       int  = 80,
+        regime_aligned_only:  bool = True,
+        disabled_signals:     list[str] | None = None,
+        min_signal_timeframes: int = 2,
     ) -> None:
-        self._symbols      = symbols
-        self._start        = start_date
-        self._end          = end_date
-        self._timeframes   = timeframes or ["15min", "1hr", "1day"]
-        self._regime_aware = regime_aware
-        self._signal_engine = MultiTimeframeSignalEngine()
-        self._risk_engine   = RiskEngine()
+        self._symbols              = symbols
+        self._start                = start_date
+        self._end                  = end_date
+        self._timeframes           = timeframes or ["15min", "1hr", "1day"]
+        self._regime_aware         = regime_aware
+        self._min_confidence       = min_confidence
+        self._regime_aligned_only  = regime_aligned_only
+        # Require signal direction to agree on this many timeframes (MTF confluence)
+        self._min_signal_tfs       = min_signal_timeframes
+        # Signal types to exclude entirely (e.g. noisy intraday signals on daily TF)
+        self._disabled_signals     = set(disabled_signals or [])
+        self._signal_engine   = MultiTimeframeSignalEngine()
+        self._risk_engine     = RiskEngine()
         self._regime_detector = MarketRegimeDetector()
 
     async def run(self) -> BacktestResult:
@@ -175,17 +185,29 @@ class BacktestEngine:
             return []
 
         trades:         list[SimulatedTrade] = []
-        window          = 200           # lookback rows passed to signal detector
-        in_trade:       bool = False    # one-at-a-time position tracking
-        exit_after_idx: int  = -1      # index after which we're free to trade again
 
-        detector = self._signal_engine._detector
+        # Window is TF-aware: daily data needs far fewer lookback bars than 15min.
+        # For daily: 60 bars ≈ 3 months of context (indicators already pre-computed
+        # on full history, so EMA-200 values are correct even in a 60-bar slice).
+        # For intraday: 200 bars ≈ 2 trading days of 15min context.
+        window = 60 if primary_tf == "1day" else 200
+
+        # Position tracking — one trade at a time per symbol.
+        # exit_after_idx marks the candle index after which the previous trade
+        # has resolved and we are free to take a new position.
+        in_trade:       bool = False
+        exit_after_idx: int  = -1
+
+        detector   = self._signal_engine._detector
         reg_filter = self._signal_engine._filter
 
         for i in range(window, len(primary_df)):
-            # Skip while we're in an open position
-            if in_trade and i <= exit_after_idx:
-                continue
+            # ── Release position once exit candle is passed ───────────────────
+            if in_trade:
+                if i > exit_after_idx:
+                    in_trade = False
+                else:
+                    continue   # still inside a trade, skip this candle
 
             cutoff = primary_df.index[i]
 
@@ -199,12 +221,12 @@ class BacktestEngine:
             if not snapshot:
                 continue
 
-            # Determine regime from pre-computed daily data (last row only)
+            # ── Regime detection from pre-computed daily row ──────────────────
             regime = "UNKNOWN"
             if self._regime_aware and "1day" in snapshot:
                 day_latest = snapshot["1day"].iloc[-1]
-                adx = day_latest.get("adx") if hasattr(day_latest, "get") else day_latest["adx"] if "adx" in snapshot["1day"].columns else None
-                ema_stack = day_latest.get("ema_stack") if hasattr(day_latest, "get") else day_latest["ema_stack"] if "ema_stack" in snapshot["1day"].columns else None
+                adx       = day_latest["adx"]       if "adx"       in snapshot["1day"].columns else None
+                ema_stack = day_latest["ema_stack"]  if "ema_stack" in snapshot["1day"].columns else None
                 if adx is not None and not pd.isna(adx):
                     if adx >= 25:
                         regime = "TRENDING_UP" if (ema_stack or 0) >= 0 else "TRENDING_DOWN"
@@ -213,22 +235,27 @@ class BacktestEngine:
                     else:
                         regime = "TRENDING_UP" if (ema_stack or 0) >= 0 else "TRENDING_DOWN"
 
-            # Detect signals using pre-computed data (skip compute_all)
+            # ── Regime-aligned filter: skip RANGING; only trade with the trend ─
+            if self._regime_aligned_only and regime in ("RANGING", "UNKNOWN"):
+                continue
+
+            # ── Signal detection (pre-computed, no re-running compute_all) ─────
             all_signals = []
             for tf, tf_df in snapshot.items():
-                sigs = detector.detect(
-                    tf_df, symbol, tf,
-                    pre_computed=True,
-                )
+                sigs = detector.detect(tf_df, symbol, tf, pre_computed=True)
                 all_signals.extend(sigs)
 
             if not all_signals:
                 continue
 
-            # Confluence boost + regime filter (same logic as MultiTimeframeSignalEngine)
-            directions_by_tf = {}
-            for s in all_signals:
-                directions_by_tf[s.timeframe] = s.direction
+            # Drop disabled signal types (e.g. VWAP_RECLAIM, ORB_BREAKOUT on daily TF)
+            if self._disabled_signals:
+                all_signals = [s for s in all_signals if s.signal_type.value not in self._disabled_signals]
+            if not all_signals:
+                continue
+
+            # Confluence boost + regime filter
+            directions_by_tf = {s.timeframe: s.direction for s in all_signals}
             all_signals = self._signal_engine._apply_confluence_boost(all_signals, directions_by_tf)
             all_signals = reg_filter.apply(all_signals, regime)
             all_signals.sort(key=lambda s: s.confidence, reverse=True)
@@ -237,8 +264,27 @@ class BacktestEngine:
                 continue
 
             top = all_signals[0]
-            if top.confidence < 65:
+
+            # ── Minimum confidence gate ────────────────────────────────────────
+            if top.confidence < self._min_confidence:
                 continue
+
+            # ── Regime-direction alignment: only trade WITH the trend ──────────
+            if self._regime_aligned_only:
+                if regime == "TRENDING_UP"   and top.direction != Direction.BULLISH:
+                    continue
+                if regime == "TRENDING_DOWN" and top.direction != Direction.BEARISH:
+                    continue
+
+            # ── Multi-timeframe confluence: require signal direction to agree
+            #    on min_signal_tfs timeframes (filters single-TF noise) ─────────
+            if self._min_signal_tfs > 1:
+                agreeing_tfs = len({
+                    s.timeframe for s in all_signals
+                    if s.direction == top.direction
+                })
+                if agreeing_tfs < self._min_signal_tfs:
+                    continue
 
             atr = top.indicators.get("atr_14", 0)
             if not atr:
@@ -253,23 +299,38 @@ class BacktestEngine:
             if not risk_dec.approved:
                 continue
 
-            # Simulate exit on raw (uncomputed) candles to avoid indicator columns
+            # ── Daily TF: widen stop/target to account for intraday candle noise ──
+            # Default 1.5x ATR stop is calibrated for 15min; daily candles have
+            # ~10-20x the range, so normal daily dips trigger stops prematurely.
+            # 2.5x stop / 5x target preserves the 2:1 R:R ratio with more room.
+            if primary_tf == "1day":
+                is_long  = top.direction == Direction.BULLISH
+                entry    = top.price_at_signal
+                new_stop = round(entry - 2.5 * atr if is_long else entry + 2.5 * atr, 2)
+                new_tgt  = round(entry + 5.0 * atr if is_long else entry - 5.0 * atr, 2)
+                risk_dec = RiskDecision(
+                    approved      = True,
+                    reason        = "daily_adjusted",
+                    position_size = risk_dec.position_size,
+                    risk_amount   = risk_dec.risk_amount,
+                    stop_loss     = new_stop,
+                    target        = new_tgt,
+                )
+
+            # Simulate exit on raw OHLCV candles (no indicator columns)
             raw_primary = data.get(primary_tf, primary_df)
-            future_raw = raw_primary[raw_primary.index > cutoff]
+            future_raw  = raw_primary[raw_primary.index > cutoff]
             trade = self._simulate_exit(
-                signal       = top,
-                risk_dec     = risk_dec,
-                future_df    = future_raw,
-                regime       = regime,
-                entry_date   = cutoff.date() if hasattr(cutoff, "date") else cutoff,
+                signal     = top,
+                risk_dec   = risk_dec,
+                future_df  = future_raw,
+                regime     = regime,
+                entry_date = cutoff.date() if hasattr(cutoff, "date") else cutoff,
             )
             if trade:
                 trades.append(trade)
-                in_trade = True
-                # Mark roughly how many candles until the trade resolves
+                in_trade       = True
                 exit_after_idx = i + trade.holding_candles
-
-            in_trade = False  # reset for next signal
 
         return trades
 

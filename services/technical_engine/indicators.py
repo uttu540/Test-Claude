@@ -28,8 +28,8 @@ import pandas_ta as ta
 class IndicatorConfig:
     """Tweak indicator parameters here without touching computation code."""
     # Moving Averages
-    ema_fast: int = 9
-    ema_mid: int  = 21
+    ema_fast: int = 8
+    ema_mid: int  = 33
     ema_slow: int = 50
     ema_trend: int = 200
     sma_20: int   = 20

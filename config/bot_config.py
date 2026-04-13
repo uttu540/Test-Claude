@@ -84,8 +84,8 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "group": "strategies",
     },
     # ── EMA periods ───────────────────────────────────────────────────────────
-    "ema_fast":  {"default": 9,   "type": "int", "min": 3,  "max": 50,  "step": 1, "label": "EMA Fast",        "group": "indicators"},
-    "ema_mid":   {"default": 21,  "type": "int", "min": 5,  "max": 100, "step": 1, "label": "EMA Mid",         "group": "indicators"},
+    "ema_fast":  {"default": 8,   "type": "int", "min": 3,  "max": 50,  "step": 1, "label": "EMA Fast",        "group": "indicators"},
+    "ema_mid":   {"default": 33,  "type": "int", "min": 5,  "max": 100, "step": 1, "label": "EMA Mid",         "group": "indicators"},
     "ema_slow":  {"default": 50,  "type": "int", "min": 10, "max": 200, "step": 1, "label": "EMA Slow",        "group": "indicators"},
     "ema_trend": {"default": 200, "type": "int", "min": 50, "max": 500, "step": 1, "label": "EMA Trend (200)", "group": "indicators"},
     # ── Momentum ──────────────────────────────────────────────────────────────

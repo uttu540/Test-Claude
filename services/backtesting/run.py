@@ -123,6 +123,22 @@ def _parse_args() -> argparse.Namespace:
         "--no-regime-filter", action="store_true",
         help="Disable regime-based signal gating (useful for comparison)",
     )
+    parser.add_argument(
+        "--min-confidence", type=int, default=75,
+        help="Minimum signal confidence to trade (default: 75)",
+    )
+    parser.add_argument(
+        "--no-regime-align", action="store_true",
+        help="Allow counter-trend trades (default: only trade with the trend)",
+    )
+    parser.add_argument(
+        "--disabled-signals", nargs="+", default=[], metavar="SIG",
+        help="Signal types to exclude e.g. VWAP_RECLAIM ORB_BREAKOUT",
+    )
+    parser.add_argument(
+        "--min-signal-timeframes", type=int, default=2,
+        help="Require signal direction to agree on this many TFs (default: 2)",
+    )
     return parser.parse_args()
 
 
@@ -150,15 +166,21 @@ async def main() -> None:
         f"{len(symbols)} symbols  |  "
         f"{start_date} → {end_date}  |  "
         f"Timeframes: {', '.join(args.timeframes)}  |  "
-        f"Regime filter: {'OFF' if args.no_regime_filter else 'ON'}\n"
+        f"Regime filter: {'OFF' if args.no_regime_filter else 'ON'}  |  "
+        f"Min confidence: {args.min_confidence}  |  "
+        f"Regime-aligned: {'OFF' if args.no_regime_align else 'ON'}\n"
     )
 
     engine = BacktestEngine(
-        symbols       = symbols,
-        start_date    = start_date,
-        end_date      = end_date,
-        timeframes    = args.timeframes,
-        regime_aware  = not args.no_regime_filter,
+        symbols               = symbols,
+        start_date            = start_date,
+        end_date              = end_date,
+        timeframes            = args.timeframes,
+        regime_aware          = not args.no_regime_filter,
+        min_confidence        = args.min_confidence,
+        regime_aligned_only   = not args.no_regime_align,
+        disabled_signals      = args.disabled_signals or None,
+        min_signal_timeframes = args.min_signal_timeframes,
     )
 
     result  = await engine.run()
