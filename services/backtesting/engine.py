@@ -11,12 +11,30 @@ Data sources (tried in order):
 No orders are placed. Trades are simulated by checking whether
 stop-loss or target was hit in candles following the signal.
 
+──────────────────────────────────────────────────────────────────
+Top-Down Analysis (trading_mode)
+──────────────────────────────────────────────────────────────────
+Signals follow a two-step process — spot on the higher TF, confirm
+on the lower TF, then execute.
+
+  SWING mode (trading_mode="swing")
+    Setup TF  : Daily  — determines trend direction / regime
+    Trigger TF: 1H     — provides entry confirmation signal
+    Hold      : up to 5 trading days (30 × 1H candles)
+    Exit      : TARGET | STOP | MAX_HOLD  (no forced EOD exit)
+
+  INTRADAY mode (trading_mode="intraday")
+    Setup TF  : 1H     — determines intraday directional bias
+    Trigger TF: 15min  — provides entry signal
+    Hold      : up to 20 × 15min candles (~5 trading hours)
+    Exit      : TARGET | STOP | EOD (forced close at 15:20 IST)
+
 Exit logic (no look-ahead bias):
-  - Entry:  next candle's open after signal fires
+  - Entry:  next trigger-TF candle open after signal fires
   - Stop:   first candle where low ≤ stop_loss (LONG) or high ≥ stop_loss (SHORT)
   - Target: first candle where high ≥ target (LONG) or low ≤ target (SHORT)
-  - EOD:    position closed at 3:20 PM candle close if neither hit
-  - Max hold: 5 days (swing trade cap)
+  - EOD:    intraday only — closed at 15:20 candle close
+  - Max hold: mode-dependent (see above)
 """
 from __future__ import annotations
 
@@ -38,6 +56,7 @@ from services.technical_engine.signal_generator import (
     Direction,
     MultiTimeframeSignalEngine,
     Signal,
+    SignalType,
 )
 
 log = structlog.get_logger(__name__)
@@ -90,32 +109,66 @@ class BacktestEngine:
         result = await engine.run()
     """
 
+    # Per-mode config: (setup_tf, trigger_tf, max_hold_candles, eod_exit)
+    _MODE_CONFIG: dict[str, tuple[str, str, int, bool]] = {
+        #             setup     trigger   hold  eod
+        "swing":     ("1day",  "1hr",    30,   False),
+        "intraday":  ("1hr",   "15min",  20,   True),
+    }
+
     def __init__(
         self,
-        symbols:              list[str],
-        start_date:           date,
-        end_date:             date,
-        timeframes:           list[str] | None = None,
-        regime_aware:         bool = True,
-        min_confidence:       int  = 80,
-        regime_aligned_only:  bool = True,
-        disabled_signals:     list[str] | None = None,
-        min_signal_timeframes: int = 2,
+        symbols:                list[str],
+        start_date:             date,
+        end_date:               date,
+        timeframes:             list[str] | None = None,
+        regime_aware:           bool = True,
+        min_confidence:         int  = 80,
+        regime_aligned_only:    bool = True,
+        disabled_signals:       list[str] | None = None,
+        min_signal_timeframes:  int = 1,
+        min_confirming_signals: int = 1,
+        trading_mode:           str = "intraday",   # "intraday" | "swing"
     ) -> None:
         self._symbols              = symbols
         self._start                = start_date
         self._end                  = end_date
-        self._timeframes           = timeframes or ["15min", "1hr", "1day"]
         self._regime_aware         = regime_aware
         self._min_confidence       = min_confidence
         self._regime_aligned_only  = regime_aligned_only
-        # Require signal direction to agree on this many timeframes (MTF confluence)
         self._min_signal_tfs       = min_signal_timeframes
+        # Require this many DISTINCT signal types in the same direction before entering.
+        # Default 1 = any single signal can trigger (backward-compatible).
+        # Set ≥ 2 to demand genuine confluence (e.g. EMA cross + Engulfing + RVOL).
+        self._min_confirming_signals = min_confirming_signals
         # Signal types to exclude entirely (e.g. noisy intraday signals on daily TF)
         self._disabled_signals     = set(disabled_signals or [])
+
+        # ── Trading mode: sets setup_tf, trigger_tf, max_hold, eod_exit ──────
+        self._trading_mode = trading_mode
+        mode_cfg = self._MODE_CONFIG.get(trading_mode, self._MODE_CONFIG["intraday"])
+        self._setup_tf,  self._trigger_tf, self._max_hold, self._eod_exit = mode_cfg
+
+        # Timeframes: caller can override, otherwise auto-set from mode.
+        # Always ensure both setup_tf and trigger_tf are present.
+        if timeframes:
+            self._timeframes = timeframes
+        else:
+            self._timeframes = [self._trigger_tf, self._setup_tf]
+        # Guarantee both setup and trigger TFs are in the list
+        for tf in (self._setup_tf, self._trigger_tf):
+            if tf not in self._timeframes:
+                self._timeframes.append(tf)
+
         self._signal_engine   = MultiTimeframeSignalEngine()
         self._risk_engine     = RiskEngine()
         self._regime_detector = MarketRegimeDetector()
+
+        # Level 1 & 2 lookups — populated in run() before the symbol loop
+        self._market_regime_by_date:     dict[date, str]  = {}   # date → TRENDING_UP/DOWN/RANGING
+        self._vix_level_by_date:         dict[date, str]  = {}   # date → CALM/ELEVATED/HIGH/EXTREME
+        # P1: True = Nifty 200 EMA is rising on that date (bull phase → block all shorts)
+        self._nifty_200ema_rising_by_date: dict[date, bool] = {}
 
     async def run(self) -> BacktestResult:
         result = BacktestResult(
@@ -124,6 +177,9 @@ class BacktestEngine:
             end_date   = self._end,
             timeframes = self._timeframes,
         )
+
+        # ── Level 1 & 2: load market-wide data ONCE before the symbol loop ────
+        await self._load_market_indices()
 
         for symbol in self._symbols:
             log.info("backtest.symbol_start", symbol=symbol)
@@ -145,6 +201,105 @@ class BacktestEngine:
         )
         return result
 
+    # ── Market-wide data (Level 1 & 2) ───────────────────────────────────────
+
+    async def _load_market_indices(self) -> None:
+        """
+        Load Nifty 50 index and India VIX daily data for the backtest period.
+        Populates:
+          _market_regime_by_date : date → TRENDING_UP | TRENDING_DOWN | RANGING
+          _vix_level_by_date     : date → CALM | ELEVATED | HIGH | EXTREME
+        Falls back to empty dicts silently — backtesting still runs, just
+        without market-level filters (same as before).
+        """
+        import yfinance as yf
+
+        load_start = self._start - timedelta(days=60)   # extra buffer for indicators
+        load_end   = (self._end + timedelta(days=1)).isoformat()
+
+        # ── Nifty 50 index → Level 1 market regime ───────────────────────────
+        try:
+            raw = yf.Ticker("^NSEI").history(
+                start       = load_start.isoformat(),
+                end         = load_end,
+                interval    = "1d",
+                auto_adjust = True,
+            )
+            if not raw.empty:
+                raw.index = pd.to_datetime(raw.index)
+                if raw.index.tz is not None:
+                    raw.index = raw.index.tz_convert("Asia/Kolkata").tz_localize(None)
+                raw = raw.rename(columns={
+                    "Open": "open", "High": "high",
+                    "Low": "low",   "Close": "close", "Volume": "volume",
+                })[["open", "high", "low", "close", "volume"]]
+
+                nifty_df = compute_all(raw)
+                for ts, row in nifty_df.iterrows():
+                    d         = ts.date() if hasattr(ts, "date") else ts
+                    adx       = row.get("adx")       if "adx"       in nifty_df.columns else None
+                    ema_stack = row.get("ema_stack")  if "ema_stack" in nifty_df.columns else None
+                    if adx is not None and not pd.isna(adx):
+                        if adx < 20:
+                            self._market_regime_by_date[d] = "RANGING"
+                        else:
+                            self._market_regime_by_date[d] = (
+                                "TRENDING_UP" if (ema_stack or 0) >= 0 else "TRENDING_DOWN"
+                            )
+                # P1: store whether Nifty 200 EMA is rising per date.
+                # "Rising" = today's EMA_200 > EMA_200 from 10 trading days ago.
+                # A rising 200 EMA = long-term bull phase → block all short trades.
+                ema200_col = "ema_200"
+                if ema200_col in nifty_df.columns:
+                    ema200_rising = nifty_df[ema200_col] > nifty_df[ema200_col].shift(10)
+                    for ts, is_rising in ema200_rising.items():
+                        if not pd.isna(is_rising):
+                            d = ts.date() if hasattr(ts, "date") else ts
+                            self._nifty_200ema_rising_by_date[d] = bool(is_rising)
+
+                log.info(
+                    "backtest.nifty_loaded",
+                    trading_days   = len(self._market_regime_by_date),
+                    trending_up    = sum(1 for v in self._market_regime_by_date.values() if v == "TRENDING_UP"),
+                    trending_down  = sum(1 for v in self._market_regime_by_date.values() if v == "TRENDING_DOWN"),
+                    ranging        = sum(1 for v in self._market_regime_by_date.values() if v == "RANGING"),
+                    bull_phase_days= sum(1 for v in self._nifty_200ema_rising_by_date.values() if v),
+                )
+        except Exception as e:
+            log.warning("backtest.nifty_load_failed", error=str(e))
+
+        # ── India VIX → Level 2 volatility gate ──────────────────────────────
+        try:
+            vix_raw = yf.Ticker("^INDIAVIX").history(
+                start       = load_start.isoformat(),
+                end         = load_end,
+                interval    = "1d",
+                auto_adjust = True,
+            )
+            if not vix_raw.empty:
+                vix_raw.index = pd.to_datetime(vix_raw.index)
+                if vix_raw.index.tz is not None:
+                    vix_raw.index = vix_raw.index.tz_convert("Asia/Kolkata").tz_localize(None)
+                for ts, row in vix_raw.iterrows():
+                    d = ts.date() if hasattr(ts, "date") else ts
+                    v = float(row.get("Close", row.get("close", 15)) or 15)
+                    if v > 25:
+                        self._vix_level_by_date[d] = "EXTREME"
+                    elif v > 20:
+                        self._vix_level_by_date[d] = "HIGH"
+                    elif v > 15:
+                        self._vix_level_by_date[d] = "ELEVATED"
+                    else:
+                        self._vix_level_by_date[d] = "CALM"
+                log.info(
+                    "backtest.vix_loaded",
+                    trading_days = len(self._vix_level_by_date),
+                    extreme_days = sum(1 for v in self._vix_level_by_date.values() if v == "EXTREME"),
+                    high_days    = sum(1 for v in self._vix_level_by_date.values() if v == "HIGH"),
+                )
+        except Exception as e:
+            log.warning("backtest.vix_load_failed", error=str(e))
+
     # ── Per-symbol ────────────────────────────────────────────────────────────
 
     async def _backtest_symbol(self, symbol: str) -> list[SimulatedTrade]:
@@ -160,8 +315,6 @@ class BacktestEngine:
             return []
 
         # ── Pre-compute indicators ONCE per timeframe (major speedup) ─────────
-        # Indicators are computed on the full df; rolling functions are causal
-        # (only use past data), so no look-ahead bias is introduced.
         precomputed: dict[str, pd.DataFrame] = {}
         for tf, df in data.items():
             try:
@@ -172,9 +325,12 @@ class BacktestEngine:
         if not precomputed:
             return []
 
-        # Use 15min as the primary timeframe for signal scanning
-        primary_tf = "15min" if "15min" in precomputed else list(precomputed.keys())[0]
-        primary_df = precomputed[primary_tf]
+        # ── Trigger TF is the primary scanning frame ───────────────────────────
+        # trigger_tf: the candle loop drives entry timing.
+        # setup_tf  : provides directional bias — must confirm direction before
+        #             a trigger signal is acted upon.
+        trigger_tf = self._trigger_tf if self._trigger_tf in precomputed else list(precomputed.keys())[0]
+        primary_df = precomputed[trigger_tf]
 
         # Filter to backtest date range
         primary_df = primary_df[
@@ -185,33 +341,43 @@ class BacktestEngine:
             return []
 
         trades:         list[SimulatedTrade] = []
+        # Context window: daily needs fewer bars than intraday (indicators pre-computed
+        # on full history so EMA-200 is always correct even in a small tail slice).
+        window = 60 if trigger_tf == "1day" else 200
 
-        # Window is TF-aware: daily data needs far fewer lookback bars than 15min.
-        # For daily: 60 bars ≈ 3 months of context (indicators already pre-computed
-        # on full history, so EMA-200 values are correct even in a 60-bar slice).
-        # For intraday: 200 bars ≈ 2 trading days of 15min context.
-        window = 60 if primary_tf == "1day" else 200
-
-        # Position tracking — one trade at a time per symbol.
-        # exit_after_idx marks the candle index after which the previous trade
-        # has resolved and we are free to take a new position.
+        # Position tracking: one open trade at a time per symbol.
         in_trade:       bool = False
         exit_after_idx: int  = -1
+
+        # ── Dead Cat Bounce (DCB) state machine ───────────────────────────────
+        # After a BREAKOUT_LOW breakdown, we often see a 1–3 bar bounce back up
+        # (short covering) before the real move down continues. Entering at the
+        # initial breakdown frequently gets stopped out by the bounce. Instead:
+        #   State 0 (IDLE):    No active breakdown tracked.
+        #   State 1 (BROKEN):  Breakdown bar seen. Track bounce high. Block entry.
+        #   State 2 (BOUNCED): Price bounced ≥ 0.4× ATR above breakdown level.
+        #                      Next bar that closes back below breakdown = entry.
+        # State resets after 8 bars (bounce window expired) or a trade is entered.
+        _dcb_state:          int   = 0     # 0=IDLE, 1=BROKEN, 2=BOUNCED
+        _dcb_breakdown_price: float = 0.0
+        _dcb_breakdown_atr:   float = 0.0
+        _dcb_bounce_high:     float = 0.0
+        _dcb_bar_count:       int   = 0    # bars since breakdown
 
         detector   = self._signal_engine._detector
         reg_filter = self._signal_engine._filter
 
         for i in range(window, len(primary_df)):
-            # ── Release position once exit candle is passed ───────────────────
+            # ── Release position once its exit candle is passed ───────────────
             if in_trade:
                 if i > exit_after_idx:
                     in_trade = False
                 else:
-                    continue   # still inside a trade, skip this candle
+                    continue
 
             cutoff = primary_df.index[i]
 
-            # Build per-timeframe slices from pre-computed data (no recomputation)
+            # Build per-timeframe slices (no recomputation, just tail slicing)
             snapshot: dict[str, pd.DataFrame] = {}
             for tf, df in precomputed.items():
                 tf_slice = df[df.index <= cutoff].tail(window)
@@ -221,42 +387,90 @@ class BacktestEngine:
             if not snapshot:
                 continue
 
-            # ── Regime detection from pre-computed daily row ──────────────────
-            regime = "UNKNOWN"
-            if self._regime_aware and "1day" in snapshot:
-                day_latest = snapshot["1day"].iloc[-1]
-                adx       = day_latest["adx"]       if "adx"       in snapshot["1day"].columns else None
-                ema_stack = day_latest["ema_stack"]  if "ema_stack" in snapshot["1day"].columns else None
-                if adx is not None and not pd.isna(adx):
-                    if adx >= 25:
-                        regime = "TRENDING_UP" if (ema_stack or 0) >= 0 else "TRENDING_DOWN"
-                    elif adx < 20:
-                        regime = "RANGING"
-                    else:
-                        regime = "TRENDING_UP" if (ema_stack or 0) >= 0 else "TRENDING_DOWN"
+            candle_date = cutoff.date() if hasattr(cutoff, "date") else cutoff
 
-            # ── Regime-aligned filter: skip RANGING; only trade with the trend ─
-            if self._regime_aligned_only and regime in ("RANGING", "UNKNOWN"):
+            # ── Level 2: VIX gate — check before any computation ─────────────
+            vix_level = self._vix_level_by_date.get(candle_date, "CALM")
+            if vix_level == "EXTREME":
+                continue   # No trading during extreme fear (VIX > 25)
+
+            # ── Step 1: Regime from daily TF (setup_tf for swing, or 1day if present)
+            regime = "UNKNOWN"
+            regime_ref_tf = self._setup_tf if self._setup_tf in snapshot else (
+                "1day" if "1day" in snapshot else None
+            )
+            if self._regime_aware and regime_ref_tf:
+                day_latest = snapshot[regime_ref_tf].iloc[-1]
+                adx       = day_latest.get("adx")       if "adx"       in snapshot[regime_ref_tf].columns else None
+                ema_stack = day_latest.get("ema_stack")  if "ema_stack" in snapshot[regime_ref_tf].columns else None
+                if adx is not None and not pd.isna(adx):
+                    regime = "TRENDING_UP"   if (ema_stack or 0) >= 0 else "TRENDING_DOWN"
+                    if adx < 20:
+                        regime = "RANGING"
+
+            # If VIX is HIGH (20–25), override regime → HIGH_VOLATILITY so only
+            # the safest signals (VWAP_RECLAIM) are allowed by the regime filter.
+            if vix_level == "HIGH":
+                regime = "HIGH_VOLATILITY"
+
+            if self._regime_aligned_only and regime in ("RANGING", "UNKNOWN", "HIGH_VOLATILITY"):
                 continue
 
-            # ── Signal detection (pre-computed, no re-running compute_all) ─────
-            all_signals = []
-            for tf, tf_df in snapshot.items():
-                sigs = detector.detect(tf_df, symbol, tf, pre_computed=True)
-                all_signals.extend(sigs)
+            # ── Level 1: Market regime (Nifty) must agree with stock regime ───
+            # If Nifty is trending up but this stock is trending down (or vice
+            # versa), the stock is fighting the market — skip it entirely.
+            market_regime = self._market_regime_by_date.get(candle_date)
+            if market_regime and market_regime not in ("RANGING", "UNKNOWN"):
+                if regime not in ("RANGING", "UNKNOWN") and regime != market_regime:
+                    continue   # Stock contradicts market direction → skip
+
+            # ── Step 2: Setup TF directional bias ────────────────────────────
+            setup_bias = self._get_setup_bias(snapshot, regime)
+            if setup_bias is None:
+                continue
+
+            # ── P1: Hard gate — never short when Nifty 200 EMA is rising ─────
+            # A rising 200 EMA = Nifty is in a long-term bull phase.
+            # Individual stock shorts in a bull market fight the market tide and
+            # fail 63–69% of the time (vs 42–48% in bear phases). Skip them all.
+            if setup_bias == Direction.BEARISH:
+                nifty_200_rising = self._nifty_200ema_rising_by_date.get(candle_date)
+                if nifty_200_rising is True:
+                    continue
+
+            # ── DCB state machine: advance every candle (before signal check) ──
+            _candle = primary_df.iloc[i]
+            _bar_high = float(_candle.get("high", 0) or 0)
+            if _dcb_state in (1, 2):
+                _dcb_bar_count += 1
+                if _bar_high > _dcb_bounce_high:
+                    _dcb_bounce_high = _bar_high
+                # Transition 1→2: bounce ≥ 0.4× ATR above breakdown
+                if _dcb_state == 1 and _dcb_breakdown_atr > 0:
+                    if (_dcb_bounce_high - _dcb_breakdown_price) >= 0.4 * _dcb_breakdown_atr:
+                        _dcb_state = 2
+                # Expire after 8 bars with no retest
+                if _dcb_bar_count >= 8:
+                    _dcb_state = 0; _dcb_breakdown_price = 0.0
+                    _dcb_bounce_high = 0.0; _dcb_bar_count = 0
+
+            # ── Step 3: Trigger TF signals (entry confirmation) ──────────────
+            # Only signals on the trigger TF that match the setup bias are considered.
+            all_signals: list[Signal] = []
+            if trigger_tf in snapshot:
+                raw_sigs = detector.detect(snapshot[trigger_tf], symbol, trigger_tf, pre_computed=True)
+                all_signals = [s for s in raw_sigs if s.direction == setup_bias]
 
             if not all_signals:
                 continue
 
-            # Drop disabled signal types (e.g. VWAP_RECLAIM, ORB_BREAKOUT on daily TF)
+            # Drop disabled signal types
             if self._disabled_signals:
                 all_signals = [s for s in all_signals if s.signal_type.value not in self._disabled_signals]
             if not all_signals:
                 continue
 
-            # Confluence boost + regime filter
-            directions_by_tf = {s.timeframe: s.direction for s in all_signals}
-            all_signals = self._signal_engine._apply_confluence_boost(all_signals, directions_by_tf)
+            # Regime filter (removes signal types not suited for this regime)
             all_signals = reg_filter.apply(all_signals, regime)
             all_signals.sort(key=lambda s: s.confidence, reverse=True)
 
@@ -265,28 +479,49 @@ class BacktestEngine:
 
             top = all_signals[0]
 
-            # ── Minimum confidence gate ────────────────────────────────────────
+            # ── Step 4: Quality gates ─────────────────────────────────────────
             if top.confidence < self._min_confidence:
                 continue
 
-            # ── Regime-direction alignment: only trade WITH the trend ──────────
-            if self._regime_aligned_only:
-                if regime == "TRENDING_UP"   and top.direction != Direction.BULLISH:
+            # ── DCB intercept for BREAKOUT_LOW signals ────────────────────────
+            if top.signal_type == SignalType.BREAKOUT_LOW:
+                if _dcb_state == 0:
+                    # First breakdown bar — record it and skip entry this candle
+                    _dcb_state = 1
+                    _dcb_breakdown_price = top.price_at_signal
+                    _atr_key = f"atr_{self._signal_engine._detector._cfg.atr_period}"
+                    _dcb_breakdown_atr = float(
+                        top.indicators.get(_atr_key) or top.indicators.get("atr_14", 0) or 0
+                    )
+                    _dcb_bounce_high = _bar_high
+                    _dcb_bar_count   = 0
+                    continue   # Block entry on initial breakdown
+                elif _dcb_state == 1:
+                    # Still in breakdown phase, no bounce yet — still block
                     continue
-                if regime == "TRENDING_DOWN" and top.direction != Direction.BEARISH:
+                elif _dcb_state == 2:
+                    # Bounce occurred and price is retesting below breakdown — allow!
+                    # Give a +20 confidence bonus for the confirmed retest pattern
+                    top = Signal(
+                        trading_symbol  = top.trading_symbol,
+                        timeframe       = top.timeframe,
+                        signal_type     = top.signal_type,
+                        direction       = top.direction,
+                        confidence      = min(top.confidence + 20, 100),
+                        price_at_signal = top.price_at_signal,
+                        indicators      = top.indicators,
+                        notes           = (top.notes or "") + " | DCB retest confirmed",
+                    )
+                    _dcb_state = 0   # Reset state — trade entered
+
+            # Multi-signal confirmation: require N distinct signal types
+            if self._min_confirming_signals > 1:
+                confirming_types = {s.signal_type for s in all_signals}
+                if len(confirming_types) < self._min_confirming_signals:
                     continue
 
-            # ── Multi-timeframe confluence: require signal direction to agree
-            #    on min_signal_tfs timeframes (filters single-TF noise) ─────────
-            if self._min_signal_tfs > 1:
-                agreeing_tfs = len({
-                    s.timeframe for s in all_signals
-                    if s.direction == top.direction
-                })
-                if agreeing_tfs < self._min_signal_tfs:
-                    continue
-
-            atr = top.indicators.get("atr_14", 0)
+            atr_key = f"atr_{self._signal_engine._detector._cfg.atr_period}"
+            atr = top.indicators.get(atr_key) or top.indicators.get("atr_14", 0)
             if not atr:
                 continue
 
@@ -299,27 +534,44 @@ class BacktestEngine:
             if not risk_dec.approved:
                 continue
 
-            # ── Daily TF: widen stop/target to account for intraday candle noise ──
-            # Default 1.5x ATR stop is calibrated for 15min; daily candles have
-            # ~10-20x the range, so normal daily dips trigger stops prematurely.
-            # 2.5x stop / 5x target preserves the 2:1 R:R ratio with more room.
-            if primary_tf == "1day":
+            # ── Swing mode: widen stop/target to 2×/6× ATR → 1:3 R:R ─────────
+            # Default risk engine uses 1.5×/3× (1:2 R:R), calibrated for 15min.
+            # Swing trades on 1H need more room to breathe over 2–5 days,
+            # and a 1:3 target lets winners compensate for the wider stop.
+            if self._trading_mode == "swing":
                 is_long  = top.direction == Direction.BULLISH
                 entry    = top.price_at_signal
-                new_stop = round(entry - 2.5 * atr if is_long else entry + 2.5 * atr, 2)
-                new_tgt  = round(entry + 5.0 * atr if is_long else entry - 5.0 * atr, 2)
+                new_stop = round(entry - 2.0 * atr if is_long else entry + 2.0 * atr, 2)
+                new_tgt  = round(entry + 6.0 * atr if is_long else entry - 6.0 * atr, 2)
                 risk_dec = RiskDecision(
                     approved      = True,
-                    reason        = "daily_adjusted",
+                    reason        = "swing_1_3_rr",
                     position_size = risk_dec.position_size,
                     risk_amount   = risk_dec.risk_amount,
                     stop_loss     = new_stop,
                     target        = new_tgt,
                 )
 
-            # Simulate exit on raw OHLCV candles (no indicator columns)
-            raw_primary = data.get(primary_tf, primary_df)
-            future_raw  = raw_primary[raw_primary.index > cutoff]
+            # ── Intraday short: widen stop to 2×ATR / target to 5×ATR (1:2.5) ──
+            # Default 1.5×/3× is too tight for intraday shorts — gap-up opens
+            # blow through stops overnight. 2×/5× gives more breathing room
+            # while still offering better than 1:2 R:R.
+            elif self._trading_mode == "intraday" and top.direction == Direction.BEARISH:
+                entry    = top.price_at_signal
+                new_stop = round(entry + 2.0 * atr, 2)
+                new_tgt  = round(entry - 5.0 * atr, 2)
+                risk_dec = RiskDecision(
+                    approved      = True,
+                    reason        = "intraday_short_2_5_rr",
+                    position_size = risk_dec.position_size,
+                    risk_amount   = risk_dec.risk_amount,
+                    stop_loss     = new_stop,
+                    target        = new_tgt,
+                )
+
+            # ── Step 5: Simulate exit on raw OHLCV trigger-TF candles ─────────
+            raw_trigger = data.get(trigger_tf, primary_df)
+            future_raw  = raw_trigger[raw_trigger.index > cutoff]
             trade = self._simulate_exit(
                 signal     = top,
                 risk_dec   = risk_dec,
@@ -333,6 +585,51 @@ class BacktestEngine:
                 exit_after_idx = i + trade.holding_candles
 
         return trades
+
+    def _get_setup_bias(
+        self, snapshot: dict[str, pd.DataFrame], regime: str
+    ) -> Direction | None:
+        """
+        Determine directional bias from the setup TF.
+
+        For swing (setup=1day):
+          - Regime TRENDING_UP  → BULLISH
+          - Regime TRENDING_DOWN→ BEARISH
+          - Ranging / Unknown   → check setup TF EMA stack as tiebreaker
+
+        For intraday (setup=1hr):
+          - Same logic, but EMA stack on 1hr drives the bias when regime is unclear.
+
+        Returns None if no clear directional bias → trade skipped.
+        """
+        # Primary: regime is already derived from the setup TF
+        if regime == "TRENDING_UP":
+            return Direction.BULLISH
+        if regime == "TRENDING_DOWN":
+            return Direction.BEARISH
+
+        # Tiebreaker: EMA stack on the setup TF
+        if self._setup_tf in snapshot:
+            setup_df = snapshot[self._setup_tf]
+            if "ema_stack" in setup_df.columns:
+                stack_val = setup_df["ema_stack"].iloc[-1]
+                if not pd.isna(stack_val):
+                    s = int(stack_val)
+                    if s == 1:  return Direction.BULLISH
+                    if s == -1: return Direction.BEARISH
+
+            # Also check: are there strong directional signals on the setup TF?
+            # (e.g. a Double Bottom or Bull Flag fired on the daily chart)
+            setup_sigs = self._signal_engine._detector.detect(
+                setup_df, "", self._setup_tf, pre_computed=True
+            )
+            if setup_sigs:
+                bull = sum(1 for s in setup_sigs if s.direction == Direction.BULLISH)
+                bear = sum(1 for s in setup_sigs if s.direction == Direction.BEARISH)
+                if bull > bear:   return Direction.BULLISH
+                if bear > bull:   return Direction.BEARISH
+
+        return None  # No clear bias — skip this candle
 
     def _simulate_exit(
         self,
@@ -379,14 +676,16 @@ class BacktestEngine:
                     exit_reason = "TARGET"
                     break
 
-            # EOD exit: last candle of the trading day
-            if hasattr(ts, "time") and ts.time().hour == 15 and ts.time().minute >= 20:
-                exit_price  = candle["close"]
-                exit_reason = "EOD"
-                break
+            # EOD exit: intraday only — forced close at 15:20 IST.
+            # Swing trades hold overnight so EOD is disabled.
+            if self._eod_exit:
+                if hasattr(ts, "time") and ts.time().hour == 15 and ts.time().minute >= 20:
+                    exit_price  = candle["close"]
+                    exit_reason = "EOD"
+                    break
 
-            # Max hold cap
-            if hold >= MAX_HOLD_CANDLES:
+            # Max hold cap (mode-dependent: 20 candles intraday, 30 candles swing)
+            if hold >= self._max_hold:
                 exit_price  = candle["close"]
                 exit_reason = "MAX_HOLD"
                 break
@@ -488,10 +787,12 @@ class BacktestEngine:
 
             yf_symbol = f"{symbol}.NS"
 
-            # yfinance caps intraday history at 60 days
+            # yfinance intraday limits: 1m/5m/15m → 60 days, 1h → 730 days
             load_start = self._start - timedelta(days=60)
-            if yf_interval in ("1m", "5m", "15m", "1h"):
+            if yf_interval in ("1m", "5m", "15m"):
                 load_start = max(load_start, date.today() - timedelta(days=59))
+            elif yf_interval == "1h":
+                load_start = max(load_start, date.today() - timedelta(days=729))
 
             log.info("backtest.yfinance_download", symbol=yf_symbol, tf=timeframe)
             ticker = yf.Ticker(yf_symbol)

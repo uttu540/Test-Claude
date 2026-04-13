@@ -259,6 +259,58 @@ RANGING market + BREAKOUT_HIGH signal → blocked by filter → Claude never cal
 
 ---
 
+## D-021 — Top-down analysis: setup on higher TF, trigger on lower TF
+
+**Decision:** The backtesting engine (and live trading intent) follows a two-timeframe top-down structure. Swing = Daily setup → 1H trigger. Intraday = 1H setup → 15min trigger.
+
+**Reasoning:**
+- A signal on a single timeframe is unreliable in isolation. The higher TF establishes the directional bias (is the stock trending up or down?). Only then do we look at the lower TF for a precise entry signal.
+- This reduces false positives: a BREAKOUT_HIGH on the 15min that contradicts the daily downtrend is ignored entirely, not just scored lower.
+- Real professional trading desks use this approach universally — position on the weekly, plan on the daily, execute on the 4H/1H.
+
+**Implementation:** `_get_setup_bias()` reads the setup TF and returns BULLISH/BEARISH/None. Signal detection runs only on the trigger TF. Signals in the wrong direction are filtered before the quality gate.
+
+---
+
+## D-022 — Nifty 200 EMA rising = hard block on all short trades
+
+**Decision:** When Nifty's 200-period EMA is rising (slope positive over 10 bars), no short/bearish trades are taken regardless of individual stock signals.
+
+**Reasoning:**
+- A rising 200 EMA means Nifty is in a structural bull phase. Short WR in bull phases is 31–37% vs 52–58% when Nifty is below its 200 EMA.
+- Individual stocks that look bearish in a bull market are often experiencing temporary pullbacks. They frequently gap up overnight, blowing through short stops.
+- The cost of missing a legitimate short in a bull market is much lower than the cost of repeated stop-outs.
+- Data: 2025 backtest showed SHORT WR improving from 6.2% → 37.7% with this gate active (combined with other P3/P4/P7 improvements).
+
+**Trade-off:** Legitimate short setups (e.g. a sector-specific collapse during a broad bull market) are missed. Accepted — the false negative rate is lower than the false positive rate without the gate.
+
+---
+
+## D-023 — Dead cat bounce state machine for BREAKOUT_LOW entries
+
+**Decision:** BREAKOUT_LOW signals do not trigger immediate entry. A 3-state machine waits for a post-breakdown bounce (≥0.4× ATR above breakdown level) and then a confirmed retest before entry is allowed.
+
+**Reasoning:**
+- After a stock breaks below a key level, short covering typically produces a 1–3 bar bounce. Entering at the initial breakdown bar frequently gets stopped out by this bounce before the real move continues.
+- Waiting for the bounce + retest pattern filters out traps. The retest entry has a higher probability of being the true continuation.
+- Bulkowski's research: breakdown retests within 30 bars have 62% continuation rate vs 43% for immediate entries.
+- +20 confidence bonus applied to retest entries to reflect their higher quality.
+
+**Expiry:** State resets after 8 bars if no retest occurs. This prevents stale state from incorrectly classifying a new breakdown as a "retest."
+
+---
+
+## D-024 — Different R:R ratios for swing vs intraday shorts
+
+**Decision:** Swing trades use 2×/6× ATR (1:3 R:R). Intraday shorts use 2×/5× ATR (1:2.5 R:R). Default (intraday longs) uses 1.5×/3× ATR (1:2 R:R).
+
+**Reasoning:**
+- Swing trades held over 2–5 days need wider stops to survive overnight noise, gap-ups/downs, and intraday swings. A 2× ATR stop is appropriate; the 6× target maintains positive expectancy.
+- Intraday shorts are specifically vulnerable to gap-up opens at 9:15 AM. Widening stop from 1.5× to 2× ATR reduces the stop-out rate from overnight events. The 5× target (1:2.5 R:R) still provides positive expectancy at a 30% win rate.
+- Default 1.5×/3× remains for intraday longs where gap risk is less severe (gap-ups help longs).
+
+---
+
 ## D-017 — Market regime uses NIFTY 50 index, not individual stock data
 
 **Decision:** `MarketRegimeDetector` uses NIFTY 50 (or proxy) candle data to determine regime. Individual stock signals inherit this regime.

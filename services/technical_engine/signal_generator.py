@@ -58,6 +58,20 @@ class SignalType(str, Enum):
     # Phase 3 — Indian market strategies
     ORB_BREAKOUT       = "ORB_BREAKOUT"        # Opening Range Breakout (9:15–9:30 range)
     VWAP_RECLAIM       = "VWAP_RECLAIM"        # Price reclaims / breaks VWAP with volume
+    # Phase 4 — Candlestick patterns
+    HAMMER             = "HAMMER"              # Long lower wick reversal after downtrend
+    SHOOTING_STAR      = "SHOOTING_STAR"       # Long upper wick reversal after uptrend
+    ENGULFING_BULL     = "ENGULFING_BULL"      # Bullish candle engulfs prior bearish body
+    ENGULFING_BEAR     = "ENGULFING_BEAR"      # Bearish candle engulfs prior bullish body
+    MORNING_STAR       = "MORNING_STAR"        # 3-candle bullish reversal
+    EVENING_STAR       = "EVENING_STAR"        # 3-candle bearish reversal
+    # Phase 4 — Chart patterns
+    DOUBLE_BOTTOM      = "DOUBLE_BOTTOM"       # W pattern — two lows at similar price
+    DOUBLE_TOP         = "DOUBLE_TOP"          # M pattern — two highs at similar price
+    BULL_FLAG          = "BULL_FLAG"           # Tight consolidation after sharp rally
+    BEAR_FLAG          = "BEAR_FLAG"           # Tight consolidation after sharp decline
+    DARVAS_BREAKOUT    = "DARVAS_BREAKOUT"     # Price breaks above Darvas box top
+    NR7_SETUP          = "NR7_SETUP"           # Narrowest range in 7 bars — breakout imminent
 
 
 @dataclass
@@ -96,16 +110,29 @@ _REGIME_ALLOWED: dict[str, set[str] | None] = {
         "BREAKOUT_HIGH", "EMA_CROSSOVER_UP", "MACD_CROSS_UP",
         "HIGH_RVOL", "BB_EXPANSION", "ABOVE_200_EMA",
         "ORB_BREAKOUT", "VWAP_RECLAIM",
+        # Candlestick continuation / momentum
+        "HAMMER", "ENGULFING_BULL", "MORNING_STAR",
+        # Chart patterns
+        "DOUBLE_BOTTOM", "BULL_FLAG", "DARVAS_BREAKOUT", "NR7_SETUP",
     },
     "TRENDING_DOWN": {
         "BREAKOUT_LOW", "EMA_CROSSOVER_DOWN", "MACD_CROSS_DOWN",
         "HIGH_RVOL", "BB_EXPANSION", "BELOW_200_EMA",
         "ORB_BREAKOUT", "VWAP_RECLAIM",
+        # Candlestick reversal / continuation
+        "SHOOTING_STAR", "ENGULFING_BEAR", "EVENING_STAR",
+        # Chart patterns
+        "DOUBLE_TOP", "BEAR_FLAG", "NR7_SETUP",
     },
     "RANGING": {
         "RSI_OVERSOLD", "RSI_OVERBOUGHT",
         "BB_SQUEEZE", "BB_EXPANSION",
         "VWAP_RECLAIM", "HIGH_RVOL",
+        # Candlestick reversals work well in ranging markets
+        "HAMMER", "SHOOTING_STAR",
+        "ENGULFING_BULL", "ENGULFING_BEAR",
+        "MORNING_STAR", "EVENING_STAR",
+        "DOUBLE_BOTTOM", "DOUBLE_TOP", "NR7_SETUP",
     },
     "HIGH_VOLATILITY": {
         "VWAP_RECLAIM",   # Only safest signal in high-fear environment
@@ -201,7 +228,8 @@ class SignalDetector:
 
         # Default: all strategies enabled
         enabled = enabled_strategies or {
-            "breakout", "ema", "momentum", "volume", "volatility", "orb", "vwap"
+            "breakout", "ema", "momentum", "volume", "volatility",
+            "orb", "vwap", "candlestick", "chart_patterns",
         }
 
         # Skip indicator computation if caller already pre-computed them (e.g. backtesting)
@@ -211,13 +239,15 @@ class SignalDetector:
         latest = get_latest(df)
         price  = latest.get("close", 0)
 
-        if "breakout"   in enabled: signals += self._breakout_signals(df, symbol, timeframe, price, latest)
-        if "ema"        in enabled: signals += self._ema_signals(df, symbol, timeframe, price, latest)
-        if "momentum"   in enabled: signals += self._momentum_signals(df, symbol, timeframe, price, latest)
-        if "volume"     in enabled: signals += self._volume_signals(df, symbol, timeframe, price, latest)
-        if "volatility" in enabled: signals += self._volatility_signals(df, symbol, timeframe, price, latest)
-        if "orb"        in enabled: signals += self._orb_signals(df, symbol, timeframe, price, latest)
-        if "vwap"       in enabled: signals += self._vwap_signals(df, symbol, timeframe, price, latest)
+        if "breakout"       in enabled: signals += self._breakout_signals(df, symbol, timeframe, price, latest)
+        if "ema"            in enabled: signals += self._ema_signals(df, symbol, timeframe, price, latest)
+        if "momentum"       in enabled: signals += self._momentum_signals(df, symbol, timeframe, price, latest)
+        if "volume"         in enabled: signals += self._volume_signals(df, symbol, timeframe, price, latest)
+        if "volatility"     in enabled: signals += self._volatility_signals(df, symbol, timeframe, price, latest)
+        if "orb"            in enabled: signals += self._orb_signals(df, symbol, timeframe, price, latest)
+        if "vwap"           in enabled: signals += self._vwap_signals(df, symbol, timeframe, price, latest)
+        if "candlestick"    in enabled: signals += self._candlestick_signals(df, symbol, timeframe, price, latest)
+        if "chart_patterns" in enabled: signals += self._chart_pattern_signals(df, symbol, timeframe, price, latest)
 
         # Filter to only signals above the minimum confidence threshold
         signals = [s for s in signals if s.confidence >= min_confidence]
@@ -268,20 +298,54 @@ class SignalDetector:
 
         # Breakdown below 20-period low
         if price < recent_low:
-            confidence = 50
-            if rvol > 1.5:   confidence += 15
-            if rvol > 2.0:   confidence += 10
+            confidence = 40   # lower base — needs multiple confirmations to trade
+
+            # Volume: institutional distribution shows as high RVOL (≥1.8×).
+            # Low-volume breakdowns are retail panic into institutional support — traps.
+            if rvol > 2.5:        confidence += 20
+            elif rvol > 1.8:      confidence += 12
+            # below 1.8× → no bonus; breakdown likely retail, not institutional
+
             if latest.get("ema_stack") == -1: confidence += 15
             if not latest.get("above_200ema"): confidence += 10
+
+            # Consolidation width: wide base breakdowns have 67% continuation,
+            # narrow range breakdowns only 43% (Bulkowski, 60,000+ setups).
+            atr_val = latest.get(f"atr_{self._cfg.atr_period}") or latest.get("atr_14", 0)
+            if atr_val:
+                if (recent_high - recent_low) >= 2.0 * atr_val:
+                    confidence += 15   # wide base — genuine support failure
+                else:
+                    confidence -= 10   # narrow range — likely noise
+
+            # RSI filter: entering an already-oversold breakdown risks a bounce
+            # before continuation. RSI < 30 on trigger TF = bounce likely.
+            rsi_col = f"rsi_{self._cfg.rsi_period}"
+            if rsi_col in df.columns:
+                curr_rsi = df[rsi_col].iloc[-1]
+                if not pd.isna(curr_rsi):
+                    if float(curr_rsi) < 30:   confidence -= 20   # oversold, bounce risk
+                    elif float(curr_rsi) < 40: confidence -= 10   # getting oversold
+
+            # Round number support trap: ₹100/₹500/₹1000 round numbers attract
+            # support buying in India (retail + LIC). Breakdown near them often fails.
+            if recent_low > 0:
+                round_level = round(recent_low / 100) * 100
+                if round_level > 0 and abs(recent_low - round_level) / recent_low < 0.005:
+                    confidence -= 15   # too close to round number support
+
             signals.append(Signal(
                 trading_symbol  = symbol,
                 timeframe       = tf,
                 signal_type     = SignalType.BREAKOUT_LOW,
                 direction       = Direction.BEARISH,
-                confidence      = min(confidence, 100),
+                confidence      = min(max(confidence, 0), 100),
                 price_at_signal = price,
                 indicators      = self._key_indicators(latest),
-                notes           = f"Breaking {lookback}-period low {recent_low:.2f} | RVOL {rvol:.1f}x",
+                notes           = (
+                    f"Breaking {lookback}-period low {recent_low:.2f} | "
+                    f"RVOL {rvol:.1f}x | range {(recent_high-recent_low):.2f}"
+                ),
             ))
 
         return signals
@@ -625,13 +689,471 @@ class SignalDetector:
 
         return signals
 
-    @staticmethod
-    def _key_indicators(latest: dict) -> dict:
+    # ── Candlestick Patterns ──────────────────────────────────────────────────
+
+    def _candlestick_signals(
+        self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
+    ) -> list[Signal]:
+        """
+        Detects single and multi-candle Japanese candlestick reversal patterns.
+        Patterns: Hammer, Shooting Star, Bullish/Bearish Engulfing, Morning/Evening Star.
+        """
+        if len(df) < 5:
+            return []
+
+        signals = []
+        c  = df.iloc[-1]   # current candle
+        p  = df.iloc[-2]   # previous candle
+        p2 = df.iloc[-3]   # two bars ago (for 3-candle patterns)
+
+        def _body(row):    return abs(row["close"] - row["open"])
+        def _range(row):   return row["high"] - row["low"]
+        def _upper_wick(row): return row["high"] - max(row["open"], row["close"])
+        def _lower_wick(row): return min(row["open"], row["close"]) - row["low"]
+
+        c_body  = _body(c);  c_range  = _range(c)
+        p_body  = _body(p);  p_range  = _range(p)
+        p2_body = _body(p2); p2_range = _range(p2)
+
+        rvol = latest.get("rvol", 1.0) or 1.0
+
+        # ── Hammer ────────────────────────────────────────────────────────────
+        # Small body near top, lower shadow ≥ 2× body, tiny upper shadow.
+        # Context: appears after a declining move (prior candle bearish).
+        if c_range > 0 and c_body > 0:
+            lower_wick = _lower_wick(c)
+            upper_wick = _upper_wick(c)
+            body_ratio = c_body / c_range
+
+            is_hammer = (
+                lower_wick >= 2.0 * c_body       and   # long lower shadow
+                upper_wick <= 0.4 * c_body        and   # little upper shadow
+                0.05 <= body_ratio <= 0.40         and   # has a body (not doji)
+                p["close"] < p["open"]                   # prior candle bearish
+            )
+            if is_hammer:
+                conf = 65
+                if rvol > 1.5:                    conf += 10
+                rsi_col = f"rsi_{self._cfg.rsi_period}"
+                prev_rsi = df[rsi_col].iloc[-2] if rsi_col in df.columns else None
+                if prev_rsi is not None and not pd.isna(prev_rsi) and prev_rsi < 38:
+                    conf += 10   # prior oversold RSI strengthens the reversal
+                if latest.get("ema_stack") == -1: conf += 5  # in downtrend = valid reversal
+                signals.append(Signal(
+                    trading_symbol  = symbol,
+                    timeframe       = tf,
+                    signal_type     = SignalType.HAMMER,
+                    direction       = Direction.BULLISH,
+                    confidence      = min(conf, 100),
+                    price_at_signal = price,
+                    indicators      = self._key_indicators(latest),
+                    notes           = f"Hammer | lower wick {lower_wick:.2f} | body {c_body:.2f}",
+                ))
+
+        # ── Shooting Star ─────────────────────────────────────────────────────
+        # Small body near bottom, upper shadow ≥ 2× body, tiny lower shadow.
+        # Context: appears after a rising move (prior candle bullish).
+        if c_range > 0 and c_body > 0:
+            lower_wick = _lower_wick(c)
+            upper_wick = _upper_wick(c)
+            body_ratio = c_body / c_range
+
+            is_shooting_star = (
+                upper_wick >= 2.0 * c_body        and
+                lower_wick <= 0.4 * c_body         and
+                0.05 <= body_ratio <= 0.40          and
+                p["close"] > p["open"]                   # prior candle bullish
+            )
+            if is_shooting_star:
+                conf = 65
+                if rvol > 1.5:                     conf += 10
+                rsi_col = f"rsi_{self._cfg.rsi_period}"
+                prev_rsi = df[rsi_col].iloc[-2] if rsi_col in df.columns else None
+                if prev_rsi is not None and not pd.isna(prev_rsi) and prev_rsi > 62:
+                    conf += 10   # prior overbought RSI strengthens the reversal
+                if latest.get("ema_stack") == 1:  conf += 5   # in uptrend = valid reversal
+                signals.append(Signal(
+                    trading_symbol  = symbol,
+                    timeframe       = tf,
+                    signal_type     = SignalType.SHOOTING_STAR,
+                    direction       = Direction.BEARISH,
+                    confidence      = min(conf, 100),
+                    price_at_signal = price,
+                    indicators      = self._key_indicators(latest),
+                    notes           = f"Shooting Star | upper wick {_upper_wick(c):.2f} | body {c_body:.2f}",
+                ))
+
+        # ── Bullish Engulfing ─────────────────────────────────────────────────
+        # Current bullish candle's body completely engulfs previous bearish body.
+        bullish_engulf = (
+            p["close"] < p["open"]          and   # prior bearish
+            c["close"] > c["open"]          and   # current bullish
+            c["open"]  <= p["close"]        and   # opens at or below prior close
+            c["close"] >= p["open"]               # closes at or above prior open
+        )
+        if bullish_engulf:
+            conf = 70
+            if rvol > 1.5:                        conf += 10
+            if latest.get("above_200ema"):         conf += 5
+            # Stronger if engulfing a large prior candle
+            if p_body > 0 and c_body >= 1.5 * p_body: conf += 5
+            signals.append(Signal(
+                trading_symbol  = symbol,
+                timeframe       = tf,
+                signal_type     = SignalType.ENGULFING_BULL,
+                direction       = Direction.BULLISH,
+                confidence      = min(conf, 100),
+                price_at_signal = price,
+                indicators      = self._key_indicators(latest),
+                notes           = f"Bullish Engulfing | body ratio {c_body/p_body:.1f}x" if p_body > 0 else "Bullish Engulfing",
+            ))
+
+        # ── Bearish Engulfing ─────────────────────────────────────────────────
+        bearish_engulf = (
+            p["close"] > p["open"]          and   # prior bullish
+            c["close"] < c["open"]          and   # current bearish
+            c["open"]  >= p["close"]        and   # opens at or above prior close
+            c["close"] <= p["open"]               # closes at or below prior open
+        )
+        if bearish_engulf:
+            conf = 70
+            if rvol > 1.5:                        conf += 10
+            if not latest.get("above_200ema"):     conf += 5
+            if p_body > 0 and c_body >= 1.5 * p_body: conf += 5
+            signals.append(Signal(
+                trading_symbol  = symbol,
+                timeframe       = tf,
+                signal_type     = SignalType.ENGULFING_BEAR,
+                direction       = Direction.BEARISH,
+                confidence      = min(conf, 100),
+                price_at_signal = price,
+                indicators      = self._key_indicators(latest),
+                notes           = f"Bearish Engulfing | body ratio {c_body/p_body:.1f}x" if p_body > 0 else "Bearish Engulfing",
+            ))
+
+        # ── Morning Star (3-candle bullish reversal) ──────────────────────────
+        # c1 (p2): large bearish candle
+        # c2 (p):  small body (indecision / star) — can be bullish or bearish
+        # c3 (c):  large bullish candle closing above c1's midpoint
+        if p2_range > 0 and c_range > 0:
+            c1_mid = (p2["open"] + p2["close"]) / 2
+            morning_star = (
+                p2["close"] < p2["open"]                  and   # c1 bearish
+                p2_body / p2_range > 0.45                 and   # c1 substantial body
+                p_body < 0.35 * p2_body                   and   # c2 small body (star)
+                c["close"]  > c["open"]                   and   # c3 bullish
+                c_body / c_range > 0.45                   and   # c3 substantial body
+                c["close"]  > c1_mid                            # c3 closes above c1 midpoint
+            )
+            if morning_star:
+                conf = 75
+                if rvol > 1.5:                    conf += 10
+                if latest.get("rsi_zone") == 0:  conf += 5   # oversold context
+                signals.append(Signal(
+                    trading_symbol  = symbol,
+                    timeframe       = tf,
+                    signal_type     = SignalType.MORNING_STAR,
+                    direction       = Direction.BULLISH,
+                    confidence      = min(conf, 100),
+                    price_at_signal = price,
+                    indicators      = self._key_indicators(latest),
+                    notes           = f"Morning Star | c3 closed {((c['close']-c1_mid)/c1_mid*100):.1f}% above c1 mid",
+                ))
+
+        # ── Evening Star (3-candle bearish reversal) ──────────────────────────
+        if p2_range > 0 and c_range > 0:
+            c1_mid = (p2["open"] + p2["close"]) / 2
+            evening_star = (
+                p2["close"] > p2["open"]                  and   # c1 bullish
+                p2_body / p2_range > 0.45                 and   # c1 substantial body
+                p_body < 0.35 * p2_body                   and   # c2 small body (star)
+                c["close"]  < c["open"]                   and   # c3 bearish
+                c_body / c_range > 0.45                   and   # c3 substantial body
+                c["close"]  < c1_mid                            # c3 closes below c1 midpoint
+            )
+            if evening_star:
+                conf = 75
+                if rvol > 1.5:                    conf += 10
+                if latest.get("rsi_zone") == 2:  conf += 5   # overbought context
+                signals.append(Signal(
+                    trading_symbol  = symbol,
+                    timeframe       = tf,
+                    signal_type     = SignalType.EVENING_STAR,
+                    direction       = Direction.BEARISH,
+                    confidence      = min(conf, 100),
+                    price_at_signal = price,
+                    indicators      = self._key_indicators(latest),
+                    notes           = f"Evening Star | c3 closed {((c1_mid-c['close'])/c1_mid*100):.1f}% below c1 mid",
+                ))
+
+        return signals
+
+    # ── Chart Patterns ────────────────────────────────────────────────────────
+
+    def _chart_pattern_signals(
+        self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
+    ) -> list[Signal]:
+        """
+        Detects multi-bar chart patterns:
+        Double Bottom (W), Double Top (M), Bull/Bear Flag, Darvas Box, NR7.
+        """
+        signals = []
+        if len(df) < 30:
+            return signals
+
+        signals += self._double_pattern(df, symbol, tf, price, latest)
+        signals += self._flag_pattern(df, symbol, tf, price, latest)
+        signals += self._darvas_box(df, symbol, tf, price, latest)
+        signals += self._nr7_setup(df, symbol, tf, price, latest)
+        return signals
+
+    def _double_pattern(
+        self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
+    ) -> list[Signal]:
+        """Double Bottom (W) and Double Top (M) using swing high/low columns."""
+        signals = []
+        rvol = latest.get("rvol", 1.0) or 1.0
+
+        # ── Double Bottom ─────────────────────────────────────────────────────
+        if "swing_low" in df.columns:
+            recent = df["swing_low"].iloc[-80:].dropna()
+            if len(recent) >= 2:
+                l1_val, l2_val = recent.iloc[-2], recent.iloc[-1]
+                l1_idx, l2_idx = recent.index[-2], recent.index[-1]
+                sep = (df.index.get_loc(l2_idx) - df.index.get_loc(l1_idx))  # bars apart
+                price_diff = abs(l1_val - l2_val) / l1_val if l1_val else 1
+
+                if sep >= 8 and price_diff < 0.025:   # close lows, 8+ bars apart
+                    # Neckline = highest high between the two lows
+                    between_mask = (df.index >= l1_idx) & (df.index <= l2_idx)
+                    neckline = df.loc[between_mask, "high"].max()
+                    if price > neckline:               # neckline broken
+                        conf = 70
+                        if rvol > 1.5:                 conf += 10
+                        if latest.get("above_200ema"): conf += 5
+                        conf = min(conf + max(0, int((1 - price_diff / 0.025) * 10)), 100)
+                        signals.append(Signal(
+                            trading_symbol  = symbol,
+                            timeframe       = tf,
+                            signal_type     = SignalType.DOUBLE_BOTTOM,
+                            direction       = Direction.BULLISH,
+                            confidence      = conf,
+                            price_at_signal = price,
+                            indicators      = self._key_indicators(latest),
+                            notes           = f"Double Bottom W | lows {l1_val:.2f}/{l2_val:.2f} | neckline {neckline:.2f}",
+                        ))
+
+        # ── Double Top ────────────────────────────────────────────────────────
+        if "swing_high" in df.columns:
+            recent = df["swing_high"].iloc[-80:].dropna()
+            if len(recent) >= 2:
+                h1_val, h2_val = recent.iloc[-2], recent.iloc[-1]
+                h1_idx, h2_idx = recent.index[-2], recent.index[-1]
+                sep = (df.index.get_loc(h2_idx) - df.index.get_loc(h1_idx))
+                price_diff = abs(h1_val - h2_val) / h1_val if h1_val else 1
+
+                if sep >= 8 and price_diff < 0.020:   # tightened from 2.5% → 2.0%
+                    between_mask = (df.index >= h1_idx) & (df.index <= h2_idx)
+                    neckline = df.loc[between_mask, "low"].min()
+                    if price < neckline:
+                        conf = 65   # reduced base from 70
+                        # RVOL on neckline break — Bulkowski: no-volume breaks fail 71%
+                        if rvol > 1.5:    conf += 15
+                        else:             conf -= 15
+                        # Bear structure confirmation
+                        if not latest.get("above_200ema"):      conf += 5
+                        if latest.get("ema_stack") == -1:       conf += 10
+                        conf = min(conf + max(0, int((1 - price_diff / 0.020) * 10)), 100)
+                        # RSI divergence: right peak should have lower RSI than left peak
+                        rsi_col = f"rsi_{self._cfg.rsi_period}"
+                        rsi_note = ""
+                        if rsi_col in df.columns:
+                            h1_iloc = df.index.get_loc(h1_idx)
+                            h2_iloc = df.index.get_loc(h2_idx)
+                            rsi_at_h1 = float(df[rsi_col].iloc[h1_iloc]) if not pd.isna(df[rsi_col].iloc[h1_iloc]) else None
+                            rsi_at_h2 = float(df[rsi_col].iloc[h2_iloc]) if not pd.isna(df[rsi_col].iloc[h2_iloc]) else None
+                            if rsi_at_h1 is not None and rsi_at_h2 is not None:
+                                if rsi_at_h2 < rsi_at_h1:
+                                    conf += 15   # bearish RSI divergence confirmed
+                                    rsi_note = f" | RSI div {rsi_at_h1:.0f}→{rsi_at_h2:.0f}"
+                                else:
+                                    conf -= 10   # no divergence, pattern is weaker
+                        signals.append(Signal(
+                            trading_symbol  = symbol,
+                            timeframe       = tf,
+                            signal_type     = SignalType.DOUBLE_TOP,
+                            direction       = Direction.BEARISH,
+                            confidence      = min(max(conf, 0), 100),
+                            price_at_signal = price,
+                            indicators      = self._key_indicators(latest),
+                            notes           = f"Double Top M | highs {h1_val:.2f}/{h2_val:.2f} | neckline {neckline:.2f}{rsi_note}",
+                        ))
+
+        return signals
+
+    def _flag_pattern(
+        self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
+    ) -> list[Signal]:
+        """
+        Bull/Bear Flag: sharp move (pole) followed by tight consolidation, then breakout.
+        Pole: ≥3% move over 3–10 bars. Flag: 5–15 bar tight range (< 50% pole retracement).
+        """
+        if len(df) < 25:
+            return []
+
+        signals = []
+        rvol = latest.get("rvol", 1.0) or 1.0
+
+        # Flag consolidation: last 5–10 bars
+        flag_bars   = 7
+        flag_df     = df.iloc[-(flag_bars + 1):-1]
+        flag_high   = flag_df["high"].max()
+        flag_low    = flag_df["low"].min()
+        flag_range  = flag_high - flag_low
+
+        # Pole: the move just before the flag
+        pole_bars   = 8
+        pole_df     = df.iloc[-(flag_bars + pole_bars + 1):-(flag_bars + 1)]
+        if pole_df.empty:
+            return []
+        pole_start  = pole_df.iloc[0]["close"]
+        pole_end    = pole_df.iloc[-1]["close"]
+        pole_move   = pole_end - pole_start
+        pole_pct    = abs(pole_move) / pole_start if pole_start else 0
+
+        # Pole must be ≥ 3% and flag must be tight (< 60% of pole range)
+        pole_range  = abs(pole_df["high"].max() - pole_df["low"].min())
+
+        # ── Bull Flag ─────────────────────────────────────────────────────────
+        if pole_move > 0 and pole_pct >= 0.03:
+            tight = flag_range < 0.60 * pole_range
+            if tight and price > flag_high:     # breakout above flag
+                conf = 65
+                if rvol > 1.5:                   conf += 10
+                if rvol > 2.0:                   conf += 5
+                if latest.get("ema_stack") == 1: conf += 10
+                signals.append(Signal(
+                    trading_symbol  = symbol,
+                    timeframe       = tf,
+                    signal_type     = SignalType.BULL_FLAG,
+                    direction       = Direction.BULLISH,
+                    confidence      = min(conf, 100),
+                    price_at_signal = price,
+                    indicators      = self._key_indicators(latest),
+                    notes           = f"Bull Flag | pole {pole_pct*100:.1f}% | flag range {flag_range:.2f}",
+                ))
+
+        # ── Bear Flag ─────────────────────────────────────────────────────────
+        elif pole_move < 0 and pole_pct >= 0.03:
+            tight = flag_range < 0.60 * pole_range
+            if tight and price < flag_low:      # breakdown below flag
+                conf = 65
+                if rvol > 1.5:                    conf += 10
+                if rvol > 2.0:                    conf += 5
+                if latest.get("ema_stack") == -1: conf += 10
+                signals.append(Signal(
+                    trading_symbol  = symbol,
+                    timeframe       = tf,
+                    signal_type     = SignalType.BEAR_FLAG,
+                    direction       = Direction.BEARISH,
+                    confidence      = min(conf, 100),
+                    price_at_signal = price,
+                    indicators      = self._key_indicators(latest),
+                    notes           = f"Bear Flag | pole {pole_pct*100:.1f}% drop | flag range {flag_range:.2f}",
+                ))
+
+        return signals
+
+    def _darvas_box(
+        self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
+    ) -> list[Signal]:
+        """
+        Darvas Box: price consolidates in a box (top and bottom hold for N bars),
+        then breaks out above box top. Works best on 1day / 1hr timeframes.
+        """
+        if len(df) < 25:
+            return []
+
+        rvol = latest.get("rvol", 1.0) or 1.0
+        box_period = 15   # bars forming the box
+        lookback   = df.iloc[-(box_period + 1):-1]
+
+        box_top    = lookback["high"].max()
+        box_bottom = lookback["low"].min()
+        box_range  = box_top - box_bottom
+
+        # Box is valid if the last 5 bars stayed within the box (no new highs)
+        last_5 = df.iloc[-6:-1]
+        box_intact = last_5["high"].max() <= box_top * 1.005   # 0.5% tolerance
+
+        # A proper box needs meaningful range (> 1% of price) and price was ranging
+        has_range = box_range / box_top > 0.01 if box_top > 0 else False
+
+        if box_intact and has_range and price > box_top:
+            conf = 70
+            if rvol > 2.0:                        conf += 15
+            elif rvol > 1.5:                      conf += 8
+            if latest.get("above_200ema"):        conf += 10
+            adx = latest.get("adx")
+            if adx and not pd.isna(adx) and adx > 25: conf += 5
+            return [Signal(
+                trading_symbol  = symbol,
+                timeframe       = tf,
+                signal_type     = SignalType.DARVAS_BREAKOUT,
+                direction       = Direction.BULLISH,
+                confidence      = min(conf, 100),
+                price_at_signal = price,
+                indicators      = self._key_indicators(latest),
+                notes           = f"Darvas Box breakout | box {box_bottom:.2f}–{box_top:.2f} | RVOL {rvol:.1f}x",
+            )]
+
+        return []
+
+    def _nr7_setup(
+        self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
+    ) -> list[Signal]:
+        """
+        NR7: today's candle has the narrowest range of the past 7 bars.
+        Signals volatility contraction → imminent expansion/breakout.
+        Direction determined by whether price is above or below the candle's midpoint.
+        """
+        if len(df) < 8:
+            return []
+
+        curr_range  = df.iloc[-1]["high"] - df.iloc[-1]["low"]
+        prior_ranges = [(df.iloc[-(i+1)]["high"] - df.iloc[-(i+1)]["low"]) for i in range(1, 7)]
+
+        if curr_range <= 0 or curr_range >= min(prior_ranges):
+            return []
+
+        midpoint  = (df.iloc[-1]["high"] + df.iloc[-1]["low"]) / 2
+        direction = Direction.BULLISH if price >= midpoint else Direction.BEARISH
+
+        conf = 55
+        if "bb_width" in df.columns:
+            bb_pct = df["bb_width"].rank(pct=True).iloc[-1]
+            if bb_pct < 0.25:   conf += 10   # BB squeeze confirms NR7 contraction
+
+        return [Signal(
+            trading_symbol  = symbol,
+            timeframe       = tf,
+            signal_type     = SignalType.NR7_SETUP,
+            direction       = direction,
+            confidence      = min(conf, 100),
+            price_at_signal = price,
+            indicators      = self._key_indicators(latest),
+            notes           = f"NR7 | range {curr_range:.2f} < min of last 6 ({min(prior_ranges):.2f})",
+        )]
+
+    def _key_indicators(self, latest: dict) -> dict:
         """Extract the most important indicator values for the signal snapshot."""
+        cfg = self._cfg
         keys = [
-            "close", "ema_9", "ema_21", "ema_50", "ema_200",
-            "rsi_14", "macd", "macd_signal", "macd_hist",
-            "atr_14", "atr_pct", "rvol", "vwap",
+            "close",
+            f"ema_{cfg.ema_fast}", f"ema_{cfg.ema_mid}",
+            f"ema_{cfg.ema_slow}", f"ema_{cfg.ema_trend}",
+            f"rsi_{cfg.rsi_period}", "macd", "macd_signal", "macd_hist",
+            f"atr_{cfg.atr_period}", "atr_pct", "rvol", "vwap",
             "bb_pct", "bb_width", "adx",
             "ema_stack", "above_200ema", "rsi_zone",
         ]
@@ -693,7 +1215,10 @@ class MultiTimeframeSignalEngine:
 
     @property
     def _enabled_strategies(self) -> set[str]:
-        names = ["breakout", "ema", "momentum", "volume", "volatility", "orb", "vwap"]
+        names = [
+            "breakout", "ema", "momentum", "volume", "volatility",
+            "orb", "vwap", "candlestick", "chart_patterns",
+        ]
         return {n for n in names if self._config.get(f"strategy_{n}", True)}
 
     def analyse(

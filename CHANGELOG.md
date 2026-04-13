@@ -10,6 +10,56 @@ _Next up: Paper trading validation run (#33) — 2-week gate before live_
 
 ---
 
+## [0.5.0] — 2026-04-14 — Short-Side Improvements + Full Top-Down Backtesting
+
+### Added
+- **`services/technical_engine/signal_generator.py`** — 7 new candlestick & chart pattern signal types:
+  - `HAMMER`, `SHOOTING_STAR`, `ENGULFING_BULL`, `ENGULFING_BEAR`, `MORNING_STAR`, `EVENING_STAR` — classic candlestick patterns with body/wick ratio validation
+  - `DOUBLE_BOTTOM`, `DOUBLE_TOP` — W/M patterns using swing high/low columns; 8+ bar separation, neckline break required
+  - `BULL_FLAG`, `BEAR_FLAG` — pole ≥3% move over 3–10 bars, flag consolidation <60% pole range, breakout with RVOL
+  - `DARVAS_BREAKOUT` — 15-bar box consolidation, breakout above box_top with RVOL
+  - `NR7_SETUP` — narrowest daily range of last 7 bars (volatility contraction before expansion)
+- **`services/backtesting/engine.py`** — `--trading-mode swing|intraday` flag:
+  - `swing`: Daily setup → 1H trigger → 5-day max hold, no EOD exit
+  - `intraday`: 1H setup → 15min trigger → 20-bar max hold, EOD exit at 15:20
+- **`services/backtesting/engine.py`** — Three-level regime stack:
+  - L1: Nifty market regime gate — skip stocks that contradict Nifty direction
+  - L2: India VIX gate — EXTREME (>25) = no trades, HIGH (20–25) = HIGH_VOLATILITY regime
+  - L3: News/Claude — live only, not applied in backtesting
+- **`services/backtesting/engine.py`** — `min_confirming_signals` param: require N distinct signal types in same direction before entering
+- **`services/backtesting/run.py`** — `--trading-mode` and `--min-confirming-signals` CLI flags
+
+### Changed (Short-Side Improvements P1–P4, P7)
+- **P1 — Nifty 200 EMA hard gate** (`engine.py`): When Nifty 200-period EMA is rising (bull phase), all short/bearish setups are skipped entirely. Short WR improved from 6.2% → 37.7% in 2025 backtest.
+- **P2 — BREAKOUT_LOW filters** (`signal_generator.py`): Base confidence reduced 50→40; RVOL threshold raised to 1.8× (was 1.5×); consolidation width filter (≥2× ATR → +15, else -10); RSI oversold penalty (<30 → -20, <40 → -10); round number support trap penalty (within 0.5% of ₹100 multiple → -15).
+- **P3 — DOUBLE_TOP improvements** (`signal_generator.py`): Price tolerance tightened 2.5%→2.0%; base confidence 70→65; RVOL required on neckline break (>1.5 → +15, else -15, based on Bulkowski: no-volume breaks fail 71%); EMA stack == -1 adds +10; RSI divergence check (right peak lower RSI than left peak → +15, else -10).
+- **P4 — Intraday short stop widening** (`engine.py`): Intraday shorts now use 2×ATR stop / 5×ATR target (1:2.5 R:R) instead of default 1.5×/3×. Prevents gap-up opens blowing through tight stops.
+- **P7 — Dead cat bounce state machine** (`engine.py`): BREAKOUT_LOW entries now require a confirmed retest. State machine: IDLE → BROKEN (initial breakdown, entry blocked) → BOUNCED (≥0.4× ATR bounce detected) → retest below breakdown = entry allowed with +20 confidence bonus. Expires after 8 bars.
+- **Swing mode R:R** (`engine.py`): Swing trades use 2×/6× ATR (1:3 R:R) instead of default 1.5×/3×.
+- **yfinance 1H data fix** (`engine.py`): 1H interval now uses 730-day lookback (was incorrectly capped at 60 days same as 15min). Enables full 2025 swing backtesting.
+
+### Backtest Results — 2025 Swing (first clean daily→1H top-down run)
+
+| Metric | Value |
+|---|---|
+| Period | 2025-01-01 → 2025-12-31 |
+| Total Trades | 1,276 |
+| Win Rate | 35.2% |
+| Net P&L | ₹+7,088 |
+| Profit Factor | 1.08× |
+| Sharpe | 0.50 |
+| Max Drawdown | ₹-6,267 |
+
+| Direction | Trades | WR | P&L |
+|---|---|---|---|
+| LONG | 1,077 | 34.7% | ₹+4,576 |
+| SHORT | 199 | **37.7%** | **₹+2,512** |
+
+Top signal performers: BREAKOUT_HIGH (41.7% WR, ₹+3,111), DOUBLE_TOP (38.9% WR, ₹+1,953), ENGULFING_BEAR (40.2% WR, ₹+1,719).
+Biggest drag: DOUBLE_BOTTOM (229 trades, 32.3% WR, ₹-1,311).
+
+---
+
 ## [0.4.4] — 2026-04-09 — Signal Threshold Tuning (Backtest-Driven)
 
 ### Changed

@@ -66,6 +66,18 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "label": "VWAP Reclaim / Rejection", "desc": "Price crossing VWAP with volume confirmation.",
         "group": "strategies",
     },
+    "strategy_candlestick": {
+        "default": True, "type": "bool",
+        "label": "Candlestick Patterns",
+        "desc": "Hammer, Shooting Star, Engulfing, Morning/Evening Star.",
+        "group": "strategies",
+    },
+    "strategy_chart_patterns": {
+        "default": True, "type": "bool",
+        "label": "Chart Patterns",
+        "desc": "Double Top/Bottom, Bull/Bear Flag, Darvas Box, NR7.",
+        "group": "strategies",
+    },
     # ── Per-signal minimum confidence overrides ────────────────────────────────
     # Backtest finding (90d, Nifty 50, Apr 2026): ORB WR=38%, VWAP WR=39% at
     # default thresholds. Raising their floors to 70+ filters low-quality setups.

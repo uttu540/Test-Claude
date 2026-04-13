@@ -139,6 +139,19 @@ def _parse_args() -> argparse.Namespace:
         "--min-signal-timeframes", type=int, default=2,
         help="Require signal direction to agree on this many TFs (default: 2)",
     )
+    parser.add_argument(
+        "--min-confirming-signals", type=int, default=1,
+        help="Require this many distinct signal types in the same direction (default: 1). "
+             "Set ≥ 2 to demand genuine multi-signal confluence before entering a trade.",
+    )
+    parser.add_argument(
+        "--trading-mode", default="intraday", choices=["intraday", "swing"],
+        help=(
+            "Trading mode (default: intraday).\n"
+            "  intraday: Setup=1H bias → Trigger=15min entry → EOD exit.\n"
+            "  swing:    Setup=Daily bias → Trigger=1H entry → hold up to 5 days."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -161,26 +174,33 @@ async def main() -> None:
         else end_date - timedelta(days=args.days)
     )
 
+    mode_desc = {
+        "intraday": "Setup=1H → Trigger=15min → EOD exit",
+        "swing":    "Setup=Daily → Trigger=1H → hold up to 5 days",
+    }.get(args.trading_mode, args.trading_mode)
+
     console.print(
         f"\n[bold]Backtest[/bold]  "
         f"{len(symbols)} symbols  |  "
         f"{start_date} → {end_date}  |  "
-        f"Timeframes: {', '.join(args.timeframes)}  |  "
+        f"Mode: [cyan]{args.trading_mode.upper()}[/cyan] ({mode_desc})  |  "
         f"Regime filter: {'OFF' if args.no_regime_filter else 'ON'}  |  "
         f"Min confidence: {args.min_confidence}  |  "
-        f"Regime-aligned: {'OFF' if args.no_regime_align else 'ON'}\n"
+        f"Min signals: {args.min_confirming_signals}\n"
     )
 
     engine = BacktestEngine(
-        symbols               = symbols,
-        start_date            = start_date,
-        end_date              = end_date,
-        timeframes            = args.timeframes,
-        regime_aware          = not args.no_regime_filter,
-        min_confidence        = args.min_confidence,
-        regime_aligned_only   = not args.no_regime_align,
-        disabled_signals      = args.disabled_signals or None,
-        min_signal_timeframes = args.min_signal_timeframes,
+        symbols                 = symbols,
+        start_date              = start_date,
+        end_date                = end_date,
+        timeframes              = args.timeframes if args.timeframes != ["15min", "1hr", "1day"] else None,
+        regime_aware            = not args.no_regime_filter,
+        min_confidence          = args.min_confidence,
+        regime_aligned_only     = not args.no_regime_align,
+        disabled_signals        = args.disabled_signals or None,
+        min_signal_timeframes   = args.min_signal_timeframes,
+        min_confirming_signals  = args.min_confirming_signals,
+        trading_mode            = args.trading_mode,
     )
 
     result  = await engine.run()
