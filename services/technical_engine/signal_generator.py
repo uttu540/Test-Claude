@@ -923,24 +923,43 @@ class SignalDetector:
                 sep = (df.index.get_loc(l2_idx) - df.index.get_loc(l1_idx))  # bars apart
                 price_diff = abs(l1_val - l2_val) / l1_val if l1_val else 1
 
-                if sep >= 8 and price_diff < 0.025:   # close lows, 8+ bars apart
+                if sep >= 8 and price_diff < 0.020:   # tightened from 2.5% → 2.0%
                     # Neckline = highest high between the two lows
                     between_mask = (df.index >= l1_idx) & (df.index <= l2_idx)
                     neckline = df.loc[between_mask, "high"].max()
                     if price > neckline:               # neckline broken
-                        conf = 70
-                        if rvol > 1.5:                 conf += 10
-                        if latest.get("above_200ema"): conf += 5
-                        conf = min(conf + max(0, int((1 - price_diff / 0.025) * 10)), 100)
+                        conf = 65   # reduced base from 70
+                        # RVOL on neckline break — low-volume breaks fail 71% (Bulkowski)
+                        if rvol > 1.5:    conf += 15
+                        else:             conf -= 15
+                        # Bull structure confirmation
+                        if latest.get("above_200ema"):          conf += 5
+                        if latest.get("ema_stack") == 1:        conf += 10
+                        conf = min(conf + max(0, int((1 - price_diff / 0.020) * 10)), 100)
+                        # RSI divergence: second low should have HIGHER RSI than first
+                        # (price makes equal/lower low but momentum holds up = bullish)
+                        rsi_col = f"rsi_{self._cfg.rsi_period}"
+                        rsi_note = ""
+                        if rsi_col in df.columns:
+                            l1_iloc = df.index.get_loc(l1_idx)
+                            l2_iloc = df.index.get_loc(l2_idx)
+                            rsi_at_l1 = float(df[rsi_col].iloc[l1_iloc]) if not pd.isna(df[rsi_col].iloc[l1_iloc]) else None
+                            rsi_at_l2 = float(df[rsi_col].iloc[l2_iloc]) if not pd.isna(df[rsi_col].iloc[l2_iloc]) else None
+                            if rsi_at_l1 is not None and rsi_at_l2 is not None:
+                                if rsi_at_l2 > rsi_at_l1:
+                                    conf += 15   # bullish RSI divergence confirmed
+                                    rsi_note = f" | RSI div {rsi_at_l1:.0f}→{rsi_at_l2:.0f}"
+                                else:
+                                    conf -= 10   # no divergence, weaker pattern
                         signals.append(Signal(
                             trading_symbol  = symbol,
                             timeframe       = tf,
                             signal_type     = SignalType.DOUBLE_BOTTOM,
                             direction       = Direction.BULLISH,
-                            confidence      = conf,
+                            confidence      = min(max(conf, 0), 100),
                             price_at_signal = price,
                             indicators      = self._key_indicators(latest),
-                            notes           = f"Double Bottom W | lows {l1_val:.2f}/{l2_val:.2f} | neckline {neckline:.2f}",
+                            notes           = f"Double Bottom W | lows {l1_val:.2f}/{l2_val:.2f} | neckline {neckline:.2f}{rsi_note}",
                         ))
 
         # ── Double Top ────────────────────────────────────────────────────────
