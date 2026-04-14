@@ -68,19 +68,132 @@ def _get_universe(name: str) -> list[str]:
         ]
 
     if name == "nifty500":
-        # For nifty500 we use nifty50 + a subset of mid-caps for practicality
-        # Full 500-stock list would require a separate data file
+        # Nifty 50 + broad Nifty Midcap 150 + Nifty Smallcap 250 representative sample
+        # Covers all major sectors: banking, IT, pharma, auto, FMCG, infra, energy,
+        # chemicals, defence, real estate, media, textiles, agro, specialty chemicals
         base = _get_universe("nifty50")
-        midcap_sample = [
-            "TATACONSUM", "PIDILITIND", "SIEMENS", "ABB", "HAVELLS",
-            "VOLTAS", "MUTHOOTFIN", "CHOLAFIN", "BAJAJHLDNG", "BRITANNIA",
-            "GODREJCP", "MARICO", "DABUR", "BERGEPAINT", "COLPAL",
-            "PGHH", "NAUKRI", "IRCTC", "DMART", "ZOMATO",
-            "PAYTM", "NYKAA", "POLICYBZR", "STARTRC", "TATATECH",
+        midcap_largecap_extra = [
+            # Midcap 150 — financials
+            "MUTHOOTFIN", "CHOLAFIN", "BAJAJHLDNG", "SUNDARMFIN", "LICHSGFIN",
+            "MANAPPURAM", "PNBHOUSING", "AAVAS", "HOMEFIRST", "CREDITACC",
+            # Midcap 150 — IT / tech
+            "NAUKRI", "PERSISTENT", "LTTS", "COFORGE", "MPHASIS",
+            "TATATECH", "KPITTECH", "ZENSARTECH", "MASTEK", "SONATSOFTW",
+            # Midcap 150 — pharma / healthcare
+            "ALKEM", "LALPATHLAB", "METROPOLIS", "IPCALAB", "JBCHEPHARM",
+            "SYNGENE", "GRANULES", "GLAND", "NATCOPHARM", "ERIS",
+            # Midcap 150 — consumer / FMCG
+            "TATACONSUM", "GODREJCP", "MARICO", "DABUR", "EMAMILTD",
+            "COLPAL", "PGHH", "VBL", "RADICO", "PATANJALI",
+            # Midcap 150 — industrials / capital goods
+            "SIEMENS", "ABB", "HAVELLS", "VOLTAS", "CUMMINSIND",
+            "THERMAX", "BHEL", "GRINDWELL", "SCHAEFFLER", "TIMKEN",
+            # Midcap 150 — auto ancillaries
+            "MOTHERSON", "EXIDEIND", "AMARAJABAT", "SUNDRMFAST", "ENDURANCE",
+            "SUBROS", "SUPRAJIT", "GABRIEL", "MINDA", "BORORENEW",
+            # Midcap 150 — real estate / infra
+            "OBEROIRLTY", "PRESTIGE", "GODREJPROP", "SOBHA", "BRIGADE",
+            "PHOENIXLTD", "NESCO", "MAHSEAMLES", "CAPACITE", "KNRCON",
+            # Midcap 150 — chemicals / specialty
+            "PIDILITIND", "BERGEPAINT", "KANSAINER", "AKZOINDIA", "VINATIORGA",
+            "DEEPAKNTR", "NAVINFLUOR", "AARTI", "SUDARSCHEM", "FINEORG",
+            # Midcap 150 — consumer discretionary
+            "IRCTC", "DMART", "NYKAA", "ZOMATO", "JUBLFOOD",
+            "WESTLIFE", "SAPPHIRE", "DEVYANI", "BARBEQUE", "EIDPARRY",
+            # Midcap 150 — energy / utilities
+            "CESC", "TORNTPOWER", "JSWENERGY", "GREENPANEL", "RPOWER",
+            "TATAPOWER", "ADANIGREEN", "ADANITRANS", "NHPC", "SJVN",
+            # Smallcap — financials
+            "UJJIVANSFB", "EQUITASBNK", "SURYODAY", "ESAFSFB", "UTKARSHBNK",
+            "PAISALO", "IIFL", "MOTILALOS", "ANGELONE", "5PAISA",
+            # Smallcap — IT services
+            "RATEGAIN", "TANLA", "INTELLECT", "NEWGEN", "NUCLEUS",
+            "SAKSOFT", "DATAMATICS", "VAKRANGEE", "INFOBEAN", "CYIENT",
+            # Smallcap — pharma
+            "SUVEN", "SOLARA", "SEQUENT", "LAURUS", "NUVOCO",
+            "MARKSANS", "SHILPAMED", "POLYMED", "MEDICAMEN", "BLISSGVS",
+            # Smallcap — industrials / defence
+            "BEL", "HAL", "BEML", "MTAR", "PARAS",
+            "DATAPATTNS", "ASTRALDTEX", "GREAVESCOT", "ELGIEQUIP", "KALYANKJIL",
+            # Smallcap — textiles / agro
+            "PAGEIND", "GOKEX", "RUPA", "NIITLTD", "GARFIBRES",
+            "KRBL", "LTFOODS", "AVANTIFEED", "APEX", "GLOBUSSPR",
         ]
-        return base + midcap_sample
+        return base + midcap_largecap_extra
 
     return []
+
+
+def _get_symbol_segment() -> dict[str, str]:
+    """Return a mapping of symbol → segment string (LARGE_CAP / MID_CAP / SMALL_CAP).
+
+    Classification logic:
+      LARGE_CAP — the 50 Nifty50 constituents
+      MID_CAP   — midcap additions from "MUTHOOTFIN" through the energy/utilities block
+                  (ending with SJVN)
+      SMALL_CAP — smallcap additions from "UJJIVANSFB" onwards
+    """
+    large_cap = _get_universe("nifty50")
+
+    midcap = [
+        # Midcap 150 — financials
+        "MUTHOOTFIN", "CHOLAFIN", "BAJAJHLDNG", "SUNDARMFIN", "LICHSGFIN",
+        "MANAPPURAM", "PNBHOUSING", "AAVAS", "HOMEFIRST", "CREDITACC",
+        # Midcap 150 — IT / tech
+        "NAUKRI", "PERSISTENT", "LTTS", "COFORGE", "MPHASIS",
+        "TATATECH", "KPITTECH", "ZENSARTECH", "MASTEK", "SONATSOFTW",
+        # Midcap 150 — pharma / healthcare
+        "ALKEM", "LALPATHLAB", "METROPOLIS", "IPCALAB", "JBCHEPHARM",
+        "SYNGENE", "GRANULES", "GLAND", "NATCOPHARM", "ERIS",
+        # Midcap 150 — consumer / FMCG
+        "TATACONSUM", "GODREJCP", "MARICO", "DABUR", "EMAMILTD",
+        "COLPAL", "PGHH", "VBL", "RADICO", "PATANJALI",
+        # Midcap 150 — industrials / capital goods
+        "SIEMENS", "ABB", "HAVELLS", "VOLTAS", "CUMMINSIND",
+        "THERMAX", "BHEL", "GRINDWELL", "SCHAEFFLER", "TIMKEN",
+        # Midcap 150 — auto ancillaries
+        "MOTHERSON", "EXIDEIND", "AMARAJABAT", "SUNDRMFAST", "ENDURANCE",
+        "SUBROS", "SUPRAJIT", "GABRIEL", "MINDA", "BORORENEW",
+        # Midcap 150 — real estate / infra
+        "OBEROIRLTY", "PRESTIGE", "GODREJPROP", "SOBHA", "BRIGADE",
+        "PHOENIXLTD", "NESCO", "MAHSEAMLES", "CAPACITE", "KNRCON",
+        # Midcap 150 — chemicals / specialty
+        "PIDILITIND", "BERGEPAINT", "KANSAINER", "AKZOINDIA", "VINATIORGA",
+        "DEEPAKNTR", "NAVINFLUOR", "AARTI", "SUDARSCHEM", "FINEORG",
+        # Midcap 150 — consumer discretionary
+        "IRCTC", "DMART", "NYKAA", "ZOMATO", "JUBLFOOD",
+        "WESTLIFE", "SAPPHIRE", "DEVYANI", "BARBEQUE", "EIDPARRY",
+        # Midcap 150 — energy / utilities
+        "CESC", "TORNTPOWER", "JSWENERGY", "GREENPANEL", "RPOWER",
+        "TATAPOWER", "ADANIGREEN", "ADANITRANS", "NHPC", "SJVN",
+    ]
+
+    smallcap = [
+        # Smallcap — financials
+        "UJJIVANSFB", "EQUITASBNK", "SURYODAY", "ESAFSFB", "UTKARSHBNK",
+        "PAISALO", "IIFL", "MOTILALOS", "ANGELONE", "5PAISA",
+        # Smallcap — IT services
+        "RATEGAIN", "TANLA", "INTELLECT", "NEWGEN", "NUCLEUS",
+        "SAKSOFT", "DATAMATICS", "VAKRANGEE", "INFOBEAN", "CYIENT",
+        # Smallcap — pharma
+        "SUVEN", "SOLARA", "SEQUENT", "LAURUS", "NUVOCO",
+        "MARKSANS", "SHILPAMED", "POLYMED", "MEDICAMEN", "BLISSGVS",
+        # Smallcap — industrials / defence
+        "BEL", "HAL", "BEML", "MTAR", "PARAS",
+        "DATAPATTNS", "ASTRALDTEX", "GREAVESCOT", "ELGIEQUIP", "KALYANKJIL",
+        # Smallcap — textiles / agro
+        "PAGEIND", "GOKEX", "RUPA", "NIITLTD", "GARFIBRES",
+        "KRBL", "LTFOODS", "AVANTIFEED", "APEX", "GLOBUSSPR",
+    ]
+
+    mapping: dict[str, str] = {}
+    for sym in large_cap:
+        mapping[sym] = "LARGE_CAP"
+    for sym in midcap:
+        mapping[sym] = "MID_CAP"
+    for sym in smallcap:
+        mapping[sym] = "SMALL_CAP"
+    return mapping
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -166,6 +279,9 @@ async def main() -> None:
         console.print("[red]No symbols found. Use --symbols or --universe.[/red]")
         sys.exit(1)
 
+    # Segment mapping (only meaningful for nifty500; nifty50 → all LARGE_CAP)
+    symbol_segments = _get_symbol_segment() if not args.symbols else None
+
     # Resolve dates
     end_date   = date.fromisoformat(args.end)
     start_date = (
@@ -201,6 +317,7 @@ async def main() -> None:
         min_signal_timeframes   = args.min_signal_timeframes,
         min_confirming_signals  = args.min_confirming_signals,
         trading_mode            = args.trading_mode,
+        symbol_segments         = symbol_segments,
     )
 
     result  = await engine.run()

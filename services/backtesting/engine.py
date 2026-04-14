@@ -76,7 +76,7 @@ class SimulatedTrade:
     stop_loss:        float
     target:           float
     exit_price:       float      = 0.0
-    exit_reason:      str        = "OPEN"   # TARGET | STOP | EOD | MAX_HOLD
+    exit_reason:      str        = "OPEN"   # TARGET | STOP | TRAIL_STOP | EOD | MAX_HOLD
     pnl:              float      = 0.0
     pnl_pct:          float      = 0.0
     holding_candles:  int        = 0
@@ -129,6 +129,7 @@ class BacktestEngine:
         min_signal_timeframes:  int = 1,
         min_confirming_signals: int = 1,
         trading_mode:           str = "intraday",   # "intraday" | "swing"
+        symbol_segments:        dict[str, str] | None = None,
     ) -> None:
         self._symbols              = symbols
         self._start                = start_date
@@ -160,6 +161,10 @@ class BacktestEngine:
             if tf not in self._timeframes:
                 self._timeframes.append(tf)
 
+        # Segment map: symbol → LARGE_CAP | MID_CAP | SMALL_CAP
+        # Used for segment-aware RVOL / pattern quality gates.
+        self._symbol_segments = symbol_segments
+
         self._signal_engine   = MultiTimeframeSignalEngine()
         self._risk_engine     = RiskEngine()
         self._regime_detector = MarketRegimeDetector()
@@ -169,6 +174,10 @@ class BacktestEngine:
         self._vix_level_by_date:         dict[date, str]  = {}   # date → CALM/ELEVATED/HIGH/EXTREME
         # P1: True = Nifty 200 EMA is rising on that date (bull phase → block all shorts)
         self._nifty_200ema_rising_by_date: dict[date, bool] = {}
+        # Segment-specific regime: mid/small cap index 200 EMA state per date
+        # True = index above its own 200 EMA (healthy mid/small cap environment)
+        self._midcap_regime_by_date:   dict[date, str]  = {}   # date → TRENDING_UP/DOWN/RANGING
+        self._smallcap_regime_by_date: dict[date, str]  = {}   # date → TRENDING_UP/DOWN/RANGING
 
     async def run(self) -> BacktestResult:
         result = BacktestResult(
@@ -299,6 +308,52 @@ class BacktestEngine:
                 )
         except Exception as e:
             log.warning("backtest.vix_load_failed", error=str(e))
+
+        # ── Nifty Midcap 150 + Nifty Smallcap 250 regime ─────────────────────
+        # Used to gate mid/small cap longs — if their index is in a downtrend,
+        # individual mid/small cap long signals have much lower follow-through
+        # even when Nifty 50 is fine. (e.g. 2025: Nifty recovered but midcap/
+        # smallcap indices ground down for months).
+        for index_ticker, regime_dict, label in [
+            ("^CNXMDCP",  self._midcap_regime_by_date,   "midcap"),
+            ("^CNXSC",    self._smallcap_regime_by_date, "smallcap"),
+        ]:
+            try:
+                idx_raw = yf.Ticker(index_ticker).history(
+                    start       = load_start.isoformat(),
+                    end         = load_end,
+                    interval    = "1d",
+                    auto_adjust = True,
+                )
+                if not idx_raw.empty:
+                    idx_raw.index = pd.to_datetime(idx_raw.index)
+                    if idx_raw.index.tz is not None:
+                        idx_raw.index = idx_raw.index.tz_convert("Asia/Kolkata").tz_localize(None)
+                    idx_raw = idx_raw.rename(columns={
+                        "Open": "open", "High": "high",
+                        "Low":  "low",  "Close": "close", "Volume": "volume",
+                    })[["open", "high", "low", "close", "volume"]]
+                    idx_df = compute_all(idx_raw)
+                    for ts, row in idx_df.iterrows():
+                        d         = ts.date() if hasattr(ts, "date") else ts
+                        adx       = row.get("adx")      if "adx"      in idx_df.columns else None
+                        ema_stack = row.get("ema_stack") if "ema_stack" in idx_df.columns else None
+                        if adx is not None and not pd.isna(adx):
+                            if adx < 20:
+                                regime_dict[d] = "RANGING"
+                            else:
+                                regime_dict[d] = (
+                                    "TRENDING_UP" if (ema_stack or 0) >= 0 else "TRENDING_DOWN"
+                                )
+                    log.info(
+                        f"backtest.{label}_loaded",
+                        trading_days  = len(regime_dict),
+                        trending_up   = sum(1 for v in regime_dict.values() if v == "TRENDING_UP"),
+                        trending_down = sum(1 for v in regime_dict.values() if v == "TRENDING_DOWN"),
+                        ranging       = sum(1 for v in regime_dict.values() if v == "RANGING"),
+                    )
+            except Exception as e:
+                log.warning(f"backtest.{label}_load_failed", error=str(e))
 
     # ── Per-symbol ────────────────────────────────────────────────────────────
 
@@ -438,6 +493,21 @@ class BacktestEngine:
                 if nifty_200_rising is True:
                     continue
 
+            # ── Segment-specific regime gate ──────────────────────────────────
+            # Nifty 50 can be trending up while midcap/smallcap indices are
+            # correcting (e.g. early 2025). Gate long trades per segment index
+            # to avoid buying mid/small caps into a deteriorating tape.
+            if setup_bias == Direction.BULLISH and self._symbol_segments:
+                _seg = self._symbol_segments.get(symbol, "LARGE_CAP")
+                if _seg == "MID_CAP":
+                    _mid_regime = self._midcap_regime_by_date.get(candle_date)
+                    if _mid_regime == "TRENDING_DOWN":
+                        continue
+                elif _seg == "SMALL_CAP":
+                    _small_regime = self._smallcap_regime_by_date.get(candle_date)
+                    if _small_regime in ("TRENDING_DOWN", "RANGING"):
+                        continue
+
             # ── DCB state machine: advance every candle (before signal check) ──
             _candle = primary_df.iloc[i]
             _bar_high = float(_candle.get("high", 0) or 0)
@@ -478,6 +548,23 @@ class BacktestEngine:
                 continue
 
             top = all_signals[0]
+
+            # ── Segment-aware signal quality gate ────────────────────────────
+            segment = (self._symbol_segments or {}).get(symbol, "LARGE_CAP")
+
+            # 1. RVOL minimum by segment — research shows mid/small need higher confirmation
+            atr_key_rvol = f"atr_{self._signal_engine._detector._cfg.atr_period}"
+            top_rvol = top.indicators.get("rvol", 1.0) or 1.0
+            min_rvol = {"LARGE_CAP": 0.0, "MID_CAP": 1.5, "SMALL_CAP": 2.0}.get(segment, 0.0)
+            # Only apply RVOL gate to bullish signals (longs) — shorts handled separately
+            if top.direction == Direction.BULLISH and top_rvol < min_rvol:
+                continue
+
+            # 2. Disable Double Top/Bottom on small caps — manipulation prone (41-50% WR)
+            if segment == "SMALL_CAP" and top.signal_type in (
+                SignalType.DOUBLE_TOP, SignalType.DOUBLE_BOTTOM
+            ):
+                continue
 
             # ── Step 4: Quality gates ─────────────────────────────────────────
             if top.confidence < self._min_confidence:
@@ -651,29 +738,68 @@ class BacktestEngine:
         exit_reason = "OPEN"
         hold        = 0
 
+        # ── Trailing stop state ───────────────────────────────────────────────
+        # Once price hits milestones, we trail the stop to lock in profits
+        # rather than exiting hard at a fixed target. This lets winners run
+        # to multibagger territory (1:5, 1:8+) while protecting capital.
+        #
+        # Milestones (based on initial risk = entry - stop_loss):
+        #   Hit 1:2  → trail stop to breakeven (entry price)
+        #   Hit 1:3  → trail stop to +1R (entry + 1× initial risk)
+        #   Hit 1:5  → trail stop to +3R (entry + 3× initial risk)
+        #   Hit 1:8  → trail stop to +5R (entry + 5× initial risk)
+        #
+        # No hard target — trade stays open until trailing stop is hit or
+        # MAX_HOLD expires. The 'target' from risk engine is removed as a
+        # hard exit — it becomes the first milestone trigger only.
+        initial_risk = abs(entry_price - stop_loss)
+        trailing_stop = stop_loss   # starts at original stop, moves up only
+
         for idx, (ts, candle) in enumerate(future_df.iterrows()):
             hold += 1
 
             if is_long:
-                # Check stop hit
-                if candle["low"] <= stop_loss:
-                    exit_price  = stop_loss
-                    exit_reason = "STOP"
-                    break
-                # Check target hit
-                if candle["high"] >= target:
-                    exit_price  = target
-                    exit_reason = "TARGET"
+                # Update trailing stop based on how far price has moved
+                if initial_risk > 0:
+                    move = candle["high"] - entry_price
+                    r_multiple = move / initial_risk
+                    if r_multiple >= 8:
+                        new_trail = entry_price + 5 * initial_risk
+                    elif r_multiple >= 5:
+                        new_trail = entry_price + 3 * initial_risk
+                    elif r_multiple >= 3:
+                        new_trail = entry_price + 1 * initial_risk
+                    elif r_multiple >= 2:
+                        new_trail = entry_price   # breakeven
+                    else:
+                        new_trail = stop_loss
+                    trailing_stop = max(trailing_stop, new_trail)
+
+                # Check trailing stop hit
+                if candle["low"] <= trailing_stop:
+                    exit_price  = trailing_stop
+                    exit_reason = "STOP" if trailing_stop == stop_loss else "TRAIL_STOP"
                     break
             else:
-                # SHORT
-                if candle["high"] >= stop_loss:
-                    exit_price  = stop_loss
-                    exit_reason = "STOP"
-                    break
-                if candle["low"] <= target:
-                    exit_price  = target
-                    exit_reason = "TARGET"
+                # SHORT — trailing stop moves down
+                if initial_risk > 0:
+                    move = entry_price - candle["low"]
+                    r_multiple = move / initial_risk
+                    if r_multiple >= 8:
+                        new_trail = entry_price - 5 * initial_risk
+                    elif r_multiple >= 5:
+                        new_trail = entry_price - 3 * initial_risk
+                    elif r_multiple >= 3:
+                        new_trail = entry_price - 1 * initial_risk
+                    elif r_multiple >= 2:
+                        new_trail = entry_price   # breakeven
+                    else:
+                        new_trail = stop_loss
+                    trailing_stop = min(trailing_stop, new_trail)
+
+                if candle["high"] >= trailing_stop:
+                    exit_price  = trailing_stop
+                    exit_reason = "STOP" if trailing_stop == stop_loss else "TRAIL_STOP"
                     break
 
             # EOD exit: intraday only — forced close at 15:20 IST.

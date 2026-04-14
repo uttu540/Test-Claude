@@ -792,21 +792,42 @@ class SignalDetector:
             c["close"] >= p["open"]               # closes at or above prior open
         )
         if bullish_engulf:
-            conf = 70
-            if rvol > 1.5:                        conf += 10
-            if latest.get("above_200ema"):         conf += 5
-            # Stronger if engulfing a large prior candle
-            if p_body > 0 and c_body >= 1.5 * p_body: conf += 5
-            signals.append(Signal(
-                trading_symbol  = symbol,
-                timeframe       = tf,
-                signal_type     = SignalType.ENGULFING_BULL,
-                direction       = Direction.BULLISH,
-                confidence      = min(conf, 100),
-                price_at_signal = price,
-                indicators      = self._key_indicators(latest),
-                notes           = f"Bullish Engulfing | body ratio {c_body/p_body:.1f}x" if p_body > 0 else "Bullish Engulfing",
-            ))
+            # Prior downswing context: require at least 2 of the last 5 bars to be
+            # bearish (stock was in a pullback before the engulf fires).
+            # Without this, random engulfs in sideways/uptrending markets fire constantly.
+            recent_5 = df.iloc[-6:-1]
+            bearish_bar_count = int((recent_5["close"] < recent_5["open"]).sum())
+            if bearish_bar_count < 2:
+                pass   # skip — no downswing context
+            else:
+                conf = 65
+                # above_200ema is now mandatory: missing it subtracts hard
+                if not latest.get("above_200ema"):
+                    conf -= 20
+                else:
+                    pass   # no bonus for having it — it's the baseline
+                # ema_stack confirms uptrend structure
+                if latest.get("ema_stack") == 1:  conf += 10
+                # RVOL: high volume confirms conviction; very low is suspicious
+                if rvol > 1.5:                    conf += 10
+                elif rvol < 1.2:                  conf -= 10
+                # Stronger if engulfing a large prior candle
+                if p_body > 0 and c_body >= 1.5 * p_body: conf += 5
+                signals.append(Signal(
+                    trading_symbol  = symbol,
+                    timeframe       = tf,
+                    signal_type     = SignalType.ENGULFING_BULL,
+                    direction       = Direction.BULLISH,
+                    confidence      = min(conf, 100),
+                    price_at_signal = price,
+                    indicators      = self._key_indicators(latest),
+                    notes           = (
+                        f"Bullish Engulfing | body ratio {c_body/p_body:.1f}x"
+                        f" | bearish_bars_5 {bearish_bar_count}"
+                        if p_body > 0
+                        else f"Bullish Engulfing | bearish_bars_5 {bearish_bar_count}"
+                    ),
+                ))
 
         # ── Bearish Engulfing ─────────────────────────────────────────────────
         bearish_engulf = (
@@ -816,20 +837,39 @@ class SignalDetector:
             c["close"] <= p["open"]               # closes at or below prior open
         )
         if bearish_engulf:
-            conf = 70
-            if rvol > 1.5:                        conf += 10
-            if not latest.get("above_200ema"):     conf += 5
-            if p_body > 0 and c_body >= 1.5 * p_body: conf += 5
-            signals.append(Signal(
-                trading_symbol  = symbol,
-                timeframe       = tf,
-                signal_type     = SignalType.ENGULFING_BEAR,
-                direction       = Direction.BEARISH,
-                confidence      = min(conf, 100),
-                price_at_signal = price,
-                indicators      = self._key_indicators(latest),
-                notes           = f"Bearish Engulfing | body ratio {c_body/p_body:.1f}x" if p_body > 0 else "Bearish Engulfing",
-            ))
+            # Prior upswing context: require at least 2 of the last 5 bars to be
+            # bullish (stock was in an upswing before the bearish engulf fires).
+            recent_5 = df.iloc[-6:-1]
+            bullish_bar_count = int((recent_5["close"] > recent_5["open"]).sum())
+            if bullish_bar_count < 2:
+                pass   # skip — no upswing context
+            else:
+                conf = 65
+                # Bearish structure: below 200 EMA is favourable; above 200 EMA fights trend
+                if not latest.get("above_200ema"):
+                    conf += 5    # already in bearish structure
+                else:
+                    conf -= 10   # fighting trend — lower conviction
+                # ema_stack == -1 confirms downtrend structure
+                if latest.get("ema_stack") == -1: conf += 10
+                # RVOL: high volume confirms distribution
+                if rvol > 1.5:                    conf += 10
+                if p_body > 0 and c_body >= 1.5 * p_body: conf += 5
+                signals.append(Signal(
+                    trading_symbol  = symbol,
+                    timeframe       = tf,
+                    signal_type     = SignalType.ENGULFING_BEAR,
+                    direction       = Direction.BEARISH,
+                    confidence      = min(conf, 100),
+                    price_at_signal = price,
+                    indicators      = self._key_indicators(latest),
+                    notes           = (
+                        f"Bearish Engulfing | body ratio {c_body/p_body:.1f}x"
+                        f" | bullish_bars_5 {bullish_bar_count}"
+                        if p_body > 0
+                        else f"Bearish Engulfing | bullish_bars_5 {bullish_bar_count}"
+                    ),
+                ))
 
         # ── Morning Star (3-candle bullish reversal) ──────────────────────────
         # c1 (p2): large bearish candle
@@ -1087,46 +1127,154 @@ class SignalDetector:
         self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
     ) -> list[Signal]:
         """
-        Darvas Box: price consolidates in a box (top and bottom hold for N bars),
-        then breaks out above box top. Works best on 1day / 1hr timeframes.
+        Darvas Box — correct 4-bar rule implementation for NSE.
+
+        Original Darvas rules:
+          Box top: a new high that is not exceeded for 3 consecutive bars.
+          Box bottom: the lowest low after the top is set, not violated for 3 consecutive bars.
+          Entry: daily CLOSE above the box top (not an intraday pierce).
+
+        Indian market adaptations (from practitioners + Bulkowski research):
+          - 52-week high prerequisite: stock must be near its 52-week high
+          - Box height 5–20% of price (2–8× ATR): avoids noise boxes and R:R killing wide boxes
+          - Minimum box duration: 15 bars (~3 weeks)
+          - RVOL >= 2.0 on breakout day (Upsurge.club, ChartAlert India consensus)
+          - Price above 200 EMA: mandatory India adaptation
+          - Close above box top (not intraday pierce) to avoid expiry-day spikes
         """
-        if len(df) < 25:
+        if len(df) < 60:
             return []
 
         rvol = latest.get("rvol", 1.0) or 1.0
-        box_period = 15   # bars forming the box
-        lookback   = df.iloc[-(box_period + 1):-1]
 
-        box_top    = lookback["high"].max()
-        box_bottom = lookback["low"].min()
-        box_range  = box_top - box_bottom
+        # ── Step 1: Find the most recent confirmed Darvas box top ──────────────
+        # Scan backwards to find a peak where the next 3 bars all have lower highs.
+        # Search within the last 60 bars to find a valid box.
+        box_top_idx = None
+        box_top_val = None
 
-        # Box is valid if the last 5 bars stayed within the box (no new highs)
-        last_5 = df.iloc[-6:-1]
-        box_intact = last_5["high"].max() <= box_top * 1.005   # 0.5% tolerance
+        highs = df["high"].values
+        n = len(highs)
 
-        # A proper box needs meaningful range (> 1% of price) and price was ranging
-        has_range = box_range / box_top > 0.01 if box_top > 0 else False
+        for i in range(n - 4, max(n - 61, 3), -1):
+            peak = highs[i]
+            # 3 consecutive bars after i must all be strictly lower than peak
+            if highs[i+1] < peak and highs[i+2] < peak and highs[i+3] < peak:
+                box_top_idx = i
+                box_top_val = peak
+                break
 
-        if box_intact and has_range and price > box_top:
-            conf = 70
-            if rvol > 2.0:                        conf += 15
-            elif rvol > 1.5:                      conf += 8
-            if latest.get("above_200ema"):        conf += 10
-            adx = latest.get("adx")
-            if adx and not pd.isna(adx) and adx > 25: conf += 5
-            return [Signal(
-                trading_symbol  = symbol,
-                timeframe       = tf,
-                signal_type     = SignalType.DARVAS_BREAKOUT,
-                direction       = Direction.BULLISH,
-                confidence      = min(conf, 100),
-                price_at_signal = price,
-                indicators      = self._key_indicators(latest),
-                notes           = f"Darvas Box breakout | box {box_bottom:.2f}–{box_top:.2f} | RVOL {rvol:.1f}x",
-            )]
+        if box_top_idx is None:
+            return []
 
-        return []
+        # ── Step 2: Find the confirmed box bottom ─────────────────────────────
+        # Starting from box_top_idx, find the lowest low where the next 3 bars
+        # all have higher (or equal) lows — i.e., the low holds for 3 bars.
+        lows = df["low"].values
+        box_bottom_idx = None
+        box_bottom_val = None
+
+        search_end = min(box_top_idx + 40, n - 4)
+        for j in range(box_top_idx, search_end):
+            trough = lows[j]
+            if lows[j+1] >= trough and lows[j+2] >= trough and lows[j+3] >= trough:
+                box_bottom_idx = j
+                box_bottom_val = trough
+                break
+
+        if box_bottom_idx is None:
+            return []
+
+        # ── Step 3: Box validity filters ──────────────────────────────────────
+        # Box must span at least 15 bars (3 weeks on daily)
+        box_duration = (n - 1) - box_top_idx
+        if box_duration < 15:
+            return []
+
+        # Box height must be 5–20% of price (avoids noise and R:R-killing wide boxes)
+        if box_top_val <= 0:
+            return []
+        box_height_pct = (box_top_val - box_bottom_val) / box_top_val
+        if box_height_pct < 0.05 or box_height_pct > 0.20:
+            return []
+
+        # Box height must also be 2–8× ATR (adaptive to current volatility)
+        atr_val = latest.get(f"atr_{self._cfg.atr_period}") or latest.get("atr_14", 0)
+        if atr_val and atr_val > 0:
+            box_atr_mult = (box_top_val - box_bottom_val) / atr_val
+            if box_atr_mult < 2.0 or box_atr_mult > 8.0:
+                return []
+
+        # ── Step 4: 52-week high proximity ────────────────────────────────────
+        # Stock should be within 20% of its 52-week high (buying strength, not bounce)
+        lookback_52w = min(252, n)
+        high_52w = df["high"].iloc[-lookback_52w:].max()
+        if high_52w > 0 and (high_52w - price) / high_52w > 0.20:
+            return []   # stock is >20% below 52-week high — skip
+
+        # ── Step 5: Price must be near/above box top (today's close broke out) ─
+        # Require the current bar's close to be above the box top (not intraday pierce).
+        # We use price (which is the latest close passed in) as the close.
+        if price <= box_top_val:
+            return []
+
+        # Breakout should not be too extended (within 3% above box top is ideal)
+        breakout_ext = (price - box_top_val) / box_top_val
+        if breakout_ext > 0.05:
+            return []   # already extended >5% above box — chasing, skip
+
+        # ── Step 6: Box must have been intact before the breakout ─────────────
+        # The last 3 bars before current should not have closed above the box top
+        # (confirming the box was genuinely consolidated, not already broken)
+        pre_breakout = df["close"].iloc[-4:-1]
+        if pre_breakout.max() > box_top_val * 1.005:
+            return []   # box was already broken — stale signal
+
+        # ── Step 7: Confidence scoring ────────────────────────────────────────
+        conf = 60   # conservative base — requires meaningful confirmation
+
+        # RVOL is the primary confirmation signal (Indian consensus: 2× = solid, 3× = strong)
+        if rvol >= 3.0:       conf += 25
+        elif rvol >= 2.0:     conf += 15
+        elif rvol >= 1.5:     conf += 5
+        else:                 conf -= 20   # low-volume breakout = likely false
+
+        # 200 EMA — mandatory India adaptation
+        if latest.get("above_200ema"):        conf += 10
+        else:                                 conf -= 15   # breaking out below 200 EMA is risky
+
+        # Trend strength
+        adx = latest.get("adx")
+        if adx and not pd.isna(adx):
+            if adx > 30:   conf += 10
+            elif adx > 20: conf += 5
+
+        # EMA stack alignment
+        if latest.get("ema_stack") == 1:    conf += 8
+
+        # Box duration bonus — longer consolidation = more trapped sellers above = cleaner breakout
+        if box_duration >= 40:   conf += 10   # 8+ weeks
+        elif box_duration >= 20: conf += 5    # 4+ weeks
+
+        # Box height sweet spot (8–15% = ideal for swing R:R)
+        if 0.08 <= box_height_pct <= 0.15:   conf += 5
+
+        atr_note = f" | box {box_atr_mult:.1f}×ATR" if (atr_val and atr_val > 0) else ""
+
+        return [Signal(
+            trading_symbol  = symbol,
+            timeframe       = tf,
+            signal_type     = SignalType.DARVAS_BREAKOUT,
+            direction       = Direction.BULLISH,
+            confidence      = min(max(conf, 0), 100),
+            price_at_signal = price,
+            indicators      = self._key_indicators(latest),
+            notes           = (
+                f"Darvas Box | top {box_top_val:.2f} bottom {box_bottom_val:.2f} "
+                f"| height {box_height_pct*100:.1f}% | dur {box_duration}bars"
+                f" | RVOL {rvol:.1f}x{atr_note}"
+            ),
+        )]
 
     def _nr7_setup(
         self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
