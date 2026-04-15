@@ -258,11 +258,11 @@ def _parse_args() -> argparse.Namespace:
              "Set ≥ 2 to demand genuine multi-signal confluence before entering a trade.",
     )
     parser.add_argument(
-        "--trading-mode", default="intraday", choices=["intraday", "swing"],
+        "--trading-mode", default="swing", choices=["intraday", "swing"],
         help=(
-            "Trading mode (default: intraday).\n"
-            "  intraday: Setup=1H bias → Trigger=15min entry → EOD exit.\n"
-            "  swing:    Setup=Daily bias → Trigger=1H entry → hold up to 5 days."
+            "Trading mode (default: swing).\n"
+            "  swing:    Setup=Daily bias → Trigger=1H entry → hold up to 5 days.\n"
+            "  intraday: Setup=1H bias → Trigger=15min entry → EOD exit."
         ),
     )
     return parser.parse_args()

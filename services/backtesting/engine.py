@@ -64,6 +64,65 @@ log = structlog.get_logger(__name__)
 # Maximum candles to hold a simulated position before forcing exit
 MAX_HOLD_CANDLES = 20   # ~5 days on 15min
 
+# ── Confluence scoring ────────────────────────────────────────────────────────
+# Minimum total score (out of 10) required to enter a trade.
+# Each of the 5 factors scores 0-2; need at least 3 factors to partially agree.
+MIN_CONFLUENCE_SCORE = 7
+
+# Signals that are fundamentally intraday tools (VWAP resets daily, ORB is 9:15-9:30).
+# They have no meaning on swing timeframes (1H multi-day holds) and consistently
+# underperform: VWAP_RECLAIM had ₹-2,565 P&L before confluence filtering.
+_INTRADAY_ONLY_SIGNALS: frozenset[str] = frozenset({"VWAP_RECLAIM", "ORB_BREAKOUT"})
+
+# Signal types considered "high quality" for the signal-strength factor
+_HIGH_QUALITY_SIGNALS = {
+    "BREAKOUT_HIGH", "BREAKOUT_LOW",
+    "DOUBLE_BOTTOM",  "DOUBLE_TOP",
+    "DARVAS_BREAKOUT",
+    "ENGULFING_BULL", "ENGULFING_BEAR",
+    "EVENING_STAR",   "MORNING_STAR",
+    "BULL_FLAG",      "BEAR_FLAG",
+    "EMA_CROSSOVER_UP", "EMA_CROSSOVER_DOWN",
+}
+
+
+@dataclass
+class ConfluenceScore:
+    """
+    Scores a potential trade setup across 5 independent factors (max 10 pts).
+    A setup must score >= MIN_CONFLUENCE_SCORE to be traded.
+
+    Factors:
+      signal_strength   : signal confidence + pattern quality (0-2)
+      volume            : RVOL vs threshold                   (0-2)
+      trend_alignment   : EMA stack + 200 EMA position        (0-2)
+      momentum          : RSI in sweet-spot for direction      (0-2)
+      multi_signal      : how many distinct signals agree      (0-2)
+    """
+    signal_strength: int = 0
+    volume:          int = 0
+    trend_alignment: int = 0
+    momentum:        int = 0
+    multi_signal:    int = 0
+
+    @property
+    def total(self) -> int:
+        return self.signal_strength + self.volume + self.trend_alignment + self.momentum + self.multi_signal
+
+    @property
+    def passed(self) -> bool:
+        return self.total >= MIN_CONFLUENCE_SCORE
+
+    def to_dict(self) -> dict:
+        return {
+            "total":          self.total,
+            "signal_strength": self.signal_strength,
+            "volume":         self.volume,
+            "trend_alignment": self.trend_alignment,
+            "momentum":       self.momentum,
+            "multi_signal":   self.multi_signal,
+        }
+
 
 @dataclass
 class SimulatedTrade:
@@ -84,6 +143,8 @@ class SimulatedTrade:
     regime:           str        = "UNKNOWN"
     risk_amount:      float      = 0.0
     position_size:    int        = 0
+    confluence_score: int        = 0   # 0-10; breakdown in confluence_factors
+    confluence_factors: dict     = field(default_factory=dict)
 
 
 @dataclass
@@ -542,6 +603,16 @@ class BacktestEngine:
 
             # Regime filter (removes signal types not suited for this regime)
             all_signals = reg_filter.apply(all_signals, regime)
+
+            # Swing mode: strip intraday-only signals (VWAP/ORB have no meaning
+            # across multi-day holds — VWAP resets at 9:15 each day, ORB is a
+            # 9:15-9:30 construct). Consistently ₹-ve across all backtest runs.
+            if self._trading_mode == "swing":
+                all_signals = [
+                    s for s in all_signals
+                    if s.signal_type.value not in _INTRADAY_ONLY_SIGNALS
+                ]
+
             all_signals.sort(key=lambda s: s.confidence, reverse=True)
 
             if not all_signals:
@@ -565,6 +636,16 @@ class BacktestEngine:
                 SignalType.DOUBLE_TOP, SignalType.DOUBLE_BOTTOM
             ):
                 continue
+
+            # 3. Reversal patterns (DOUBLE_BOTTOM, MORNING_STAR) are knife-catches
+            # when Nifty is in a long-term bear phase (200 EMA falling).
+            # Gate: only trade these when the Nifty 200 EMA is rising (bull phase).
+            # ADX-based regime is too noisy (flips on single days); the 200 EMA
+            # direction is a stable, slow-moving indicator of the macro environment.
+            if top.signal_type in (SignalType.DOUBLE_BOTTOM, SignalType.MORNING_STAR):
+                _nifty_bull = self._nifty_200ema_rising_by_date.get(candle_date)
+                if _nifty_bull is False:   # 200 EMA falling = bear phase → block
+                    continue
 
             # ── Step 4: Quality gates ─────────────────────────────────────────
             if top.confidence < self._min_confidence:
@@ -601,7 +682,23 @@ class BacktestEngine:
                     )
                     _dcb_state = 0   # Reset state — trade entered
 
-            # Multi-signal confirmation: require N distinct signal types
+            # ── Confluence scoring ─────────────────────────────────────────────
+            # Require at least MIN_CONFLUENCE_SCORE (6/10) across 5 factors:
+            # signal quality, volume, trend alignment, momentum, multi-signal.
+            # This replaces the blunt min_confirming_signals check and ensures
+            # we only trade when multiple independent factors agree.
+            confluence = self._score_confluence(top, all_signals)
+            if not confluence.passed:
+                log.debug(
+                    "backtest.confluence_failed",
+                    symbol  = symbol,
+                    signal  = top.signal_type.value,
+                    score   = confluence.total,
+                    factors = confluence.to_dict(),
+                )
+                continue
+
+            # Legacy multi-signal confirmation (still honoured if set > 1)
             if self._min_confirming_signals > 1:
                 confirming_types = {s.signal_type for s in all_signals}
                 if len(confirming_types) < self._min_confirming_signals:
@@ -667,11 +764,97 @@ class BacktestEngine:
                 entry_date = cutoff.date() if hasattr(cutoff, "date") else cutoff,
             )
             if trade:
+                trade.confluence_score   = confluence.total
+                trade.confluence_factors = confluence.to_dict()
                 trades.append(trade)
                 in_trade       = True
                 exit_after_idx = i + trade.holding_candles
 
         return trades
+
+    def _score_confluence(
+        self,
+        top:        Signal,
+        all_signals: list[Signal],
+    ) -> ConfluenceScore:
+        """
+        Score the trade setup across 5 independent factors (max 10 points).
+        Requires >= MIN_CONFLUENCE_SCORE to trade.
+
+        Factor breakdown:
+          signal_strength  : confidence level + pattern quality  (0-2)
+          volume           : RVOL vs threshold                   (0-2)
+          trend_alignment  : EMA stack + 200 EMA position        (0-2)
+          momentum         : RSI in the sweet-spot for direction  (0-2)
+          multi_signal     : distinct signal types agreeing       (0-2)
+        """
+        score = ConfluenceScore()
+        ind   = top.indicators
+        bull  = top.direction == Direction.BULLISH
+
+        # ── Factor 1: Signal strength ──────────────────────────────────────
+        conf     = top.confidence
+        hq       = top.signal_type.value in _HIGH_QUALITY_SIGNALS
+        if conf >= 75 and hq:
+            score.signal_strength = 2
+        elif conf >= 65:
+            score.signal_strength = 1
+        # else 0
+
+        # ── Factor 2: Volume (RVOL) ────────────────────────────────────────
+        rvol = float(ind.get("rvol") or 1.0)
+        if rvol >= 2.5:
+            score.volume = 2
+        elif rvol >= 1.5:
+            score.volume = 1
+        # else 0
+
+        # ── Factor 3: Trend alignment ──────────────────────────────────────
+        # above_200ema: True/False (price vs 200 EMA)
+        # ema_stack:    +1 = all fast EMAs bullishly stacked, -1 = bearishly stacked
+        above_200 = bool(ind.get("above_200ema", False))
+        ema_stack = int(ind.get("ema_stack") or 0)
+        if bull:
+            trend_aligned   = above_200
+            stack_aligned   = ema_stack >= 0
+        else:
+            trend_aligned   = not above_200
+            stack_aligned   = ema_stack <= 0
+
+        if trend_aligned and stack_aligned:
+            score.trend_alignment = 2
+        elif trend_aligned or stack_aligned:
+            score.trend_alignment = 1
+        # else 0
+
+        # ── Factor 4: Momentum (RSI sweet spot) ───────────────────────────
+        # Ideal: not yet extended but momentum in our direction.
+        # BULLISH sweet spot: 40–65 (room to run, not overbought)
+        # BEARISH sweet spot: 35–60 (room to fall, not oversold)
+        rsi = float(ind.get("rsi_14") or ind.get("rsi") or 50.0)
+        if bull:
+            if 40.0 <= rsi <= 65.0:
+                score.momentum = 2
+            elif (30.0 <= rsi < 40.0) or (65.0 < rsi <= 72.0):
+                score.momentum = 1
+            # else 0 — RSI > 72 (chasing overbought) or < 30 (knife-catch)
+        else:
+            if 35.0 <= rsi <= 60.0:
+                score.momentum = 2
+            elif (28.0 <= rsi < 35.0) or (60.0 < rsi <= 70.0):
+                score.momentum = 1
+            # else 0 — RSI < 28 (oversold, bounce risk) or > 70 (chasing)
+
+        # ── Factor 5: Multi-signal agreement ──────────────────────────────
+        # Count distinct signal types on the trigger TF that agree with direction
+        distinct_types = len({s.signal_type for s in all_signals})
+        if distinct_types >= 3:
+            score.multi_signal = 2
+        elif distinct_types == 2:
+            score.multi_signal = 1
+        # else 0 — single signal only
+
+        return score
 
     def _get_setup_bias(
         self, snapshot: dict[str, pd.DataFrame], regime: str
