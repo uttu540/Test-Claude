@@ -278,23 +278,62 @@ class SignalDetector:
         recent_low  = df["low"].iloc[-(lookback + 1):-1].min()
         rvol        = latest.get("rvol", 1.0)
 
-        # Breakout above 20-period high
+        # ── Breakout above 20-period high ────────────────────────────────────
+        # Requirements (all mandatory — any failure blocks the signal):
+        #   1. RVOL ≥ 2.0×  — real breakouts need institutional volume
+        #   2. ATR contracting — price was coiling before the break
+        #   3. Near 52-week high (within 20%) — breakout at a meaningful level
+        #   4. Tight 10-bar base (range < 3× ATR) — consolidation, not a trend day
         if price > recent_high:
-            confidence = 50
-            if rvol > 1.5:   confidence += 15
-            if rvol > 2.0:   confidence += 10
-            if latest.get("ema_stack") == 1:  confidence += 15
-            if latest.get("above_200ema"):     confidence += 10
-            signals.append(Signal(
-                trading_symbol  = symbol,
-                timeframe       = tf,
-                signal_type     = SignalType.BREAKOUT_HIGH,
-                direction       = Direction.BULLISH,
-                confidence      = min(confidence, 100),
-                price_at_signal = price,
-                indicators      = self._key_indicators(latest),
-                notes           = f"Breaking {lookback}-period high {recent_high:.2f} | RVOL {rvol:.1f}x",
-            ))
+            atr_key = f"atr_{self._cfg.atr_period}"
+            atr_val = latest.get(atr_key) or latest.get("atr_14", 0) or 0
+
+            # Gate 1: volume must confirm (institutional breakouts require ≥2× RVOL)
+            if rvol < 2.0:
+                pass   # skip — low-volume breakout, likely a false move
+            else:
+                # Gate 2: ATR contraction — recent 5 bars quieter than prior 15
+                atr_contracting = False
+                if atr_key in df.columns and len(df) >= 20:
+                    atr_recent = df[atr_key].iloc[-5:].mean()
+                    atr_prior  = df[atr_key].iloc[-20:-5].mean()
+                    if not pd.isna(atr_recent) and not pd.isna(atr_prior) and atr_prior > 0:
+                        atr_contracting = atr_recent < atr_prior * 0.90
+
+                # Gate 3: near 52-week high (within 20%)
+                high_52w = df["high"].iloc[-252:].max() if len(df) >= 252 else df["high"].max()
+                near_52w = price >= high_52w * 0.80
+
+                # Gate 4: tight consolidation base (10-bar range < 3× ATR)
+                tight_base = False
+                if atr_val and len(df) >= 11:
+                    range_10 = df["high"].iloc[-11:-1].max() - df["low"].iloc[-11:-1].min()
+                    tight_base = range_10 < 3.0 * atr_val
+
+                # Need ATR contraction OR (near 52w high AND tight base)
+                quality = atr_contracting or (near_52w and tight_base)
+                if quality:
+                    confidence = 60   # base — RVOL gate already passed
+                    if rvol >= 3.0:                        confidence += 15
+                    elif rvol >= 2.5:                      confidence += 10
+                    if atr_contracting:                    confidence += 10
+                    if near_52w:                           confidence += 10
+                    if latest.get("ema_stack") == 1:       confidence += 10
+                    if latest.get("above_200ema"):         confidence += 5
+                    signals.append(Signal(
+                        trading_symbol  = symbol,
+                        timeframe       = tf,
+                        signal_type     = SignalType.BREAKOUT_HIGH,
+                        direction       = Direction.BULLISH,
+                        confidence      = min(confidence, 100),
+                        price_at_signal = price,
+                        indicators      = self._key_indicators(latest),
+                        notes           = (
+                            f"Breaking {lookback}-bar high {recent_high:.2f} | "
+                            f"RVOL {rvol:.1f}x | ATR_contract={atr_contracting} | "
+                            f"near_52w={near_52w} | tight_base={tight_base}"
+                        ),
+                    ))
 
         # Breakdown below 20-period low
         if price < recent_low:
@@ -792,42 +831,57 @@ class SignalDetector:
             c["close"] >= p["open"]               # closes at or above prior open
         )
         if bullish_engulf:
-            # Prior downswing context: require at least 2 of the last 5 bars to be
-            # bearish (stock was in a pullback before the engulf fires).
-            # Without this, random engulfs in sideways/uptrending markets fire constantly.
-            recent_5 = df.iloc[-6:-1]
-            bearish_bar_count = int((recent_5["close"] < recent_5["open"]).sum())
-            if bearish_bar_count < 2:
-                pass   # skip — no downswing context
+            # Hard gates (all must pass — no penalty, just skip):
+            #   1. Must be above 200 EMA (in a bull structure)
+            #   2. EMA stack must be bullish (short EMAs > long EMAs)
+            #   3. Meaningful pullback: RSI 35-58 (neutral zone, not extended)
+            #   4. Pullback depth ≥ 0.5× ATR (actual correction, not a 0.2% dip)
+            #   5. ≥ 3 bearish bars in last 5 (stronger downswing context than 2)
+            if not latest.get("above_200ema"):
+                pass   # below 200 EMA — not a pullback in uptrend, skip
+            elif latest.get("ema_stack") != 1:
+                pass   # EMAs not bullishly stacked — no uptrend structure
             else:
-                conf = 65
-                # above_200ema is now mandatory: missing it subtracts hard
-                if not latest.get("above_200ema"):
-                    conf -= 20
-                else:
-                    pass   # no bonus for having it — it's the baseline
-                # ema_stack confirms uptrend structure
-                if latest.get("ema_stack") == 1:  conf += 10
-                # RVOL: high volume confirms conviction; very low is suspicious
-                if rvol > 1.5:                    conf += 10
-                elif rvol < 1.2:                  conf -= 10
-                # Stronger if engulfing a large prior candle
-                if p_body > 0 and c_body >= 1.5 * p_body: conf += 5
-                signals.append(Signal(
-                    trading_symbol  = symbol,
-                    timeframe       = tf,
-                    signal_type     = SignalType.ENGULFING_BULL,
-                    direction       = Direction.BULLISH,
-                    confidence      = min(conf, 100),
-                    price_at_signal = price,
-                    indicators      = self._key_indicators(latest),
-                    notes           = (
-                        f"Bullish Engulfing | body ratio {c_body/p_body:.1f}x"
-                        f" | bearish_bars_5 {bearish_bar_count}"
-                        if p_body > 0
-                        else f"Bullish Engulfing | bearish_bars_5 {bearish_bar_count}"
-                    ),
-                ))
+                rsi_col = f"rsi_{self._cfg.rsi_period}"
+                rsi_val = float(df[rsi_col].iloc[-1]) if rsi_col in df.columns else 50.0
+                atr_key = f"atr_{self._cfg.atr_period}"
+                atr_val = latest.get(atr_key) or latest.get("atr_14", 0) or 0
+
+                # RSI must show a real pullback (35-58: not overbought, has momentum room)
+                rsi_ok = 35.0 <= rsi_val <= 58.0
+
+                # Pullback depth: price must have dropped ≥ 0.5× ATR from recent high
+                recent_high_5 = df["high"].iloc[-6:-1].max()
+                pullback_depth = recent_high_5 - price
+                pullback_ok = atr_val > 0 and pullback_depth >= 0.5 * atr_val
+
+                # Downswing context: ≥3 of last 5 bars bearish (stronger requirement)
+                recent_5        = df.iloc[-6:-1]
+                bearish_bar_count = int((recent_5["close"] < recent_5["open"]).sum())
+                swing_ok = bearish_bar_count >= 3
+
+                if rsi_ok and pullback_ok and swing_ok:
+                    conf = 65
+                    if rvol > 1.5:                         conf += 10
+                    elif rvol < 1.2:                       conf -= 10
+                    if p_body > 0 and c_body >= 1.5 * p_body: conf += 10   # large engulf
+                    if rsi_val <= 45:                      conf += 5    # deeper pullback
+                    signals.append(Signal(
+                        trading_symbol  = symbol,
+                        timeframe       = tf,
+                        signal_type     = SignalType.ENGULFING_BULL,
+                        direction       = Direction.BULLISH,
+                        confidence      = min(conf, 100),
+                        price_at_signal = price,
+                        indicators      = self._key_indicators(latest),
+                        notes           = (
+                            f"Bullish Engulfing | body ratio {c_body/p_body:.1f}x"
+                            f" | RSI {rsi_val:.0f} | pullback {pullback_depth:.2f}"
+                            f" | bearish_bars {bearish_bar_count}"
+                            if p_body > 0
+                            else f"Bullish Engulfing | RSI {rsi_val:.0f}"
+                        ),
+                    ))
 
         # ── Bearish Engulfing ─────────────────────────────────────────────────
         bearish_engulf = (

@@ -67,12 +67,27 @@ MAX_HOLD_CANDLES = 20   # ~5 days on 15min
 # ── Confluence scoring ────────────────────────────────────────────────────────
 # Minimum total score (out of 10) required to enter a trade.
 # Each of the 5 factors scores 0-2; need at least 3 factors to partially agree.
-MIN_CONFLUENCE_SCORE = 7
+MIN_CONFLUENCE_SCORE = 8   # 3-month bear test: score_8 = 50% WR; score_9 over-filters
+                           # (chases extended moves rather than catching fresh ones)
 
 # Signals that are fundamentally intraday tools (VWAP resets daily, ORB is 9:15-9:30).
 # They have no meaning on swing timeframes (1H multi-day holds) and consistently
 # underperform: VWAP_RECLAIM had ₹-2,565 P&L before confluence filtering.
 _INTRADAY_ONLY_SIGNALS: frozenset[str] = frozenset({"VWAP_RECLAIM", "ORB_BREAKOUT"})
+
+# Signals disabled as standalone entries — no directional edge detected.
+# HIGH_RVOL: direction assigned by single-candle OHLC (noise), 26.2% WR, ₹-8,467.
+# BULL_FLAG / BEAR_FLAG: 0% and 16.7% WR respectively across all tests.
+# SHOOTING_STAR: 9.1% WR, ₹-3,561. Weak context (only requires prior bullish candle).
+# ENGULFING_BULL: 25-27% WR despite multiple hard gates — needs fundamental rework.
+# These signals may still appear as confluence boosters (multi_signal factor) but
+# cannot be the top-ranked signal that triggers a trade.
+_DISABLED_AS_ENTRY: frozenset[str] = frozenset({
+    "HIGH_RVOL",
+    "BULL_FLAG", "BEAR_FLAG",
+    "SHOOTING_STAR",
+    "ENGULFING_BULL",
+})
 
 # Signal types considered "high quality" for the signal-strength factor
 _HIGH_QUALITY_SIGNALS = {
@@ -173,7 +188,7 @@ class BacktestEngine:
     # Per-mode config: (setup_tf, trigger_tf, max_hold_candles, eod_exit)
     _MODE_CONFIG: dict[str, tuple[str, str, int, bool]] = {
         #             setup     trigger   hold  eod
-        "swing":     ("1day",  "1hr",    30,   False),
+        "swing":     ("1day",  "1hr",    140,  False),  # 140×1H = ~7 trading days
         "intraday":  ("1hr",   "15min",  20,   True),
     }
 
@@ -554,6 +569,16 @@ class BacktestEngine:
                 if nifty_200_rising is True:
                     continue
 
+            # ── Long trades only in RANGING Nifty market ─────────────────────
+            # In TRENDING_UP: longs chase an extended market → 24% WR, ₹-ve
+            # In TRENDING_DOWN: longs fight the tape → 9-13% WR, ₹-ve
+            # In RANGING: bottoming/reversal patterns (DOUBLE_BOTTOM, HAMMER,
+            # MORNING_STAR) have real meaning at range lows → best long context.
+            if setup_bias == Direction.BULLISH:
+                _nifty_regime = self._market_regime_by_date.get(candle_date)
+                if _nifty_regime and _nifty_regime != "RANGING":
+                    continue
+
             # ── Segment-specific regime gate ──────────────────────────────────
             # Nifty 50 can be trending up while midcap/smallcap indices are
             # correcting (e.g. early 2025). Gate long trades per segment index
@@ -612,6 +637,16 @@ class BacktestEngine:
                     s for s in all_signals
                     if s.signal_type.value not in _INTRADAY_ONLY_SIGNALS
                 ]
+
+            # Strip signals with no standalone directional edge.
+            # Keep full list for confluence multi_signal counting, but the
+            # entry trigger must come from the filtered list only.
+            # (data: HIGH_RVOL 26% WR ₹-8,467 | BULL_FLAG 0% | SHOOTING_STAR 9%)
+            signals_for_confluence = all_signals   # includes disabled-as-entry (multi_signal boost)
+            all_signals = [
+                s for s in all_signals
+                if s.signal_type.value not in _DISABLED_AS_ENTRY
+            ]
 
             all_signals.sort(key=lambda s: s.confidence, reverse=True)
 
@@ -687,7 +722,7 @@ class BacktestEngine:
             # signal quality, volume, trend alignment, momentum, multi-signal.
             # This replaces the blunt min_confirming_signals check and ensures
             # we only trade when multiple independent factors agree.
-            confluence = self._score_confluence(top, all_signals)
+            confluence = self._score_confluence(top, signals_for_confluence)
             if not confluence.passed:
                 log.debug(
                     "backtest.confluence_failed",
