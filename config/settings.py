@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     # ── News API ──────────────────────────────────────────────────────────────
     news_api_key: str = ""
 
+    # ── API / CORS ────────────────────────────────────────────────────────────
+    # Comma-separated allowed origins for FastAPI CORS middleware.
+    # Dev default: Vite dev server. Production: set your actual domain.
+    # e.g. ALLOWED_ORIGINS=https://trading.yourdomain.com
+    allowed_origins: str = "http://localhost:5173,http://localhost:3000"
+
     # ── Derived / Computed ────────────────────────────────────────────────────
     @property
     def is_live(self) -> bool:
@@ -121,6 +127,11 @@ class Settings(BaseSettings):
         if self.telegram_chat_id.strip():
             return [self.telegram_chat_id.strip()]
         return []
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """Parsed list of allowed CORS origins."""
+        return [x.strip() for x in self.allowed_origins.split(",") if x.strip()]
 
     @property
     def max_risk_per_trade_inr(self) -> float:

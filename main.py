@@ -21,11 +21,12 @@ import asyncio
 import signal
 import sys
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -68,6 +69,7 @@ console = Console()
 _candle_buffer: dict[str, dict[str, deque]] = {}
 _active_signal_tasks: set[str] = set()   # Symbols with an in-flight signal task
 BUFFER_MAX = 300   # Keep last 300 candles per symbol/timeframe
+_scheduler: AsyncIOScheduler | None = None   # Set in main(); used by retry jobs
 
 
 # ─── Candle Handler ───────────────────────────────────────────────────────────
@@ -201,8 +203,12 @@ async def _run_signals(symbol: str) -> None:
 
 # ─── Scheduled Jobs ───────────────────────────────────────────────────────────
 
-async def job_daily_auth() -> None:
-    """8:30 AM IST — Re-authenticate Zerodha and refresh tokens."""
+async def job_daily_auth(retry_count: int = 0) -> None:
+    """
+    8:30 AM IST — Re-authenticate Zerodha and refresh tokens.
+    On failure: retries up to 2 more times, 15 minutes apart.
+    Sends Telegram alert after all retries exhausted.
+    """
     from config.market_hours import is_trading_day
     if not is_trading_day():
         log.info("scheduler.auth_skip", reason="NSE holiday or weekend")
@@ -214,10 +220,33 @@ async def job_daily_auth() -> None:
         from services.execution.zerodha.authenticator import ZerodhaAuthenticator
         auth = ZerodhaAuthenticator()
         await auth.authenticate()
+        if retry_count > 0:
+            log.info("scheduler.auth_retry_succeeded", attempt=retry_count + 1)
     except Exception as e:
-        notifier = get_notifier()
-        await notifier.system_error("DailyAuth", str(e))
-        log.error("scheduler.auth_failed", error=str(e))
+        log.error("scheduler.auth_failed", attempt=retry_count + 1, error=str(e))
+        MAX_RETRIES = 2
+        if retry_count < MAX_RETRIES:
+            retry_at = datetime.now() + timedelta(minutes=15)
+            log.warning(
+                "scheduler.auth_retry_scheduled",
+                retry_in_mins=15,
+                attempt=retry_count + 2,
+            )
+            _scheduler.add_job(
+                job_daily_auth,
+                trigger    = DateTrigger(run_date=retry_at, timezone="Asia/Kolkata"),
+                kwargs     = {"retry_count": retry_count + 1},
+                id         = f"auth_retry_{retry_count + 1}",
+                replace_existing = True,
+            )
+        else:
+            notifier = get_notifier()
+            await notifier.system_error(
+                "DailyAuth",
+                f"Authentication failed after {MAX_RETRIES + 1} attempts. "
+                f"Manual login required. Last error: {e}",
+            )
+            log.error("scheduler.auth_exhausted", attempts=MAX_RETRIES + 1)
 
 
 async def job_market_open_briefing() -> None:
@@ -366,6 +395,61 @@ def _print_banner() -> None:
     console.print(panel)
 
 
+async def job_db_backup() -> None:
+    """4:45 PM IST — pg_dump the trading DB to a timestamped file."""
+    import os
+    import subprocess
+    from config.market_hours import is_trading_day
+    if not is_trading_day():
+        return
+
+    backup_dir = os.environ.get("DB_BACKUP_DIR", "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+
+    timestamp   = datetime.now().strftime("%Y%m%d_%H%M")
+    backup_file = os.path.join(backup_dir, f"trading_bot_{timestamp}.sql.gz")
+
+    # Parse DB URL for pg_dump env vars
+    db_url = settings.database_url.replace("postgresql+asyncpg://", "")
+    # Format: user:password@host:port/dbname
+    try:
+        userpass, rest   = db_url.split("@", 1)
+        user, password   = userpass.split(":", 1)
+        hostport, dbname = rest.split("/", 1)
+        host, port       = (hostport.split(":", 1) + ["5432"])[:2]
+    except ValueError:
+        log.error("scheduler.backup_parse_error", db_url=db_url[:30])
+        return
+
+    env = {**os.environ, "PGPASSWORD": password}
+    cmd = [
+        "pg_dump",
+        "-h", host, "-p", port,
+        "-U", user,
+        "-d", dbname,
+        "--no-password",
+        "-F", "c",   # custom compressed format
+        "-f", backup_file,
+    ]
+
+    try:
+        result = subprocess.run(cmd, env=env, capture_output=True, timeout=120)
+        if result.returncode == 0:
+            size_kb = os.path.getsize(backup_file) // 1024
+            log.info("scheduler.backup_done", file=backup_file, size_kb=size_kb)
+        else:
+            err = result.stderr.decode()[:200]
+            log.error("scheduler.backup_failed", error=err)
+            await get_notifier().system_error("DBBackup", err)
+    except FileNotFoundError:
+        log.warning("scheduler.backup_skip", reason="pg_dump not found — install postgresql-client")
+    except subprocess.TimeoutExpired:
+        log.error("scheduler.backup_timeout")
+        await get_notifier().system_error("DBBackup", "pg_dump timed out after 120s")
+    except Exception as e:
+        log.error("scheduler.backup_error", error=str(e))
+
+
 async def startup() -> None:
     """Initialise all connections and seed data on first run."""
     _print_banner()
@@ -443,13 +527,17 @@ async def main() -> None:
     await feed.start()
 
     # ── Scheduler ────────────────────────────────────────────────────────────
+    # Module-level reference so job_daily_auth can schedule its own retries
+    global _scheduler
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
+    _scheduler = scheduler
 
     # Weekdays only (Mon=0 … Fri=4)
     scheduler.add_job(job_daily_auth,          CronTrigger(day_of_week="0-4", hour=8,  minute=30, timezone="Asia/Kolkata"))
     scheduler.add_job(job_market_open_briefing, CronTrigger(day_of_week="0-4", hour=9, minute=10, timezone="Asia/Kolkata"))
     scheduler.add_job(job_square_off_intraday,  CronTrigger(day_of_week="0-4", hour=15, minute=12, timezone="Asia/Kolkata"))
     scheduler.add_job(job_eod_summary,          CronTrigger(day_of_week="0-4", hour=16, minute=30, timezone="Asia/Kolkata"))
+    scheduler.add_job(job_db_backup,            CronTrigger(day_of_week="0-4", hour=16, minute=45, timezone="Asia/Kolkata"))
     scheduler.start()
 
     log.info("main.running", feed=feed._feed.__class__.__name__)
