@@ -320,4 +320,38 @@ RANGING market + BREAKOUT_HIGH signal → blocked by filter → Claude never cal
 - In Indian markets, 70–80% of stocks move with NIFTY. A broad regime filter catches the majority of bad setups.
 - Computing regime per-stock would require 50 × ADX calculations on every 15min candle — 5× more computation for marginal benefit.
 
-**Implication for strong individual movers:** A stock-specific breakout in a ranging market will be blocked by the regime filter even if fundamentals justify it. This is a deliberate false-negative bias.
+**Implication for strong individual movers:** A stock-specific breakout in a ranging market will be blocked by the regime filter even if fundamentally justified. This is a deliberate false-negative bias.
+
+---
+
+## D-025 — Dual engine architecture: Momentum Engine + Swing Engine
+
+**Decision:** Two separate backtesting/signal engines coexist — `MomentumBacktestEngine` (long-only) and `BacktestEngine` (swing/intraday, long+short). In live trading, routing is regime-gated: TRENDING_UP → momentum engine, TRENDING_DOWN/RANGING → swing engine.
+
+**Reasoning:**
+- A single engine with both long momentum and short reversal logic produces conflicting signal logic (momentum scoring vs mean-reversion scoring are fundamentally different).
+- Validated by backtest: 2024 full year — momentum engine +₹1,22,129 from 9 trades in Jan bull run; swing engine nearly flat (68 trades, -₹898). 2026 Q1 trending down — momentum engine correctly fired zero trades; swing engine +₹4,766 from 20 short trades.
+- Regime gate already exists in both engines independently. Routing in `main.py` just selects which engine runs.
+
+**Trade-off accepted:** In the live bot, only one engine type is active at a time per regime. A genuine Darvas breakout during a RANGING phase is missed. Accepted — false negatives cheaper than fighting the regime.
+
+**Pending:** Momentum live adapter (`services/momentum_engine/live.py`) and regime-gated router in `main.py._run_signals()` not yet built. Backtest validation complete; live wiring is next.
+
+---
+
+## D-026 — Claude as morning research brain, not just a canned message sender
+
+**Decision:** `job_market_open_briefing()` (9:10 AM IST) now calls Claude with real market data — Nifty change %, India VIX, algo regime, and last 12h news headlines — and sends Claude's 3-4 sentence briefing via Telegram. Previously sent a hardcoded string.
+
+**Reasoning:**
+- News service already polls NewsAPI every 15 min and stores headlines in DB. Regime and VIX already in Redis. Claude call costs ~100 input tokens — negligible.
+- A human trader's morning routine is: check overnight news, check SGX Nifty gap, check VIX, form a view. Claude now does this automatically at 9:10 AM with actual data.
+- `MARKET_BRIEFING_SYSTEM` and `build_market_briefing_prompt()` were already written in `prompts.py` but never called. This change wires them in.
+
+**Fallback:** If Claude API is unavailable, returns `"Market opens. Regime: X. VIX: Y."` — Telegram still fires, bot continues normally.
+
+**Data fetched at 9:10 AM:**
+- `market:tick:NIFTY 50` → lp (last price) and c (prev close) → change %
+- `market:tick:INDIA VIX` → lp
+- `market:regime` → TRENDING_UP / TRENDING_DOWN / RANGING
+- `NewsFeedService.get_recent_news()` for NIFTY, RELIANCE, HDFCBANK, TCS → up to 8 headlines
