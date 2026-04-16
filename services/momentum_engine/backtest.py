@@ -1,0 +1,498 @@
+"""
+services/momentum_engine/backtest.py
+──────────────────────────────────────
+Momentum engine backtester — long-only, TRENDING_UP Nifty markets.
+
+Architecture mirrors the reversal backtest engine but with key differences:
+  - Only fires when Nifty regime = TRENDING_UP (not RANGING / TRENDING_DOWN)
+  - Uses MomentumDetector (Darvas, 52wk, volume thrust, EMA ribbon, bull momentum)
+  - Momentum-calibrated confluence scoring (RSI 60-75 sweet spot)
+  - Wider trailing stops (momentum trends run further than reversals)
+  - Daily timeframe only (swing trades — momentum plays need time to develop)
+  - Segment gates: MID_CAP blocked when midcap index TRENDING_DOWN
+                   SMALL_CAP blocked when smallcap TRENDING_DOWN or RANGING
+
+Stop / target (momentum-calibrated):
+  - Stop:   1.5× ATR below entry (tighter than reversal's 2× — we're buying strength)
+  - Target: 7× ATR above entry   (1:4.7 R:R — momentum trades run much further)
+
+Trailing stop milestones (same as reversal but wider):
+  1:2  → breakeven
+  1:3  → +1R
+  1:6  → +3R
+  1:10 → +5R  (let the real winners run)
+
+Usage:
+    engine = MomentumBacktestEngine(
+        symbols    = ["RELIANCE", "TCS", ...],
+        start_date = date(2025, 1, 1),
+        end_date   = date(2025, 6, 30),
+    )
+    result = await engine.run()
+"""
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+
+import numpy as np
+import pandas as pd
+import structlog
+import yfinance as yf
+
+from services.technical_engine.indicators import compute_all
+from services.momentum_engine.signals import (
+    MomentumDetector,
+    MomentumSignalType,
+    score_momentum_confluence,
+)
+
+log = structlog.get_logger(__name__)
+
+# BREAKOUT_52W as standalone entry had 25% WR, ₹-25,972 in 2024 bull test —
+# buying AT new 52wk highs = chasing an extended move. Works better as
+# confluence booster when DARVAS_BREAKOUT also fires on the same bar.
+# Still detected by MomentumDetector so it boosts multi_signal score,
+# but cannot be the sole trigger.
+_ENTRY_DISABLED: frozenset[MomentumSignalType] = frozenset({
+    MomentumSignalType.BREAKOUT_52W,
+})
+
+# Max hold on daily TF: 20 trading days (~4 calendar weeks)
+# Momentum trends typically resolve or stall within this window.
+MAX_HOLD_DAYS = 20
+
+# Position sizing: risk 2% of notional ₹500,000 per trade
+NOTIONAL_CAPITAL = 500_000
+RISK_PCT         = 0.02   # 2% risk per trade
+
+
+@dataclass
+class MomentumTrade:
+    symbol:           str
+    signal_type:      str
+    entry_date:       date
+    entry_price:      float
+    stop_loss:        float
+    target:           float
+    exit_price:       float       = 0.0
+    exit_reason:      str         = "OPEN"  # TRAIL_STOP | STOP | MAX_HOLD
+    pnl:              float       = 0.0
+    pnl_pct:          float       = 0.0
+    holding_days:     int         = 0
+    position_size:    int         = 0
+    regime:           str         = "UNKNOWN"
+    confluence_score: int         = 0
+    confluence_factors: dict      = field(default_factory=dict)
+    # Raw signal stats
+    rvol:             float       = 0.0
+    rsi:              float       = 0.0
+    adx:              float       = 0.0
+
+
+@dataclass
+class MomentumBacktestResult:
+    trades:     list[MomentumTrade] = field(default_factory=list)
+    symbols:    list[str]           = field(default_factory=list)
+    start_date: date | None         = None
+    end_date:   date | None         = None
+
+
+class MomentumBacktestEngine:
+    """
+    Backtests the momentum engine over a symbol universe and date range.
+
+    Key difference from reversal engine:
+      - Entry ONLY when Nifty regime = TRENDING_UP
+      - Signals from MomentumDetector (not SignalDetector)
+      - All trades are LONG (momentum engine is long-only)
+    """
+
+    def __init__(
+        self,
+        symbols:         list[str],
+        start_date:      date,
+        end_date:        date,
+        symbol_segments: dict[str, str] | None = None,
+        min_score:       int = 8,          # Min confluence score to trade
+        min_confidence:  int = 65,         # Min signal confidence to trade
+    ) -> None:
+        self._symbols         = symbols
+        self._start           = start_date
+        self._end             = end_date
+        self._symbol_segments = symbol_segments or {}
+        self._min_score       = min_score
+        self._min_confidence  = min_confidence
+
+        self._detector = MomentumDetector()
+
+        # Market-wide lookup tables (populated in run())
+        self._nifty_regime_by_date:    dict[date, str]  = {}   # TRENDING_UP/DOWN/RANGING
+        self._nifty_200ema_rising:     dict[date, bool] = {}
+        self._midcap_regime_by_date:   dict[date, str]  = {}
+        self._smallcap_regime_by_date: dict[date, str]  = {}
+
+    async def run(self) -> MomentumBacktestResult:
+        result = MomentumBacktestResult(
+            symbols    = self._symbols,
+            start_date = self._start,
+            end_date   = self._end,
+        )
+
+        await self._load_market_indices()
+
+        for symbol in self._symbols:
+            log.info("momentum_bt.symbol_start", symbol=symbol)
+            try:
+                trades = await self._backtest_symbol(symbol)
+                result.trades.extend(trades)
+                log.info("momentum_bt.symbol_done", symbol=symbol, trades=len(trades))
+            except Exception as e:
+                log.error("momentum_bt.symbol_error", symbol=symbol, error=str(e))
+
+        log.info(
+            "momentum_bt.complete",
+            symbols = len(self._symbols),
+            trades  = len(result.trades),
+        )
+        return result
+
+    # ── Market index loading ─────────────────────────────────────────────────
+
+    async def _load_market_indices(self) -> None:
+        load_start = self._start - timedelta(days=60)
+        load_end   = (self._end + timedelta(days=1)).isoformat()
+
+        # Nifty 50 → regime + 200 EMA direction
+        try:
+            raw = yf.Ticker("^NSEI").history(
+                start=load_start.isoformat(), end=load_end,
+                interval="1d", auto_adjust=True,
+            )
+            if not raw.empty:
+                raw.index = pd.to_datetime(raw.index)
+                if raw.index.tz is not None:
+                    raw.index = raw.index.tz_convert("Asia/Kolkata").tz_localize(None)
+                raw = raw.rename(columns={
+                    "Open": "open", "High": "high",
+                    "Low":  "low",  "Close": "close", "Volume": "volume",
+                })[["open", "high", "low", "close", "volume"]]
+
+                nifty_df = compute_all(raw)
+
+                for ts, row in nifty_df.iterrows():
+                    d         = ts.date() if hasattr(ts, "date") else ts
+                    adx       = row.get("adx")      if "adx"      in nifty_df.columns else None
+                    ema_stack = row.get("ema_stack") if "ema_stack" in nifty_df.columns else None
+                    if adx is not None and not pd.isna(adx):
+                        if adx < 20:
+                            self._nifty_regime_by_date[d] = "RANGING"
+                        else:
+                            self._nifty_regime_by_date[d] = (
+                                "TRENDING_UP" if (ema_stack or 0) >= 0 else "TRENDING_DOWN"
+                            )
+
+                if "ema_200" in nifty_df.columns:
+                    ema200_rising = nifty_df["ema_200"] > nifty_df["ema_200"].shift(10)
+                    for ts, rising in ema200_rising.items():
+                        if not pd.isna(rising):
+                            d = ts.date() if hasattr(ts, "date") else ts
+                            self._nifty_200ema_rising[d] = bool(rising)
+
+                log.info(
+                    "momentum_bt.nifty_loaded",
+                    trending_up   = sum(1 for v in self._nifty_regime_by_date.values() if v == "TRENDING_UP"),
+                    trending_down = sum(1 for v in self._nifty_regime_by_date.values() if v == "TRENDING_DOWN"),
+                    ranging       = sum(1 for v in self._nifty_regime_by_date.values() if v == "RANGING"),
+                )
+        except Exception as e:
+            log.warning("momentum_bt.nifty_load_failed", error=str(e))
+
+        # Midcap + Smallcap indices for segment gates
+        for ticker, regime_dict, label in [
+            ("^CNXMDCP",  self._midcap_regime_by_date,   "midcap"),
+            ("^CNXSC",    self._smallcap_regime_by_date, "smallcap"),
+        ]:
+            try:
+                idx_raw = yf.Ticker(ticker).history(
+                    start=load_start.isoformat(), end=load_end,
+                    interval="1d", auto_adjust=True,
+                )
+                if not idx_raw.empty:
+                    idx_raw.index = pd.to_datetime(idx_raw.index)
+                    if idx_raw.index.tz is not None:
+                        idx_raw.index = idx_raw.index.tz_convert("Asia/Kolkata").tz_localize(None)
+                    idx_raw = idx_raw.rename(columns={
+                        "Open": "open", "High": "high",
+                        "Low":  "low",  "Close": "close", "Volume": "volume",
+                    })[["open", "high", "low", "close", "volume"]]
+                    idx_df = compute_all(idx_raw)
+                    for ts, row in idx_df.iterrows():
+                        d         = ts.date() if hasattr(ts, "date") else ts
+                        adx       = row.get("adx")      if "adx"      in idx_df.columns else None
+                        ema_stack = row.get("ema_stack") if "ema_stack" in idx_df.columns else None
+                        if adx is not None and not pd.isna(adx):
+                            regime_dict[d] = (
+                                "RANGING" if adx < 20 else
+                                ("TRENDING_UP" if (ema_stack or 0) >= 0 else "TRENDING_DOWN")
+                            )
+                    log.info(f"momentum_bt.{label}_loaded",
+                             trading_days=len(regime_dict))
+            except Exception as e:
+                log.warning(f"momentum_bt.{label}_load_failed", error=str(e))
+
+    # ── Per-symbol backtest ──────────────────────────────────────────────────
+
+    async def _backtest_symbol(self, symbol: str) -> list[MomentumTrade]:
+        # Download daily OHLCV
+        load_start = self._start - timedelta(days=400)  # need 252 bars for 52wk high
+        df = await self._fetch_daily(symbol, load_start, self._end)
+        if df is None or df.empty or len(df) < 60:
+            log.warning("momentum_bt.no_data", symbol=symbol)
+            return []
+
+        # Pre-compute indicators once
+        try:
+            df = compute_all(df)
+        except Exception as e:
+            log.warning("momentum_bt.indicator_failed", symbol=symbol, error=str(e))
+            return []
+
+        # Filter to backtest range for the main loop
+        trade_df = df[(df.index.date >= self._start) & (df.index.date <= self._end)]
+        if trade_df.empty:
+            return []
+
+        trades:     list[MomentumTrade] = []
+        in_trade:   bool = False
+        exit_after: int  = -1   # index in trade_df after which we're free
+
+        seg = self._symbol_segments.get(symbol, "LARGE_CAP")
+
+        for i in range(len(trade_df)):
+            if in_trade:
+                if i > exit_after:
+                    in_trade = False
+                else:
+                    continue
+
+            candle_ts   = trade_df.index[i]
+            candle_date = candle_ts.date() if hasattr(candle_ts, "date") else candle_ts
+
+            # ── Gate 1: Nifty must be TRENDING_UP ────────────────────────────
+            nifty_regime = self._nifty_regime_by_date.get(candle_date)
+            if nifty_regime != "TRENDING_UP":
+                continue
+
+            # ── Gate 2: Segment-specific regime ──────────────────────────────
+            if seg == "MID_CAP":
+                mid_regime = self._midcap_regime_by_date.get(candle_date)
+                if mid_regime == "TRENDING_DOWN":
+                    continue
+            elif seg == "SMALL_CAP":
+                small_regime = self._smallcap_regime_by_date.get(candle_date)
+                if small_regime in ("TRENDING_DOWN", "RANGING"):
+                    continue
+
+            # ── Slice history up to current bar (no look-ahead) ───────────────
+            cutoff = candle_ts
+            hist   = df[df.index <= cutoff].tail(300)  # enough history for 52wk + indicators
+            if len(hist) < 60:
+                continue
+
+            # ── Run momentum signal detection ─────────────────────────────────
+            signals = self._detector.detect(hist, symbol)
+            if not signals:
+                continue
+
+            # Filter by min confidence
+            signals = [s for s in signals if s.confidence >= self._min_confidence]
+            if not signals:
+                continue
+
+            # ── Confluence scoring (uses all detected signals incl. disabled-as-entry)
+            confluence = score_momentum_confluence(signals)
+            if not confluence.passed or confluence.total < self._min_score:
+                log.debug(
+                    "momentum_bt.confluence_failed",
+                    symbol=symbol, score=confluence.total,
+                    signals=[s.signal_type.value for s in signals],
+                )
+                continue
+
+            # Strip signals that cannot be standalone entry triggers
+            # (they remain in `signals` for confluence scoring above, but
+            # the actual entry must come from an allowed signal type)
+            entry_signals = [s for s in signals if s.signal_type not in _ENTRY_DISABLED]
+            if not entry_signals:
+                continue
+
+            # Best signal (from entry-allowed list)
+            top = max(entry_signals, key=lambda s: s.confidence)
+            atr = top.atr
+            if not atr:
+                continue
+
+            # ── Entry price = next candle's open (no look-ahead) ──────────────
+            next_idx = i + 1
+            if next_idx >= len(trade_df):
+                continue
+
+            entry_candle = trade_df.iloc[next_idx]
+            entry_price  = float(entry_candle.get("open", 0) or 0)
+            if entry_price <= 0:
+                continue
+            entry_date = trade_df.index[next_idx]
+            entry_date = entry_date.date() if hasattr(entry_date, "date") else entry_date
+
+            # ── Stop and target ───────────────────────────────────────────────
+            # Momentum longs: tight stop (1.5× ATR), wide target (7× ATR → 1:4.7)
+            stop_loss = round(entry_price - 1.5 * atr, 2)
+            target    = round(entry_price + 7.0 * atr, 2)
+
+            # ── Position size (fixed risk per trade) ─────────────────────────
+            risk_per_share = entry_price - stop_loss
+            if risk_per_share <= 0:
+                continue
+            risk_budget   = NOTIONAL_CAPITAL * RISK_PCT
+            position_size = max(1, int(risk_budget / risk_per_share))
+
+            # ── Simulate exit ─────────────────────────────────────────────────
+            future = trade_df.iloc[next_idx + 1:]   # candles AFTER entry
+            trade  = self._simulate_exit(
+                symbol        = symbol,
+                signal_type   = top.signal_type.value,
+                entry_date    = entry_date,
+                entry_price   = entry_price,
+                stop_loss     = stop_loss,
+                target        = target,
+                position_size = position_size,
+                future_df     = future,
+                nifty_regime  = nifty_regime,
+                top           = top,
+                confluence    = confluence,
+            )
+            if trade:
+                trades.append(trade)
+                in_trade   = True
+                exit_after = next_idx + 1 + trade.holding_days
+
+        return trades
+
+    def _simulate_exit(
+        self,
+        symbol:        str,
+        signal_type:   str,
+        entry_date:    date,
+        entry_price:   float,
+        stop_loss:     float,
+        target:        float,
+        position_size: int,
+        future_df:     pd.DataFrame,
+        nifty_regime:  str,
+        top,
+        confluence,
+    ) -> MomentumTrade | None:
+        if future_df.empty:
+            return None
+
+        initial_risk  = entry_price - stop_loss
+        trailing_stop = stop_loss
+        exit_price    = entry_price
+        exit_reason   = "OPEN"
+        hold          = 0
+
+        for idx, (ts, candle) in enumerate(future_df.iterrows()):
+            hold += 1
+            h = float(candle.get("high",  0) or 0)
+            l = float(candle.get("low",   0) or 0)
+            c = float(candle.get("close", 0) or 0)
+
+            # Trailing stop update (wider milestones for momentum)
+            if initial_risk > 0:
+                move        = h - entry_price
+                r_multiple  = move / initial_risk
+                if r_multiple >= 10:
+                    new_trail = entry_price + 5 * initial_risk
+                elif r_multiple >= 6:
+                    new_trail = entry_price + 3 * initial_risk
+                elif r_multiple >= 3:
+                    new_trail = entry_price + 1 * initial_risk
+                elif r_multiple >= 2:
+                    new_trail = entry_price   # breakeven
+                else:
+                    new_trail = stop_loss
+                trailing_stop = max(trailing_stop, new_trail)
+
+            # Check trailing stop hit
+            if l <= trailing_stop:
+                exit_price  = trailing_stop
+                exit_reason = "STOP" if trailing_stop == stop_loss else "TRAIL_STOP"
+                break
+
+            # Max hold
+            if hold >= MAX_HOLD_DAYS:
+                exit_price  = c
+                exit_reason = "MAX_HOLD"
+                break
+
+        if exit_reason == "OPEN":
+            return None
+
+        pnl     = (exit_price - entry_price) * position_size
+        pnl_pct = (exit_price - entry_price) / entry_price * 100
+
+        return MomentumTrade(
+            symbol             = symbol,
+            signal_type        = signal_type,
+            entry_date         = entry_date,
+            entry_price        = round(entry_price, 2),
+            stop_loss          = stop_loss,
+            target             = target,
+            exit_price         = round(exit_price, 2),
+            exit_reason        = exit_reason,
+            pnl                = round(pnl, 2),
+            pnl_pct            = round(pnl_pct, 2),
+            holding_days       = hold,
+            position_size      = position_size,
+            regime             = nifty_regime,
+            confluence_score   = confluence.total,
+            confluence_factors = {
+                "signal_quality":  confluence.signal_quality,
+                "volume":          confluence.volume,
+                "trend_alignment": confluence.trend_alignment,
+                "rsi_momentum":    confluence.rsi_momentum,
+                "multi_signal":    confluence.multi_signal,
+            },
+            rvol               = top.rvol,
+            rsi                = top.rsi,
+            adx                = top.adx,
+        )
+
+    # ── Data fetch ────────────────────────────────────────────────────────────
+
+    async def _fetch_daily(
+        self, symbol: str, start: date, end: date
+    ) -> pd.DataFrame | None:
+        """Download daily OHLCV from yfinance (NSE ticker format)."""
+        ticker = f"{symbol}.NS"
+        try:
+            raw = yf.Ticker(ticker).history(
+                start       = start.isoformat(),
+                end         = (end + timedelta(days=1)).isoformat(),
+                interval    = "1d",
+                auto_adjust = True,
+            )
+            if raw.empty:
+                return None
+            raw.index = pd.to_datetime(raw.index)
+            if raw.index.tz is not None:
+                raw.index = raw.index.tz_convert("Asia/Kolkata").tz_localize(None)
+            return raw.rename(columns={
+                "Open": "open", "High": "high",
+                "Low":  "low",  "Close": "close", "Volume": "volume",
+            })[["open", "high", "low", "close", "volume"]]
+        except Exception as e:
+            log.warning("momentum_bt.fetch_failed", symbol=symbol, error=str(e))
+            return None
