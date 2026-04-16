@@ -151,8 +151,10 @@ class Trade(Base):
     risk_reward_planned: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
     risk_reward_actual: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
     r_multiple: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
-    mae: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))               # Max Adverse Excursion
-    mfe: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))               # Max Favorable Excursion
+    mae: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))               # Max Adverse Excursion (points against position)
+    mfe: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))               # Max Favorable Excursion (points in favor)
+    exit_slippage: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))     # abs(actual_exit - planned_exit)
+    exit_context: Mapped[dict | None] = mapped_column(JSONB)                  # regime at exit, tick at exit, planned exit
 
     # AI context (stored for every trade — regulatory audit trail)
     ai_confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
@@ -215,6 +217,34 @@ class AIDecisionLog(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     trade_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))   # Links to trade if one was generated
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ─── News ─────────────────────────────────────────────────────────────────────
+
+class SignalRejectionLog(Base):
+    """
+    Audit trail for every signal that was evaluated but NOT traded.
+    Captures rejected signals from all three gates: Risk, AI, Approval.
+    Essential for strategy tuning — tells you what the bot is filtering out.
+    """
+    __tablename__ = "signal_rejection_log"
+    __table_args__ = (
+        Index("ix_rejection_log_created_at", "created_at"),
+        Index("ix_rejection_log_symbol",     "trading_symbol"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    trading_symbol:   Mapped[str]          = mapped_column(String(50), nullable=False)
+    signal_type:      Mapped[str]          = mapped_column(String(50), nullable=False)
+    direction:        Mapped[str]          = mapped_column(String(10), nullable=False)
+    confidence:       Mapped[Decimal|None] = mapped_column(Numeric(5, 2))
+    price_at_signal:  Mapped[Decimal|None] = mapped_column(Numeric(12, 4))
+    indicators:       Mapped[dict|None]    = mapped_column(JSONB)
+    timeframe:        Mapped[str|None]     = mapped_column(String(20))
+    rejection_stage:  Mapped[str]          = mapped_column(String(20), nullable=False)  # RISK | AI | APPROVAL
+    rejection_reason: Mapped[str|None]     = mapped_column(Text)
+    market_regime:    Mapped[str|None]     = mapped_column(String(30))
+    created_at:       Mapped[datetime]     = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # ─── News ─────────────────────────────────────────────────────────────────────

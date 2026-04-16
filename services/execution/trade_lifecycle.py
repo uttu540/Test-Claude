@@ -67,6 +67,11 @@ class TradeLifecycleManager:
 
     def __init__(self) -> None:
         self._running = False
+        # MAE/MFE tracking: trade_id → (session_low, session_high)
+        # Populated on every price poll; consumed and cleared at trade close.
+        # NOTE: In live mode, extremes are sampled at poll intervals (every 30s),
+        # not tick-level. They are best-effort approximations, not exchange HLC data.
+        self._price_extremes: dict[str, tuple[float, float]] = {}
 
     async def run(self) -> None:
         """Main monitoring loop — runs until stopped."""
@@ -130,6 +135,9 @@ class TradeLifecycleManager:
             if not price:
                 continue
 
+            # Track session extremes for MAE/MFE
+            self._update_price_extremes(str(trade["id"]), float(trade["entry_price"]), price)
+
             exit_price, reason = self._check_exit_conditions(trade, price)
             if exit_price:
                 await self._close_trade(trade, exit_price=exit_price, reason=reason)
@@ -182,6 +190,10 @@ class TradeLifecycleManager:
 
         open_trades = await self._load_open_trades()
         for trade in open_trades:
+            # Update price extremes from Redis tick (poll-time snapshot for MAE/MFE)
+            price = await self._get_current_price(trade["trading_symbol"])
+            if price:
+                self._update_price_extremes(str(trade["id"]), float(trade["entry_price"]), price)
             await self._check_broker_orders(trade, kite_map)
 
     async def _check_broker_orders(self, trade: dict, kite_map: dict) -> None:
@@ -246,6 +258,14 @@ class TradeLifecycleManager:
                     },
                 )
                 await session.commit()
+            log.info(
+                "lifecycle.order_filled",
+                broker_order_id = broker_order_id,
+                symbol          = kite_order.get("tradingsymbol"),
+                order_type      = kite_order.get("order_type"),
+                avg_price       = kite_order.get("average_price"),
+                filled_qty      = kite_order.get("filled_quantity", 0),
+            )
         except Exception as e:
             log.error("lifecycle.order_update_failed", broker_id=broker_order_id, error=str(e))
 
@@ -307,6 +327,39 @@ class TradeLifecycleManager:
         rr_actual    = round(reward / risk, 2)   if risk > 0 else 0.0
         r_multiple   = round(gross_pnl / (risk * quantity), 2) if risk > 0 and quantity > 0 else 0.0
 
+        # ── MAE / MFE ─────────────────────────────────────────────────────────
+        # Consume the price extremes tracked during the trade's lifetime.
+        trade_key = str(trade_id)
+        session_low, session_high = self._price_extremes.pop(trade_key, (entry_price, entry_price))
+        if direction == "LONG":
+            mae = round(max(entry_price - session_low,  0), 4)   # how far price went against (down)
+            mfe = round(max(session_high - entry_price, 0), 4)   # how far price went in favor (up)
+        else:
+            mae = round(max(session_high - entry_price, 0), 4)   # adverse move is up for shorts
+            mfe = round(max(entry_price - session_low,  0), 4)   # favorable move is down for shorts
+
+        # ── Exit slippage ─────────────────────────────────────────────────────
+        if reason == "TARGET":
+            planned_exit = float(trade.get("planned_target_1") or exit_price)
+        elif reason == "STOP_LOSS":
+            planned_exit = float(trade.get("planned_stop_loss") or exit_price)
+        else:
+            planned_exit = exit_price
+        exit_slippage = round(abs(exit_price - planned_exit), 4)
+
+        # ── Exit context ──────────────────────────────────────────────────────
+        redis = get_redis()
+        exit_regime  = await redis.get("market:regime") or "UNKNOWN"
+        entry_regime = trade.get("market_regime") or "UNKNOWN"
+        exit_context = json.dumps({
+            "regime_at_exit":  exit_regime,
+            "regime_at_entry": entry_regime,
+            "regime_changed":  exit_regime != entry_regime,
+            "tick_at_exit":    exit_price,
+            "planned_exit":    planned_exit,
+            "exit_slippage":   exit_slippage,
+        })
+
         now = datetime.now()
 
         # ── Update Trade record ───────────────────────────────────────────────
@@ -330,6 +383,10 @@ class TradeLifecycleManager:
                             net_pnl           = :net_pnl,
                             risk_reward_actual= :rr_actual,
                             r_multiple        = :r_multiple,
+                            mae               = :mae,
+                            mfe               = :mfe,
+                            exit_slippage     = :exit_slippage,
+                            exit_context      = :exit_context,
                             updated_at        = NOW()
                         WHERE id = :trade_id
                     """),
@@ -348,6 +405,10 @@ class TradeLifecycleManager:
                         "net_pnl":          round(net_pnl, 4),
                         "rr_actual":        rr_actual,
                         "r_multiple":       r_multiple,
+                        "mae":              mae,
+                        "mfe":              mfe,
+                        "exit_slippage":    exit_slippage,
+                        "exit_context":     exit_context,
                         "trade_id":         str(trade_id),
                     },
                 )
@@ -355,14 +416,18 @@ class TradeLifecycleManager:
 
             log.info(
                 "lifecycle.trade_closed",
-                symbol      = symbol,
-                reason      = reason,
-                entry       = entry_price,
-                exit        = exit_price,
-                gross_pnl   = round(gross_pnl, 2),
-                charges     = round(charges.total, 2),
-                net_pnl     = round(net_pnl, 2),
-                r_multiple  = r_multiple,
+                symbol        = symbol,
+                reason        = reason,
+                entry         = entry_price,
+                exit          = exit_price,
+                gross_pnl     = round(gross_pnl, 2),
+                charges       = round(charges.total, 2),
+                net_pnl       = round(net_pnl, 2),
+                r_multiple    = r_multiple,
+                mae           = mae,
+                mfe           = mfe,
+                exit_slippage = exit_slippage,
+                exit_regime   = exit_regime,
             )
 
         except Exception as e:
@@ -520,7 +585,8 @@ class TradeLifecycleManager:
                     text("""
                         SELECT id, trading_symbol, direction,
                                entry_price, entry_quantity,
-                               planned_stop_loss, planned_target_1
+                               planned_stop_loss, planned_target_1,
+                               market_regime
                         FROM trades
                         WHERE status = 'OPEN'
                     """)
@@ -529,6 +595,13 @@ class TradeLifecycleManager:
         except Exception as e:
             log.error("lifecycle.load_trades_failed", error=str(e))
         return []
+
+    def _update_price_extremes(self, trade_key: str, entry_price: float, current_price: float) -> None:
+        """Update the session low/high for a trade. Called on every price observation."""
+        if trade_key not in self._price_extremes:
+            self._price_extremes[trade_key] = (entry_price, entry_price)
+        low, high = self._price_extremes[trade_key]
+        self._price_extremes[trade_key] = (min(low, current_price), max(high, current_price))
 
     async def _get_current_price(self, symbol: str) -> float | None:
         """Read latest tick price from Redis (dev/paper mode)."""

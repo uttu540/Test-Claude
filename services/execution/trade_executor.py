@@ -22,8 +22,8 @@ from datetime import datetime
 import structlog
 
 from config.settings import settings
-from database.connection import get_db_session
-from database.models import Trade
+from database.connection import get_db_session, get_redis
+from database.models import SignalRejectionLog, Trade
 from services.ai_strategy.claude_client import get_claude_client
 from services.ai_strategy.schemas import AIDecision
 from services.execution.broker_router import get_broker
@@ -66,6 +66,7 @@ class TradeExecutor:
 
         if not decision.approved:
             log.info("executor.risk_blocked", symbol=signal.trading_symbol, reason=decision.reason)
+            await self._record_rejection(signal, stage="RISK", reason=decision.reason)
             return None
 
         # ── 2. Claude AI evaluation ───────────────────────────────────────────
@@ -78,6 +79,11 @@ class TradeExecutor:
                 action     = ai_decision.action.value,
                 confidence = ai_decision.confidence,
                 reasoning  = ai_decision.reasoning[:120],
+            )
+            await self._record_rejection(
+                signal,
+                stage  = "AI",
+                reason = f"{ai_decision.action.value}: {ai_decision.reasoning[:200]}",
             )
             return None
 
@@ -106,6 +112,7 @@ class TradeExecutor:
             approved = await request_approval(req)
             if not approved:
                 log.info("executor.approval_rejected", symbol=signal.trading_symbol, trade_id=str(trade_id))
+                await self._record_rejection(signal, stage="APPROVAL", reason="rejected_or_timed_out")
                 return None
 
         # ── 4. Entry order ────────────────────────────────────────────────────
@@ -188,6 +195,34 @@ class TradeExecutor:
 
     # ── DB ────────────────────────────────────────────────────────────────────
 
+    async def _record_rejection(
+        self,
+        signal: Signal,
+        stage:  str,
+        reason: str,
+    ) -> None:
+        """Persist a rejected signal to signal_rejection_log for strategy analysis."""
+        try:
+            redis  = get_redis()
+            regime = await redis.get("market:regime") or "UNKNOWN"
+            async for session in get_db_session():
+                row = SignalRejectionLog(
+                    trading_symbol   = signal.trading_symbol,
+                    signal_type      = signal.signal_type.value,
+                    direction        = signal.direction.value,
+                    confidence       = signal.confidence,
+                    price_at_signal  = signal.price_at_signal,
+                    indicators       = signal.indicators,
+                    timeframe        = signal.timeframe,
+                    rejection_stage  = stage,
+                    rejection_reason = reason,
+                    market_regime    = regime,
+                )
+                session.add(row)
+                await session.commit()
+        except Exception as e:
+            log.warning("executor.rejection_log_failed", stage=stage, symbol=signal.trading_symbol, error=str(e))
+
     async def _record_trade(
         self,
         trade_id:    uuid.UUID,
@@ -203,6 +238,9 @@ class TradeExecutor:
             if abs(signal.price_at_signal - decision.stop_loss) > 0
             else 0
         )
+
+        redis  = get_redis()
+        regime = await redis.get("market:regime") or "UNKNOWN"
 
         trade = Trade(
             id                  = trade_id,
@@ -224,6 +262,7 @@ class TradeExecutor:
             signals_at_entry    = signal.to_dict(),
             ai_confidence       = ai_decision.confidence,
             ai_reasoning        = ai_decision.reasoning,
+            market_regime       = regime,
             status              = "OPEN",
         )
 
