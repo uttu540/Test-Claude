@@ -104,70 +104,96 @@ def on_candle_complete(candle: OHLCVCandle) -> None:
 
 
 async def _run_signals(symbol: str) -> None:
-    """Run multi-timeframe signal detection for a symbol."""
+    """
+    Regime-gated signal detection for a symbol.
+
+    Routing logic (D-025):
+      TRENDING_UP   → Momentum engine (daily TF, long-only)
+      TRENDING_DOWN → Swing engine (daily→1H, shorts dominate)
+      RANGING       → Swing engine (mean-reversion signals)
+      UNKNOWN       → Swing engine (safe default during startup)
+
+    Both engines feed the same TradeExecutor → Claude → broker pipeline.
+    """
     try:
+        import json
         import pandas as pd
         from config.bot_config import get_bot_config
+        from services.momentum_engine.live import MomentumLiveEngine
 
-        cfg = await get_bot_config()
-        engine = MultiTimeframeSignalEngine(config=cfg)
+        cfg   = await get_bot_config()
+        redis = get_redis()
         ohlcv_by_tf: dict[str, pd.DataFrame] = {}
 
         for tf, candles in _candle_buffer.get(symbol, {}).items():
-            if len(candles) >= 30:   # Need enough data
-                df = pd.DataFrame(list(candles)).set_index("ts")  # convert deque → list for pandas
-                ohlcv_by_tf[tf] = df
+            if len(candles) >= 30:
+                ohlcv_by_tf[tf] = pd.DataFrame(list(candles)).set_index("ts")
 
         if not ohlcv_by_tf:
             return
 
-        # Update market regime when processing the market proxy (NIFTY 50 or any liquid index)
-        # Uses 1day data for a stable regime read; falls back to cached Redis value
+        # Update market regime when processing the regime proxy (Nifty 50 daily close)
         REGIME_PROXY = "NIFTY 50"
-        redis = get_redis()
         if symbol == REGIME_PROXY and "1day" in ohlcv_by_tf:
-            import json as _json
             vix_raw   = await redis.get("market:tick:INDIA VIX")
-            india_vix = _json.loads(vix_raw).get("lp") if vix_raw else None
+            india_vix = json.loads(vix_raw).get("lp") if vix_raw else None
             await get_regime_detector().detect_and_publish(
                 ohlcv_by_tf["1day"], india_vix=india_vix
             )
 
-        # Read current regime for signal filtering
         regime = await redis.get("market:regime") or "UNKNOWN"
 
-        signals = engine.analyse(symbol, ohlcv_by_tf, regime=regime)
+        # ── Regime-gated engine routing ───────────────────────────────────────
+        signals = []
 
-        if signals:
-            top = signals[0]   # Highest confidence signal
-            log.info(
-                "signal.detected",
-                symbol=symbol,
-                signal=top.signal_type.value,
-                direction=top.direction.value,
-                confidence=top.confidence,
-                timeframe=top.timeframe,
+        if regime == "TRENDING_UP" and "1day" in ohlcv_by_tf:
+            # Momentum engine: long-only, daily TF, Darvas/52wk/EMA ribbon signals
+            momentum_engine = MomentumLiveEngine()
+            signals = await momentum_engine.detect(
+                symbol   = symbol,
+                daily_df = ohlcv_by_tf["1day"],
+                regime   = regime,
+                redis    = redis,
+            )
+            if not signals:
+                # Momentum found nothing — fall back to swing for any valid long setups
+                swing_engine = MultiTimeframeSignalEngine(config=cfg)
+                signals = swing_engine.analyse(symbol, ohlcv_by_tf, regime=regime)
+        else:
+            # TRENDING_DOWN / RANGING / UNKNOWN → swing engine
+            swing_engine = MultiTimeframeSignalEngine(config=cfg)
+            signals = swing_engine.analyse(symbol, ohlcv_by_tf, regime=regime)
+
+        if not signals:
+            return
+
+        top = signals[0]   # Highest confidence signal
+        log.info(
+            "signal.detected",
+            symbol    = symbol,
+            signal    = top.signal_type.value,
+            direction = top.direction.value,
+            confidence= top.confidence,
+            timeframe = top.timeframe,
+            regime    = regime,
+        )
+
+        # Publish to Redis for dashboard + AI multi-TF context
+        signal_payload = json.dumps(top.to_dict())
+        await redis.setex(f"signal:latest:{symbol}",                 900, signal_payload)
+        await redis.setex(f"signal:latest:{symbol}:{top.timeframe}", 900, signal_payload)
+        for sig in signals:
+            await redis.setex(
+                f"signal:latest:{symbol}:{sig.timeframe}",
+                900,
+                json.dumps(sig.to_dict()),
             )
 
-            # Publish to Redis for the API / dashboard and for AI tf_alignment context
-            import json
-            signal_payload = json.dumps(top.to_dict())
-            await redis.setex(f"signal:latest:{symbol}",              900, signal_payload)
-            await redis.setex(f"signal:latest:{symbol}:{top.timeframe}", 900, signal_payload)
-
-            # Also cache direction for every detected signal (all timeframes)
-            for sig in signals:
-                await redis.setex(
-                    f"signal:latest:{symbol}:{sig.timeframe}",
-                    900,
-                    json.dumps(sig.to_dict()),
-                )
-
-            # Execute trade if signal confidence meets threshold (reads from live config)
-            confidence_threshold = cfg.get("confidence_threshold", 65)
-            if top.confidence >= confidence_threshold:
-                executor = TradeExecutor()
-                await executor.execute(top)
+        # Execute if above confidence threshold → RiskEngine → Claude → broker
+        confidence_threshold = cfg.get("confidence_threshold", 65)
+        if top.confidence >= confidence_threshold:
+            executor = TradeExecutor()
+            await executor.execute(top)
 
     except Exception as e:
         log.error("signal.run_error", symbol=symbol, error=str(e))

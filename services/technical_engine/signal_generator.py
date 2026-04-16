@@ -72,6 +72,11 @@ class SignalType(str, Enum):
     BEAR_FLAG          = "BEAR_FLAG"           # Tight consolidation after sharp decline
     DARVAS_BREAKOUT    = "DARVAS_BREAKOUT"     # Price breaks above Darvas box top
     NR7_SETUP          = "NR7_SETUP"           # Narrowest range in 7 bars — breakout imminent
+    # Momentum engine signals (daily TF, TRENDING_UP only)
+    BREAKOUT_52W       = "BREAKOUT_52W"        # New 52-week high with heavy volume
+    VOLUME_THRUST      = "VOLUME_THRUST"       # 3× avg vol on strong bullish candle
+    EMA_RIBBON         = "EMA_RIBBON"          # EMA 8/21/50 fanning upward — trend acceleration
+    BULL_MOMENTUM      = "BULL_MOMENTUM"       # ADX >30 + RSI 60-72 + EMA stack = continuation
 
 
 @dataclass
