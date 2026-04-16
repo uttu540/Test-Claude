@@ -195,27 +195,71 @@ async def job_daily_auth() -> None:
 
 
 async def job_market_open_briefing() -> None:
-    """9:10 AM IST — Send market open Telegram notification."""
+    """9:10 AM IST — Claude researches market conditions and sends an informed briefing."""
     from config.market_hours import is_trading_day
     if not is_trading_day():
         log.info("scheduler.briefing_skip", reason="NSE holiday or weekend")
         return
+
+    import json as _json
+    from services.ai_strategy.claude_client import get_claude_client
+
     notifier = get_notifier()
     redis    = get_redis()
 
+    # ── Regime ────────────────────────────────────────────────────────────────
     regime = await redis.get("market:regime") or "UNKNOWN"
 
-    # Try to get India VIX from cached ticks
-    vix_data = await redis.get("market:tick:INDIA VIX")
+    # ── India VIX ─────────────────────────────────────────────────────────────
     vix = None
-    if vix_data:
-        import json
-        vix = json.loads(vix_data).get("lp")
+    vix_raw = await redis.get("market:tick:INDIA VIX")
+    if vix_raw:
+        vix = _json.loads(vix_raw).get("lp")
+
+    # ── Nifty 50 pre-open change % ────────────────────────────────────────────
+    nifty_change_pct = 0.0
+    nifty_raw = await redis.get("market:tick:NIFTY 50")
+    if nifty_raw:
+        nifty_data = _json.loads(nifty_raw)
+        lp = nifty_data.get("lp", 0)
+        c  = nifty_data.get("c", lp)   # previous close
+        if c and c != 0:
+            nifty_change_pct = (lp - c) / c * 100
+
+    # ── Recent news headlines (last 12 hours across bellwether symbols) ────────
+    headlines: list[str] = []
+    try:
+        news_service = get_news_service()
+        for sym in ["NIFTY", "RELIANCE", "HDFCBANK", "TCS"]:
+            articles = await news_service.get_recent_news(sym, hours=12)
+            for a in articles[:3]:
+                h = a.get("headline", "").strip()
+                if h and h not in headlines:
+                    headlines.append(h)
+        headlines = headlines[:8]
+    except Exception as e:
+        log.warning("scheduler.briefing_news_error", error=str(e))
+
+    # ── Ask Claude for the briefing ───────────────────────────────────────────
+    briefing = await get_claude_client().get_market_briefing(
+        nifty_change_pct = nifty_change_pct,
+        vix              = vix,
+        regime           = regime,
+        news_headlines   = headlines,
+    )
+
+    log.info(
+        "scheduler.briefing_done",
+        regime           = regime,
+        vix              = vix,
+        nifty_change_pct = round(nifty_change_pct, 2),
+        headlines        = len(headlines),
+    )
 
     await notifier.market_open(
         regime   = regime,
         vix      = vix,
-        briefing = f"Market opens in 5 mins. Monitoring {len(_candle_buffer) or 50} instruments.",
+        briefing = briefing,
     )
 
 
