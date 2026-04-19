@@ -206,6 +206,7 @@ class BacktestEngine:
         min_confirming_signals: int = 1,
         trading_mode:           str = "intraday",   # "intraday" | "swing"
         symbol_segments:        dict[str, str] | None = None,
+        enable_sector_filter:   bool = False,
     ) -> None:
         self._symbols              = symbols
         self._start                = start_date
@@ -240,6 +241,14 @@ class BacktestEngine:
         # Segment map: symbol → LARGE_CAP | MID_CAP | SMALL_CAP
         # Used for segment-aware RVOL / pattern quality gates.
         self._symbol_segments = symbol_segments
+
+        # Sector filter: loads sectoral index ROC-20 per date.
+        # Off by default — use enable_sector_filter=True to opt in.
+        self._enable_sector_filter = enable_sector_filter
+        # sector_name → {date → roc_20_pct}   e.g. "Financials" → {2025-01-15 → -2.3}
+        self._sector_roc_by_date: dict[str, dict[date, float]] = {}
+        # symbol → sector_name   e.g. "HDFCBANK" → "Financials"
+        self._symbol_to_sector: dict[str, str] = {}
 
         self._signal_engine   = MultiTimeframeSignalEngine()
         self._risk_engine     = RiskEngine()
@@ -431,6 +440,71 @@ class BacktestEngine:
             except Exception as e:
                 log.warning(f"backtest.{label}_load_failed", error=str(e))
 
+        # ── Sector indices (optional) ─────────────────────────────────────────
+        if self._enable_sector_filter:
+            await self._load_sector_indices()
+
+    async def _load_sector_indices(self) -> None:
+        """
+        Load sectoral index daily closes for the backtest period, compute
+        20-day ROC per date, and cache in _sector_roc_by_date.
+
+        Called only when enable_sector_filter=True.
+        Failures are silent — if a sector fails to load, the filter is
+        simply skipped for stocks in that sector (no false blocks).
+        """
+        import yfinance as yf
+        from services.data_ingestion.nifty500_instruments import (
+            SECTOR_INDEX_MAP,
+            get_symbol_sector_map,
+        )
+
+        self._symbol_to_sector = get_symbol_sector_map()
+
+        load_start = self._start - timedelta(days=90)   # extra buffer for ROC-20
+        load_end   = (self._end + timedelta(days=1)).isoformat()
+
+        loaded = 0
+        for sector, yf_ticker in SECTOR_INDEX_MAP.items():
+            try:
+                raw = yf.Ticker(yf_ticker).history(
+                    start       = load_start.isoformat(),
+                    end         = load_end,
+                    interval    = "1d",
+                    auto_adjust = True,
+                )
+                if raw.empty:
+                    log.warning("backtest.sector_no_data", sector=sector, ticker=yf_ticker)
+                    continue
+
+                raw.index = pd.to_datetime(raw.index)
+                if raw.index.tz is not None:
+                    raw.index = raw.index.tz_convert("Asia/Kolkata").tz_localize(None)
+
+                closes = raw["Close"].ffill()
+
+                # ROC-20: percentage change over 20 trading days
+                roc20 = (closes / closes.shift(20) - 1) * 100
+
+                roc_map: dict[date, float] = {}
+                for ts, val in roc20.items():
+                    if not pd.isna(val):
+                        d = ts.date() if hasattr(ts, "date") else ts
+                        roc_map[d] = round(float(val), 2)
+
+                self._sector_roc_by_date[sector] = roc_map
+                loaded += 1
+
+            except Exception as e:
+                log.warning("backtest.sector_load_failed", sector=sector, ticker=yf_ticker, error=str(e))
+
+        log.info(
+            "backtest.sector_indices_loaded",
+            loaded  = loaded,
+            total   = len(SECTOR_INDEX_MAP),
+            sectors = list(self._sector_roc_by_date.keys()),
+        )
+
     # ── Per-symbol ────────────────────────────────────────────────────────────
 
     async def _backtest_symbol(self, symbol: str) -> list[SimulatedTrade]:
@@ -569,6 +643,36 @@ class BacktestEngine:
                 if nifty_200_rising is True:
                     continue
 
+            # ── Sector ROC gate (Phase 1 — opt-in via enable_sector_filter) ────
+            # Rule:
+            #   SHORT + sector_roc_20 > +1%  → block (sector tailwind fights the short)
+            #   LONG  + sector_roc_20 < -3%  → reduce confidence 15% (headwind; may
+            #                                   drop below min_confidence threshold)
+            # No sector data for this symbol/date = gate is skipped, not blocked.
+            if self._enable_sector_filter:
+                _sector = self._symbol_to_sector.get(symbol)
+                if _sector:
+                    _sector_roc = self._sector_roc_by_date.get(_sector, {}).get(candle_date)
+                    if _sector_roc is not None:
+                        if setup_bias == Direction.BEARISH and _sector_roc > 1.0:
+                            # Sector trending up → shorting against sector tide → skip
+                            log.debug(
+                                "backtest.sector_filter_blocked_short",
+                                symbol=symbol, sector=_sector, sector_roc=_sector_roc,
+                            )
+                            continue
+                        # For longs fighting sector headwind: mark so confluence can use it
+                        # (we'll reduce confidence in the signal after detection)
+                        _sector_headwind = (
+                            setup_bias == Direction.BULLISH and _sector_roc < -3.0
+                        )
+                    else:
+                        _sector_headwind = False
+                else:
+                    _sector_headwind = False
+            else:
+                _sector_headwind = False
+
             # ── Long trades only in RANGING Nifty market ─────────────────────
             # In TRENDING_UP: longs chase an extended market → 24% WR, ₹-ve
             # In TRENDING_DOWN: longs fight the tape → 9-13% WR, ₹-ve
@@ -683,6 +787,25 @@ class BacktestEngine:
                     continue
 
             # ── Step 4: Quality gates ─────────────────────────────────────────
+            # Sector headwind: long into sector with ROC-20 < -3% → confidence -15%
+            # Applied before min_confidence check so the threshold naturally filters.
+            if _sector_headwind:
+                adjusted_confidence = int(top.confidence * 0.85)
+                log.debug(
+                    "backtest.sector_headwind_penalty",
+                    symbol=symbol, original=top.confidence, adjusted=adjusted_confidence,
+                )
+                top = Signal(
+                    trading_symbol  = top.trading_symbol,
+                    timeframe       = top.timeframe,
+                    signal_type     = top.signal_type,
+                    direction       = top.direction,
+                    confidence      = adjusted_confidence,
+                    price_at_signal = top.price_at_signal,
+                    indicators      = top.indicators,
+                    notes           = (top.notes or "") + " | sector_headwind",
+                )
+
             if top.confidence < self._min_confidence:
                 continue
 

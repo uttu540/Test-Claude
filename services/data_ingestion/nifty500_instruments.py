@@ -532,6 +532,24 @@ INDEX_INSTRUMENTS = [
     ("NIFTY MIDCAP",  "NSE:NIFTY MIDCAP", 288009),
 ]
 
+# ─── Sector → NSE index mapping ─────────────────────────────────────────────
+# Maps each sector label (used in NIFTY500 tuples) to its best proxy NSE
+# sectoral index available on yfinance. Sectors with no clean proxy are
+# omitted — the backtest sector filter simply skips them rather than
+# using a noisy or off-topic index.
+SECTOR_INDEX_MAP: dict[str, str] = {
+    "Financials":              "^NSEBANK",    # Nifty Bank (12 banking stocks)
+    "Information Technology":  "^CNXIT",      # Nifty IT (10 IT stocks)
+    "Consumer Staples":        "^CNXFMCG",    # Nifty FMCG
+    "Healthcare":              "^CNXPHARMA",  # Nifty Pharma
+    "Consumer Discretionary":  "^CNXAUTO",    # Nifty Auto (best proxy available)
+    "Materials":               "^CNXMETAL",   # Nifty Metal
+    "Energy":                  "^CNXENERGY",  # Nifty Energy
+    "Real Estate":             "^CNXREALTY",  # Nifty Realty
+    # Industrials, Utilities, Communication Services, Conglomerate:
+    # no clean NSE sectoral index — sector filter skipped for these.
+}
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def get_nifty500_symbols() -> list[str]:
@@ -545,6 +563,11 @@ def get_nifty500_by_sector() -> dict[str, list[str]]:
     for symbol, _, sector in NIFTY500:
         result.setdefault(sector, []).append(symbol)
     return result
+
+
+def get_symbol_sector_map() -> dict[str, str]:
+    """Return {trading_symbol: sector} for all N500 stocks."""
+    return {symbol: sector for symbol, _, sector in NIFTY500}
 
 
 if __name__ == "__main__":
