@@ -179,6 +179,48 @@ async def _run_signals(symbol: str) -> None:
                 ohlcv_by_tf["1day"], india_vix=india_vix
             )
 
+            # Cache momentum gate context in Redis for MomentumLiveEngine:
+            #   Gate 1b → is Nifty 200 EMA rising?
+            #   Gate 1c → how many consecutive TRENDING_UP days so far?
+            # Both keys have 48h TTL so weekend/holiday gaps don't wipe state.
+            try:
+                from services.technical_engine.indicators import compute_all as _compute_all
+                _nifty_df = _compute_all(ohlcv_by_tf["1day"].copy())
+
+                # Gate 1b: 200 EMA slope (compare vs 10 bars ago)
+                _ema200_rising = False
+                if "ema_200" in _nifty_df.columns:
+                    _ema200 = _nifty_df["ema_200"].dropna()
+                    if len(_ema200) >= 12:
+                        _ema200_rising = bool(_ema200.iloc[-1] > _ema200.iloc[-11])
+                await redis.setex(
+                    "momentum:nifty_200ema_rising", 48 * 3600,
+                    "1" if _ema200_rising else "0",
+                )
+
+                # Gate 1c: consecutive TRENDING_UP days (walk full buffer history)
+                _consec = 0
+                for _, _row in _nifty_df.iterrows():
+                    _adx  = _row.get("adx")
+                    _stk  = _row.get("ema_stack", 0) or 0
+                    if _adx is None or pd.isna(_adx):
+                        continue
+                    if _adx < 20:
+                        _consec = 0
+                    elif _stk >= 0:
+                        _consec += 1
+                    else:
+                        _consec = 0
+                await redis.setex(
+                    "momentum:nifty_consec_up", 48 * 3600, str(_consec),
+                )
+                log.debug(
+                    "momentum.nifty_context_updated",
+                    ema200_rising=_ema200_rising, consec_up=_consec,
+                )
+            except Exception as _e:
+                log.warning("momentum.nifty_context_error", error=str(_e))
+
         regime = regime_override or await redis.get("market:regime") or "UNKNOWN"
 
         # ── VIX emergency override (beats the 10:15 AM regime lock) ──────────

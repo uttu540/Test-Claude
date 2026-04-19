@@ -62,6 +62,29 @@ class MomentumLiveEngine:
         if regime != "TRENDING_UP":
             return []
 
+        # ── Gate 1b: Nifty 200 EMA must be rising ────────────────────────────
+        # Catches late-stage bull tops where ADX is still elevated but EMA has
+        # flattened. Stored in Redis by main.py each time Nifty daily bar closes.
+        # If key is absent (startup / first day) we skip the gate — don't block.
+        _ema200_raw = await redis.get("momentum:nifty_200ema_rising")
+        if _ema200_raw is not None and str(_ema200_raw) == "0":
+            log.debug("momentum_live.gate1b_blocked", symbol=symbol,
+                      reason="nifty_200ema_not_rising")
+            return []
+
+        # ── Gate 1c: 3+ consecutive TRENDING_UP days ─────────────────────────
+        # Prevents entries on day-1 of a new ADX spike that may be a false start.
+        # Stored in Redis by main.py alongside the 200 EMA key.
+        _consec_raw = await redis.get("momentum:nifty_consec_up")
+        if _consec_raw is not None:
+            try:
+                if int(_consec_raw) < 3:
+                    log.debug("momentum_live.gate1c_blocked", symbol=symbol,
+                              consec=int(_consec_raw))
+                    return []
+            except ValueError:
+                pass
+
         if len(daily_df) < MIN_DAILY_BARS:
             log.debug("momentum_live.insufficient_bars", symbol=symbol, bars=len(daily_df))
             return []

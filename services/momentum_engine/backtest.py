@@ -63,9 +63,10 @@ _ENTRY_DISABLED: frozenset[MomentumSignalType] = frozenset({
 # Momentum trends typically resolve or stall within this window.
 MAX_HOLD_DAYS = 20
 
-# Position sizing: risk 2% of notional ₹500,000 per trade
-NOTIONAL_CAPITAL = 500_000
-RISK_PCT         = 0.02   # 2% risk per trade
+# Position sizing: matches config/settings.py — ₹1,00,000 capital, 2% risk = ₹2,000/trade
+from config.settings import settings as _settings
+NOTIONAL_CAPITAL = int(_settings.total_capital)   # ₹1,00,000
+RISK_PCT         = _settings.max_risk_per_trade_pct / 100  # 2%
 
 
 @dataclass
@@ -111,12 +112,13 @@ class MomentumBacktestEngine:
 
     def __init__(
         self,
-        symbols:         list[str],
-        start_date:      date,
-        end_date:        date,
-        symbol_segments: dict[str, str] | None = None,
-        min_score:       int = 8,          # Min confluence score to trade
-        min_confidence:  int = 65,         # Min signal confidence to trade
+        symbols:              list[str],
+        start_date:           date,
+        end_date:             date,
+        symbol_segments:      dict[str, str] | None = None,
+        min_score:            int  = 8,    # Min confluence score to trade
+        min_confidence:       int  = 65,   # Min signal confidence to trade
+        enable_sector_filter: bool = False,
     ) -> None:
         self._symbols         = symbols
         self._start           = start_date
@@ -128,10 +130,16 @@ class MomentumBacktestEngine:
         self._detector = MomentumDetector()
 
         # Market-wide lookup tables (populated in run())
-        self._nifty_regime_by_date:    dict[date, str]  = {}   # TRENDING_UP/DOWN/RANGING
-        self._nifty_200ema_rising:     dict[date, bool] = {}
-        self._midcap_regime_by_date:   dict[date, str]  = {}
-        self._smallcap_regime_by_date: dict[date, str]  = {}
+        self._nifty_regime_by_date:      dict[date, str]  = {}   # TRENDING_UP/DOWN/RANGING
+        self._nifty_200ema_rising:       dict[date, bool] = {}
+        self._nifty_consec_up:           dict[date, int]  = {}   # consecutive TRENDING_UP days
+        self._midcap_regime_by_date:     dict[date, str]  = {}
+        self._smallcap_regime_by_date:   dict[date, str]  = {}
+
+        # Sector filter (opt-in)
+        self._enable_sector_filter = enable_sector_filter
+        self._sector_roc_by_date:  dict[str, dict[date, float]] = {}
+        self._symbol_to_sector:    dict[str, str] = {}
 
     async def run(self) -> MomentumBacktestResult:
         result = MomentumBacktestResult(
@@ -161,7 +169,8 @@ class MomentumBacktestEngine:
     # ── Market index loading ─────────────────────────────────────────────────
 
     async def _load_market_indices(self) -> None:
-        load_start = self._start - timedelta(days=60)
+        # 300 days back — enough for 200 EMA to be valid on day 1 of the backtest
+        load_start = self._start - timedelta(days=300)
         load_end   = (self._end + timedelta(days=1)).isoformat()
 
         # Nifty 50 → regime + 200 EMA direction
@@ -200,6 +209,16 @@ class MomentumBacktestEngine:
                             d = ts.date() if hasattr(ts, "date") else ts
                             self._nifty_200ema_rising[d] = bool(rising)
 
+                # Build consecutive TRENDING_UP counter per date
+                # (sorted so we can walk forward in time)
+                consec = 0
+                for d in sorted(self._nifty_regime_by_date):
+                    if self._nifty_regime_by_date[d] == "TRENDING_UP":
+                        consec += 1
+                    else:
+                        consec = 0
+                    self._nifty_consec_up[d] = consec
+
                 log.info(
                     "momentum_bt.nifty_loaded",
                     trending_up   = sum(1 for v in self._nifty_regime_by_date.values() if v == "TRENDING_UP"),
@@ -211,8 +230,8 @@ class MomentumBacktestEngine:
 
         # Midcap + Smallcap indices for segment gates
         for ticker, regime_dict, label in [
-            ("^CNXMDCP",  self._midcap_regime_by_date,   "midcap"),
-            ("^CNXSC",    self._smallcap_regime_by_date, "smallcap"),
+            ("^NSMIDCP",          self._midcap_regime_by_date,   "midcap"),
+            ("NIFTYMIDCAP150.NS",  self._smallcap_regime_by_date, "smallcap"),
         ]:
             try:
                 idx_raw = yf.Ticker(ticker).history(
@@ -241,6 +260,61 @@ class MomentumBacktestEngine:
                              trading_days=len(regime_dict))
             except Exception as e:
                 log.warning(f"momentum_bt.{label}_load_failed", error=str(e))
+
+        if self._enable_sector_filter:
+            await self._load_sector_indices()
+
+    async def _load_sector_indices(self) -> None:
+        """
+        Load sectoral index ROC-20 per date for the long-side headwind gate.
+        Identical logic to the swing engine's sector loader.
+        Only called when enable_sector_filter=True.
+        """
+        from services.data_ingestion.nifty500_instruments import (
+            SECTOR_INDEX_MAP,
+            get_symbol_sector_map,
+        )
+
+        self._symbol_to_sector = get_symbol_sector_map()
+
+        load_start = self._start - timedelta(days=90)
+        load_end   = (self._end + timedelta(days=1)).isoformat()
+
+        loaded = 0
+        for sector, yf_ticker in SECTOR_INDEX_MAP.items():
+            try:
+                raw = yf.Ticker(yf_ticker).history(
+                    start       = load_start.isoformat(),
+                    end         = load_end,
+                    interval    = "1d",
+                    auto_adjust = True,
+                )
+                if raw.empty:
+                    continue
+
+                raw.index = pd.to_datetime(raw.index)
+                if raw.index.tz is not None:
+                    raw.index = raw.index.tz_convert("Asia/Kolkata").tz_localize(None)
+
+                closes = raw["Close"].ffill()
+                roc20  = (closes / closes.shift(20) - 1) * 100
+
+                roc_map: dict[date, float] = {}
+                for ts, val in roc20.items():
+                    if not pd.isna(val):
+                        d = ts.date() if hasattr(ts, "date") else ts
+                        roc_map[d] = round(float(val), 2)
+
+                self._sector_roc_by_date[sector] = roc_map
+                loaded += 1
+            except Exception as e:
+                log.warning("momentum_bt.sector_load_failed", sector=sector, error=str(e))
+
+        log.info(
+            "momentum_bt.sector_indices_loaded",
+            loaded=loaded, total=len(SECTOR_INDEX_MAP),
+            sectors=list(self._sector_roc_by_date.keys()),
+        )
 
     # ── Per-symbol backtest ──────────────────────────────────────────────────
 
@@ -280,9 +354,22 @@ class MomentumBacktestEngine:
             candle_ts   = trade_df.index[i]
             candle_date = candle_ts.date() if hasattr(candle_ts, "date") else candle_ts
 
-            # ── Gate 1: Nifty must be TRENDING_UP ────────────────────────────
+            # ── Gate 1a: Nifty must be TRENDING_UP ───────────────────────────
             nifty_regime = self._nifty_regime_by_date.get(candle_date)
             if nifty_regime != "TRENDING_UP":
+                continue
+
+            # ── Gate 1b: Nifty 200 EMA must still be rising ──────────────────
+            # ADX lags — EMA direction catches topping markets before ADX does.
+            # If 200 EMA has flattened/turned down, the trend is maturing; skip.
+            if not self._nifty_200ema_rising.get(candle_date, False):
+                continue
+
+            # ── Gate 1c: Require ≥3 consecutive TRENDING_UP days ─────────────
+            # Blocks single ADX spikes at market tops while still catching
+            # signals within the breakout window (Darvas signals fire once —
+            # waiting 5 days risks the signal going stale before we enter).
+            if self._nifty_consec_up.get(candle_date, 0) < 3:
                 continue
 
             # ── Gate 2: Segment-specific regime ──────────────────────────────
@@ -294,6 +381,18 @@ class MomentumBacktestEngine:
                 small_regime = self._smallcap_regime_by_date.get(candle_date)
                 if small_regime in ("TRENDING_DOWN", "RANGING"):
                     continue
+
+            # ── Gate 3: Sector headwind (opt-in via enable_sector_filter) ────────
+            # Long into a sector with ROC-20 < -3% = buying against sector trend.
+            # Penalise confidence by 15% rather than hard-blocking — lets strong
+            # signals through while filtering borderline ones.
+            _sector_headwind = False
+            if self._enable_sector_filter:
+                _sector = self._symbol_to_sector.get(symbol)
+                if _sector:
+                    _sector_roc = self._sector_roc_by_date.get(_sector, {}).get(candle_date)
+                    if _sector_roc is not None and _sector_roc < -3.0:
+                        _sector_headwind = True
 
             # ── Slice history up to current bar (no look-ahead) ───────────────
             cutoff = candle_ts
@@ -330,6 +429,27 @@ class MomentumBacktestEngine:
 
             # Best signal (from entry-allowed list)
             top = max(entry_signals, key=lambda s: s.confidence)
+
+            # ── Gate 3 penalty: sector headwind → -15% confidence ─────────────
+            # Applied after selecting top so we penalise the actual entry signal.
+            # Strong signals (confidence≥65÷0.85≈77) survive; borderline ones drop
+            # below min_confidence and get filtered.
+            if _sector_headwind:
+                penalised_conf = int(top.confidence * 0.85)
+                if penalised_conf < self._min_confidence:
+                    log.debug(
+                        "momentum_bt.sector_headwind_block",
+                        symbol=symbol, original_conf=top.confidence,
+                        penalised_conf=penalised_conf,
+                    )
+                    continue
+                from dataclasses import replace as _dc_replace
+                top = _dc_replace(
+                    top,
+                    confidence = penalised_conf,
+                    notes      = (top.notes or "") + " | sector_headwind",
+                )
+
             atr = top.atr
             if not atr:
                 continue

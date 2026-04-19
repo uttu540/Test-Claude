@@ -327,10 +327,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--start",     type=str)
     p.add_argument("--end",       type=str, default=date.today().isoformat())
     p.add_argument("--output",    type=str, default=None)
-    p.add_argument("--min-score", type=int, default=8,
+    p.add_argument("--min-score",     type=int, default=8,
                    help="Min confluence score (default: 8)")
-    p.add_argument("--min-conf",  type=int, default=65,
+    p.add_argument("--min-conf",      type=int, default=65,
                    help="Min signal confidence (default: 65)")
+    p.add_argument("--sector-filter", action="store_true", default=False,
+                   help="Enable sector ROC-20 headwind filter (default: OFF)")
     return p.parse_args()
 
 
@@ -353,21 +355,24 @@ async def main() -> None:
         else end_date - timedelta(days=args.days)
     )
 
+    sector_label = "[green]ON[/green]" if args.sector_filter else "[dim]OFF[/dim]"
     console.print(
         f"\n[bold]Momentum Backtest[/bold]  "
         f"{len(symbols)} symbols  |  "
         f"{start_date} → {end_date}  |  "
         f"Min score: {args.min_score}  |  "
-        f"Min confidence: {args.min_conf}\n"
+        f"Min confidence: {args.min_conf}  |  "
+        f"Sector filter: {sector_label}\n"
     )
 
     engine = MomentumBacktestEngine(
-        symbols         = symbols,
-        start_date      = start_date,
-        end_date        = end_date,
-        symbol_segments = seg_map,
-        min_score       = args.min_score,
-        min_confidence  = args.min_conf,
+        symbols               = symbols,
+        start_date            = start_date,
+        end_date              = end_date,
+        symbol_segments       = seg_map,
+        min_score             = args.min_score,
+        min_confidence        = args.min_conf,
+        enable_sector_filter  = args.sector_filter,
     )
 
     result = await engine.run()
