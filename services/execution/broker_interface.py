@@ -163,7 +163,7 @@ class BrokerInterface(ABC):
         Called by both live and paper brokers.
         """
         try:
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 order = Order(
                     id               = uuid.UUID(kwargs["internal_id"]),
                     broker           = self.BROKER,

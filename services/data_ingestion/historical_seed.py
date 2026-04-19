@@ -72,7 +72,7 @@ class HistoricalSeeder:
     async def create_hypertable(self) -> None:
         """Create the TimescaleDB ohlcv hypertable if it doesn't exist."""
         statements = [s.strip() for s in OHLCV_TABLE_DDL.split(";") if s.strip()]
-        async with await get_db_session().__anext__() as session:
+        async with get_db_session() as session:
             for stmt in statements:
                 await session.execute(text(stmt))
             await session.commit()
@@ -92,7 +92,10 @@ class HistoricalSeeder:
         if timeframes is None:
             timeframes = ["1day"]   # Start with daily; intraday added after API key
 
+        # Stocks + NIFTY 50 index (used for regime detection)
         symbols = [sym for sym, _, _ in NIFTY50]
+        index_symbols = [("NIFTY 50", "^NSEI")]   # (trading_symbol, yfinance_ticker)
+
         log.info("historical_seed.start", symbols=len(symbols), from_date=start_date, timeframes=timeframes)
 
         for i, symbol in enumerate(symbols):
@@ -103,7 +106,19 @@ class HistoricalSeeder:
                 log.error("historical_seed.symbol_error", symbol=symbol, error=str(e))
             await asyncio.sleep(0.5)   # Rate limit yfinance
 
-        log.info("historical_seed.complete", symbols=len(symbols))
+        # Seed indices with their special yfinance tickers
+        for trading_symbol, yf_ticker in index_symbols:
+            try:
+                df = self._fetch_yfinance_raw(yf_ticker, start_date, "1day")
+                if df is not None and not df.empty:
+                    await self._upsert_candles(trading_symbol, "1day", df)
+                    log.info("historical_seed.index_seeded", symbol=trading_symbol, rows=len(df))
+                else:
+                    log.warning("historical_seed.index_no_data", symbol=trading_symbol, ticker=yf_ticker)
+            except Exception as e:
+                log.error("historical_seed.index_error", symbol=trading_symbol, error=str(e))
+
+        log.info("historical_seed.complete", symbols=len(symbols) + len(index_symbols))
 
     async def _seed_symbol(
         self,
@@ -154,6 +169,29 @@ class HistoricalSeeder:
             return df
         except Exception as e:
             log.error("yfinance.fetch_error", symbol=symbol, error=str(e))
+            return None
+
+    def _fetch_yfinance_raw(
+        self, yf_ticker: str, start_date: date, timeframe: str
+    ) -> pd.DataFrame | None:
+        """Fetch OHLCV using an exact yfinance ticker (no .NS suffix added)."""
+        interval = self._tf_to_yfinance(timeframe)
+        if interval is None:
+            return None
+        try:
+            ticker = yf.Ticker(yf_ticker)
+            df = ticker.history(
+                start=start_date.strftime("%Y-%m-%d"),
+                interval=interval,
+                auto_adjust=True,
+            )
+            if df.empty:
+                return None
+            df.index = pd.to_datetime(df.index, utc=True)
+            df = df.rename(columns=str.lower)[["open", "high", "low", "close", "volume"]]
+            return df.dropna()
+        except Exception as e:
+            log.error("yfinance.raw_fetch_error", ticker=yf_ticker, error=str(e))
             return None
 
     @staticmethod
@@ -258,7 +296,7 @@ class HistoricalSeeder:
                 volume = EXCLUDED.volume
         """)
 
-        async with await get_db_session().__anext__() as session:
+        async with get_db_session() as session:
             await session.execute(upsert_sql, rows)
             await session.commit()
 

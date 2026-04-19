@@ -278,7 +278,7 @@ class ClaudeStrategyClient:
         Best-effort — never raises.
         """
         try:
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 entry = AIDecisionLog(
                     id             = uuid.uuid4(),
                     decision_type  = "STRATEGY_EVAL",
@@ -321,14 +321,14 @@ class ClaudeStrategyClient:
         advance_decline: str = "N/A",
         fii_activity: str = "N/A",
         top_movers: list[str] | None = None,
-    ) -> str:
+    ) -> tuple[str, bool]:
         """
         Call Claude for a pre-market briefing.
-        Returns a plain-text summary (3-4 sentences).
+        Returns a tuple of (plain-text summary, macro_shock flag).
         Falls back to a canned string on any error — never raises.
         """
         if not self._client:
-            return f"Market opens. Regime: {regime}. VIX: {vix or 'N/A'}."
+            return f"Market opens. Regime: {regime}. VIX: {vix or 'N/A'}.", False
 
         user_prompt = build_market_briefing_prompt(
             nifty_change_pct = nifty_change_pct,
@@ -343,20 +343,29 @@ class ClaudeStrategyClient:
         try:
             response = await self._client.messages.create(
                 model      = settings.claude_model,
-                max_tokens = 256,
+                max_tokens = 512,
                 system     = MARKET_BRIEFING_SYSTEM,
                 messages   = [{"role": "user", "content": user_prompt}],
             )
-            briefing = response.content[0].text.strip()
+            raw = response.content[0].text.strip()
             log.info(
                 "claude_client.briefing_done",
                 tokens_in  = response.usage.input_tokens,
                 tokens_out = response.usage.output_tokens,
             )
-            return briefing
+            # Parse JSON response
+            try:
+                parsed = json.loads(raw)
+                briefing = parsed.get("briefing", raw)
+                macro_shock = bool(parsed.get("macro_shock", False))
+            except (json.JSONDecodeError, AttributeError):
+                briefing = raw
+                macro_shock = False
+            log.info("claude_client.briefing_parsed", macro_shock=macro_shock)
+            return briefing, macro_shock
         except Exception as e:
             log.error("claude_client.briefing_error", error=str(e))
-            return f"Market opens. Regime: {regime}. VIX: {vix or 'N/A'}."
+            return f"Market opens. Regime: {regime}. VIX: {vix or 'N/A'}.", False
 
 
 # ─── Singleton ────────────────────────────────────────────────────────────────

@@ -436,7 +436,7 @@ async def _cmd_pnl(update: object, context: object) -> None:
         from sqlalchemy import text
         from database.connection import get_db_session
         today = _date.today()
-        async for session in get_db_session():
+        async with get_db_session() as session:
             result = await session.execute(
                 text("""
                     SELECT
@@ -479,7 +479,7 @@ async def _cmd_positions(update: object, context: object) -> None:
     try:
         from sqlalchemy import text
         from database.connection import get_db_session
-        async for session in get_db_session():
+        async with get_db_session() as session:
             result = await session.execute(
                 text("""
                     SELECT trading_symbol, direction, entry_price,

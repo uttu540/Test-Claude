@@ -323,35 +323,35 @@ class MockFeed:
 
 class TickRedisWriter:
     """
-    Writes every tick to Redis for real-time consumption by other services.
+    Writes ticks to Redis using a pipeline — one round-trip per batch.
     Key: market:tick:{symbol}  TTL: 60s
     Also maintains a sorted set of latest prices for fast bulk reads.
     """
 
-    async def write(self, tick: Tick) -> None:
+    async def write_batch(self, ticks: list[Tick]) -> None:
+        if not ticks:
+            return
         try:
             redis = get_redis()
-            data = json.dumps({
-                "lp":  tick.last_price,
-                "vol": tick.volume,
-                "chg": tick.change,
-                "ts":  tick.timestamp.isoformat(),
-                "o":   tick.open,
-                "h":   tick.high,
-                "l":   tick.low,
-                "c":   tick.close,
-                "bq":  tick.buy_quantity,
-                "sq":  tick.sell_quantity,
-            })
-            await redis.setex(f"market:tick:{tick.trading_symbol}", 60, data)
-            await redis.zadd("market:prices", {tick.trading_symbol: tick.last_price})
+            async with redis.pipeline(transaction=False) as pipe:
+                for tick in ticks:
+                    data = json.dumps({
+                        "lp":  tick.last_price,
+                        "vol": tick.volume,
+                        "chg": tick.change,
+                        "ts":  tick.timestamp.isoformat(),
+                        "o":   tick.open,
+                        "h":   tick.high,
+                        "l":   tick.low,
+                        "c":   tick.close,
+                        "bq":  tick.buy_quantity,
+                        "sq":  tick.sell_quantity,
+                    })
+                    pipe.setex(f"market:tick:{tick.trading_symbol}", 60, data)
+                    pipe.zadd("market:prices", {tick.trading_symbol: tick.last_price})
+                await pipe.execute()
         except Exception as e:
-            log.warning(
-                "redis_writer.write_failed",
-                symbol=tick.trading_symbol,
-                ts=tick.timestamp.isoformat(),
-                error=str(e),
-            )
+            log.warning("redis_writer.batch_failed", count=len(ticks), error=str(e))
 
 
 # ─── Main Feed Manager ────────────────────────────────────────────────────────
@@ -361,14 +361,20 @@ class FeedManager:
     Orchestrates the feed, candle aggregator, and Redis writer.
     In LIVE/PAPER mode: uses ZerodhaFeed.
     In DEVELOPMENT mode: uses MockFeed.
+
+    Ticks are buffered per event-loop cycle and flushed as a single pipeline
+    write — avoids spawning one Redis connection per tick symbol.
     """
 
     def __init__(self):
         self._redis_writer = TickRedisWriter()
         self._candle_aggregator = CandleAggregator(self._on_candle_complete)
         self._candle_callbacks: list[Callable[[OHLCVCandle], None]] = []
+        self._tick_batch: list[Tick] = []
+        self._flush_scheduled: bool = False
+        self._total_ticks: int = 0
 
-        if settings.is_dev:
+        if settings.uses_simulated_broker:   # dev + paper → no Kite token needed
             self._feed = MockFeed(self._on_tick)
         else:
             self._feed = ZerodhaFeed(self._on_tick)
@@ -378,18 +384,27 @@ class FeedManager:
         self._candle_callbacks.append(callback)
 
     def _on_tick(self, tick: Tick) -> None:
-        """Called for every incoming tick."""
-        # Run async write without blocking the tick loop.
-        # The write() method handles its own exceptions internally,
-        # but we also attach a done-callback to catch any unexpected errors.
-        task = asyncio.create_task(self._redis_writer.write(tick))
-        task.add_done_callback(self._on_redis_write_done)
+        """Buffer tick; schedule a single batch flush at end of this event-loop turn."""
+        self._tick_batch.append(tick)
         self._candle_aggregator.process_tick(tick)
+        self._total_ticks += 1
 
-    @staticmethod
-    def _on_redis_write_done(task: asyncio.Task) -> None:
-        if not task.cancelled() and task.exception() is not None:
-            log.warning("feed_manager.redis_task_error", error=str(task.exception()))
+        # Print every 500 ticks (~10s at 50 symbols/sec) so we know the feed is alive
+        if self._total_ticks % 500 == 0:
+            from datetime import datetime
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] feed.ticks_processed total={self._total_ticks}", flush=True)
+
+        if not self._flush_scheduled:
+            self._flush_scheduled = True
+            asyncio.create_task(self._flush_ticks())
+
+    async def _flush_ticks(self) -> None:
+        """Drain the tick buffer and write to Redis in one pipeline call."""
+        # yield once so all synchronous _on_tick calls in this loop turn complete
+        await asyncio.sleep(0)
+        batch, self._tick_batch = self._tick_batch, []
+        self._flush_scheduled = False
+        await self._redis_writer.write_batch(batch)
 
     def _on_candle_complete(self, candle: OHLCVCandle) -> None:
         """Called when a candle period closes."""

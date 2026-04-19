@@ -40,8 +40,10 @@ class RiskEngine:
       5. Position value doesn't exceed max_position_size_inr
     """
 
-    ATR_STOP_MULTIPLIER = 1.5   # Stop loss placed at 1.5x ATR from entry
-    RR_RATIO = 2.0              # Target at 2:1 risk-reward
+    ATR_STOP_MULTIPLIER = 2.0   # Stop loss placed at 2.0x ATR from entry
+    # 1.5x was too tight — normal intraday noise on NSE spans 1-2 ATR,
+    # causing legitimate positions to be stopped out before the move.
+    RR_RATIO = 2.0              # Target at 2:1 risk-reward (4x ATR from entry)
 
     async def evaluate(
         self,
@@ -74,6 +76,13 @@ class RiskEngine:
             return RiskDecision(
                 approved=False,
                 reason=f"Already have an open position in {symbol}",
+            )
+
+        # ── 3b. Max 1 trade per symbol per calendar day ───────────────────────
+        if await self._has_traded_today(symbol):
+            return RiskDecision(
+                approved=False,
+                reason=f"Already traded {symbol} today — one trade per symbol per day",
             )
 
         # ── 4. Calculate stop loss and target from ATR ────────────────────────
@@ -127,7 +136,7 @@ class RiskEngine:
     async def _get_todays_pnl(self) -> float:
         today = date.today()
         try:
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("SELECT COALESCE(SUM(net_pnl), 0) FROM trades WHERE DATE(entry_time) = :today AND status = 'CLOSED'"),
                     {"today": today},
@@ -139,7 +148,7 @@ class RiskEngine:
 
     async def _get_open_count(self) -> int:
         try:
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("SELECT COUNT(*) FROM trades WHERE status = 'OPEN'")
                 )
@@ -150,10 +159,28 @@ class RiskEngine:
 
     async def _has_open_position(self, symbol: str) -> bool:
         try:
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("SELECT COUNT(*) FROM trades WHERE trading_symbol = :sym AND status = 'OPEN'"),
                     {"sym": symbol},
+                )
+                return int(result.scalar() or 0) > 0
+        except Exception:
+            pass
+        return False
+
+    async def _has_traded_today(self, symbol: str) -> bool:
+        today = date.today()
+        try:
+            async with get_db_session() as session:
+                result = await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM trades "
+                        "WHERE trading_symbol = :sym "
+                        "  AND status IN ('OPEN', 'CLOSED') "
+                        "  AND DATE(entry_time) = :today"
+                    ),
+                    {"sym": symbol, "today": today},
                 )
                 return int(result.scalar() or 0) > 0
         except Exception:

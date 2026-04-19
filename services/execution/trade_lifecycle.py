@@ -72,6 +72,9 @@ class TradeLifecycleManager:
         # NOTE: In live mode, extremes are sampled at poll intervals (every 30s),
         # not tick-level. They are best-effort approximations, not exchange HLC data.
         self._price_extremes: dict[str, tuple[float, float]] = {}
+        # Trailing stop tracking: trade_id → current trailing stop level.
+        # Starts at planned_stop_loss and only moves in favour of the trade.
+        self._trailing_stops: dict[str, float] = {}
 
     async def run(self) -> None:
         """Main monitoring loop — runs until stopped."""
@@ -126,6 +129,10 @@ class TradeLifecycleManager:
         """
         Dev/paper: read latest tick from Redis and check if SL/target crossed.
         """
+        from config.market_hours import is_market_open
+        if not is_market_open():
+            return
+
         open_trades = await self._load_open_trades()
         if not open_trades:
             return
@@ -136,10 +143,23 @@ class TradeLifecycleManager:
                 continue
 
             # Track session extremes for MAE/MFE
-            self._update_price_extremes(str(trade["id"]), float(trade["entry_price"]), price)
+            trade_key = str(trade["id"])
+            self._update_price_extremes(trade_key, float(trade["entry_price"]), price)
+
+            # Update milestone-based trailing stop
+            self._update_trailing_stop(trade_key, trade, price)
 
             exit_price, reason = self._check_exit_conditions(trade, price)
             if exit_price:
+                # Distinguish trailing stop from original stop loss
+                orig_stop = float(trade["planned_stop_loss"] or 0)
+                current_trail = self._trailing_stops.get(trade_key)
+                if (
+                    reason == "STOP_LOSS"
+                    and current_trail is not None
+                    and current_trail != orig_stop
+                ):
+                    reason = "TRAILING_STOP"
                 await self._close_trade(trade, exit_price=exit_price, reason=reason)
 
     def _check_exit_conditions(
@@ -149,8 +169,10 @@ class TradeLifecycleManager:
     ) -> tuple[float | None, str]:
         """
         Returns (exit_price, reason) if an exit condition is met, else (None, '').
+        Uses the current trailing stop (falls back to planned_stop_loss if not yet set).
         """
-        stop   = float(trade["planned_stop_loss"] or 0)
+        # Use trailing stop if available, otherwise original stop
+        stop   = self._trailing_stops.get(str(trade["id"]), float(trade["planned_stop_loss"] or 0))
         target = float(trade["planned_target_1"]  or 0)
         is_long = trade["direction"] == "LONG"
 
@@ -169,6 +191,66 @@ class TradeLifecycleManager:
                 return target, "TARGET"
 
         return None, ""
+
+    def _update_trailing_stop(self, trade_id: str, trade: dict, current_price: float) -> None:
+        """
+        Update the milestone-based trailing stop for a trade.
+
+        Milestones (same as backtesting engine):
+          Hit 1:2 → trail to breakeven (entry price)
+          Hit 1:3 → trail to +1R
+          Hit 1:5 → trail to +3R
+          Hit 1:8 → trail to +5R
+
+        For LONG:  trailing stop only moves UP (ratchets in favour)
+        For SHORT: trailing stop only moves DOWN (ratchets in favour)
+        """
+        entry_price  = float(trade["entry_price"])
+        planned_stop = float(trade["planned_stop_loss"] or 0)
+        if not planned_stop:
+            return
+
+        is_long = trade["direction"] == "LONG"
+
+        # Initialise from planned stop if first time we see this trade
+        existing = self._trailing_stops.get(trade_id, planned_stop)
+
+        if is_long:
+            initial_risk = entry_price - planned_stop
+            if initial_risk <= 0:
+                return
+            move       = current_price - entry_price
+            r_multiple = move / initial_risk
+            if r_multiple >= 8:
+                new_trail = entry_price + 5 * initial_risk
+            elif r_multiple >= 5:
+                new_trail = entry_price + 3 * initial_risk
+            elif r_multiple >= 3:
+                new_trail = entry_price + 1 * initial_risk
+            elif r_multiple >= 2:
+                new_trail = entry_price   # breakeven
+            else:
+                new_trail = planned_stop  # unchanged
+            # Only move the stop upward (never give back ground)
+            self._trailing_stops[trade_id] = max(existing, new_trail)
+        else:
+            initial_risk = planned_stop - entry_price
+            if initial_risk <= 0:
+                return
+            move       = entry_price - current_price
+            r_multiple = move / initial_risk
+            if r_multiple >= 8:
+                new_trail = entry_price - 5 * initial_risk
+            elif r_multiple >= 5:
+                new_trail = entry_price - 3 * initial_risk
+            elif r_multiple >= 3:
+                new_trail = entry_price - 1 * initial_risk
+            elif r_multiple >= 2:
+                new_trail = entry_price   # breakeven
+            else:
+                new_trail = planned_stop  # unchanged
+            # Only move the stop downward (never give back ground)
+            self._trailing_stops[trade_id] = min(existing, new_trail)
 
     # ── Live mode: broker order book monitoring ───────────────────────────────
 
@@ -200,7 +282,7 @@ class TradeLifecycleManager:
         """Check if any child orders for this trade have completed."""
         trade_id = trade["id"]
 
-        async for session in get_db_session():
+        async with get_db_session() as session:
             result = await session.execute(
                 text("""
                     SELECT broker_order_id, order_type, transaction_type, average_price
@@ -241,7 +323,7 @@ class TradeLifecycleManager:
 
     async def _mark_order_complete(self, broker_order_id: str, kite_order: dict) -> None:
         try:
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 await session.execute(
                     text("""
                         UPDATE orders
@@ -275,7 +357,7 @@ class TradeLifecycleManager:
             from services.execution.broker_router import get_broker
             om = get_broker()
 
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("""
                         SELECT broker_order_id FROM orders
@@ -331,6 +413,8 @@ class TradeLifecycleManager:
         # Consume the price extremes tracked during the trade's lifetime.
         trade_key = str(trade_id)
         session_low, session_high = self._price_extremes.pop(trade_key, (entry_price, entry_price))
+        # Clean up trailing stop state for this trade
+        self._trailing_stops.pop(trade_key, None)
         if direction == "LONG":
             mae = round(max(entry_price - session_low,  0), 4)   # how far price went against (down)
             mfe = round(max(session_high - entry_price, 0), 4)   # how far price went in favor (up)
@@ -343,6 +427,9 @@ class TradeLifecycleManager:
             planned_exit = float(trade.get("planned_target_1") or exit_price)
         elif reason == "STOP_LOSS":
             planned_exit = float(trade.get("planned_stop_loss") or exit_price)
+        elif reason == "TRAILING_STOP":
+            # Trailing stop IS the planned exit at this point — slippage near zero
+            planned_exit = exit_price
         else:
             planned_exit = exit_price
         exit_slippage = round(abs(exit_price - planned_exit), 4)
@@ -364,7 +451,7 @@ class TradeLifecycleManager:
 
         # ── Update Trade record ───────────────────────────────────────────────
         try:
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 await session.execute(
                     text("""
                         UPDATE trades SET
@@ -459,7 +546,7 @@ class TradeLifecycleManager:
             redis  = get_redis()
             regime = await redis.get("market:regime") or "UNKNOWN"
 
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("""
                         SELECT
@@ -553,7 +640,7 @@ class TradeLifecycleManager:
                     pnl         = net_pnl,
                     r_multiple  = r_multiple,
                 )
-            elif reason == "STOP_LOSS":
+            elif reason in ("STOP_LOSS", "TRAILING_STOP"):
                 await notifier.stop_loss_hit(
                     symbol      = symbol,
                     exit_price  = exit_price,
@@ -580,7 +667,7 @@ class TradeLifecycleManager:
     async def _load_open_trades(self) -> list[dict]:
         """Load all OPEN trades from DB."""
         try:
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("""
                         SELECT id, trading_symbol, direction,

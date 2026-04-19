@@ -133,7 +133,7 @@ def _row_to_dict(row) -> dict:
 @app.get("/api/positions")
 async def get_positions() -> list[dict]:
     """All currently open trades."""
-    async for session in get_db_session():
+    async with get_db_session() as session:
         result = await session.execute(
             text("""
                 SELECT
@@ -157,7 +157,7 @@ async def get_positions() -> list[dict]:
 async def get_trades(page: int = 1, per_page: int = 50) -> dict:
     """Paginated trade history, most recent first."""
     offset = (max(page, 1) - 1) * per_page
-    async for session in get_db_session():
+    async with get_db_session() as session:
         total_result = await session.execute(text("SELECT COUNT(*) FROM trades"))
         total = total_result.scalar() or 0
 
@@ -193,7 +193,7 @@ async def get_trades(page: int = 1, per_page: int = 50) -> dict:
 @app.get("/api/trades/{trade_id}")
 async def get_trade(trade_id: str) -> dict:
     """Full detail for a single trade including all orders."""
-    async for session in get_db_session():
+    async with get_db_session() as session:
         result = await session.execute(
             text("SELECT * FROM trades WHERE id = :id"),
             {"id": trade_id},
@@ -218,7 +218,7 @@ async def get_trade(trade_id: str) -> dict:
 async def get_today_pnl() -> dict:
     """Today's aggregated P&L summary."""
     today = date.today()
-    async for session in get_db_session():
+    async with get_db_session() as session:
         result = await session.execute(
             text("""
                 SELECT
@@ -289,7 +289,7 @@ async def get_today_pnl() -> dict:
 @app.get("/api/pnl/history")
 async def get_pnl_history(days: int = 30) -> list[dict]:
     """Daily P&L for the last N days."""
-    async for session in get_db_session():
+    async with get_db_session() as session:
         result = await session.execute(
             text("""
                 SELECT
@@ -341,7 +341,7 @@ async def health_check() -> dict:
 
     # PostgreSQL
     try:
-        async for session in get_db_session():
+        async with get_db_session() as session:
             await session.execute(text("SELECT 1"))
         checks["postgres"] = "ok"
     except Exception as e:

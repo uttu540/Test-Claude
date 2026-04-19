@@ -1078,7 +1078,7 @@ class BacktestEngine:
             # Extra buffer days for indicator warm-up
             load_start = self._start - timedelta(days=60)
 
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("""
                         SELECT ts, open, high, low, close, volume

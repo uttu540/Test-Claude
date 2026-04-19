@@ -20,14 +20,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "trades",
-        sa.Column(
-            "mode",
-            sa.String(20),
-            nullable=False,
-            server_default="live",
-        ),
+    # Use IF NOT EXISTS — migration 001 already includes this column in its
+    # CREATE TABLE, so fresh installs don't need it added again.
+    op.execute(
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS mode VARCHAR(20) NOT NULL DEFAULT 'live'"
     )
 
 

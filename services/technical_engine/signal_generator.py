@@ -151,7 +151,7 @@ _REGIME_CONFIDENCE_CAP: dict[str, int] = {
     "TRENDING_DOWN":  100,
     "RANGING":        80,
     "HIGH_VOLATILITY": 60,
-    "UNKNOWN":        100,
+    "UNKNOWN":        65,
 }
 
 

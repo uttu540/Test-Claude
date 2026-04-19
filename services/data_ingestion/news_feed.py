@@ -21,6 +21,13 @@ import httpx
 import structlog
 from sqlalchemy import select, text
 
+# Lazy VADER import — installed via: pip install vaderSentiment
+try:
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer as _VaderAnalyzer
+    _vader = _VaderAnalyzer()
+except ImportError:
+    _vader = None
+
 from config.settings import settings
 from database.connection import get_db_session
 from database.models import NewsItem
@@ -33,8 +40,10 @@ IST = ZoneInfo("Asia/Kolkata")
 # Map trading symbol → company name keywords for better news search
 SYMBOL_KEYWORDS: dict[str, str] = {sym: name for sym, name, _ in NIFTY50}
 
-# Batch size: how many symbols per NewsAPI query (to stay within rate limits)
-QUERY_BATCH_SIZE = 8
+# Batch size: how many symbols per NewsAPI query
+# Free tier = 100 req/day. 50 symbols ÷ 25 = 2 batches/cycle.
+# At 60-min interval: 2 × 24 = 48 req/day — well within limit.
+QUERY_BATCH_SIZE = 25
 
 # NewsAPI base URL
 NEWSAPI_URL = "https://newsapi.org/v2/everything"
@@ -46,7 +55,7 @@ class NewsFeedService:
     in the NewsItem table, deduplicated by URL.
     """
 
-    def __init__(self, poll_interval_minutes: int = 15):
+    def __init__(self, poll_interval_minutes: int = 60):
         self._interval = poll_interval_minutes * 60
         self._running  = False
         self._client: httpx.AsyncClient | None = None
@@ -168,15 +177,39 @@ class NewsFeedService:
                 return sym
         return None   # Market-wide news
 
+    @staticmethod
+    def _score_sentiment(headline: str, description: str) -> tuple[float | None, str | None]:
+        """
+        Return (score, label) using VADER compound score on headline + description.
+        Score is in [-1.0, +1.0].  Returns (None, None) if VADER unavailable.
+        """
+        if _vader is None:
+            return None, None
+
+        text = f"{headline}. {description}".strip(". ")
+        compound = _vader.polarity_scores(text)["compound"]
+        score = round(compound, 2)
+
+        if score >= 0.05:
+            label = "BULLISH"
+        elif score <= -0.05:
+            label = "BEARISH"
+        else:
+            label = "NEUTRAL"
+
+        return score, label
+
     async def _store_article(self, article: dict, symbol: str | None) -> bool:
         """
         Store a single article. Returns True if new, False if duplicate.
-        Deduplicates by URL.
+        Deduplicates by URL.  Scores sentiment inline via VADER.
         """
         url       = article.get("url") or ""
         headline  = article.get("title") or ""
         if not headline or not url:
             return False
+
+        description = article.get("description") or ""
 
         # Parse published_at
         published_at = None
@@ -187,8 +220,10 @@ class NewsFeedService:
             except ValueError:
                 pass
 
+        sentiment_score, sentiment_label = self._score_sentiment(headline, description)
+
         try:
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 # Check for duplicate
                 exists = await session.execute(
                     select(NewsItem.id).where(NewsItem.url == url)
@@ -197,13 +232,15 @@ class NewsFeedService:
                     return False
 
                 item = NewsItem(
-                    trading_symbol = symbol,
-                    headline       = headline[:500],
-                    summary        = (article.get("description") or "")[:1000],
-                    url            = url[:1000],
-                    source         = (article.get("source") or {}).get("name", "")[:100],
-                    published_at   = published_at,
-                    processed      = False,
+                    trading_symbol  = symbol,
+                    headline        = headline[:500],
+                    summary         = description[:1000],
+                    url             = url[:1000],
+                    source          = (article.get("source") or {}).get("name", "")[:100],
+                    published_at    = published_at,
+                    sentiment_score = sentiment_score,
+                    sentiment_label = sentiment_label,
+                    processed       = sentiment_score is not None,   # True once scored
                 )
                 try:
                     session.add(item)
@@ -232,7 +269,7 @@ class NewsFeedService:
         since = datetime.now(IST) - timedelta(hours=hours)
 
         try:
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("""
                         SELECT headline, source, published_at, sentiment_score

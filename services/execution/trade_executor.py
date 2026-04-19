@@ -160,22 +160,17 @@ class TradeExecutor:
         )
 
         # ── 8. Telegram notification ──────────────────────────────────────────
-        rr      = abs(decision.target - signal.price_at_signal) / abs(signal.price_at_signal - decision.stop_loss)
-        ai_note = f"\n🤖 AI: {ai_decision.confidence:.0%} | {ai_decision.reasoning[:80]}" if ai_decision.reasoning else ""
-        await get_notifier().signal_alert(
+        await get_notifier().trade_entry(
             symbol     = signal.trading_symbol,
-            signal     = signal.signal_type.value,
-            direction  = signal.direction.value,
-            confidence = signal.confidence,
-            timeframe  = signal.timeframe,
+            direction  = direction,
             price      = signal.price_at_signal,
-            notes=(
-                f"📥 Entry: ₹{signal.price_at_signal:.2f}\n"
-                f"🛡 Stop: ₹{decision.stop_loss:.2f}\n"
-                f"🎯 Target: ₹{decision.target:.2f}\n"
-                f"📦 Qty: {decision.position_size} | Risk: ₹{decision.risk_amount:.0f} | RR: {rr:.1f}x"
-                f"{ai_note}"
-            ),
+            quantity   = decision.position_size,
+            stop_loss  = decision.stop_loss,
+            target_1   = decision.target,
+            target_2   = None,
+            strategy   = signal.signal_type.value,
+            confidence = ai_decision.confidence,
+            broker     = broker.BROKER,
         )
 
         log.info(
@@ -205,7 +200,7 @@ class TradeExecutor:
         try:
             redis  = get_redis()
             regime = await redis.get("market:regime") or "UNKNOWN"
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 row = SignalRejectionLog(
                     trading_symbol   = signal.trading_symbol,
                     signal_type      = signal.signal_type.value,
@@ -242,6 +237,9 @@ class TradeExecutor:
         redis  = get_redis()
         regime = await redis.get("market:regime") or "UNKNOWN"
 
+        # Derive mode from timeframe: daily signals are swing, everything else intraday
+        mode_label = "SWING" if signal.timeframe in ("1day", "1week") else "INTRADAY"
+
         trade = Trade(
             id                  = trade_id,
             trading_symbol      = signal.trading_symbol,
@@ -249,7 +247,7 @@ class TradeExecutor:
             instrument_type     = "EQ",
             direction           = direction,
             strategy_name       = signal.signal_type.value,
-            strategy_mode       = "INTRADAY",
+            strategy_mode       = mode_label,
             broker              = broker_name,
             mode                = settings.app_env.value,
             entry_price         = signal.price_at_signal,
@@ -267,7 +265,7 @@ class TradeExecutor:
         )
 
         try:
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 session.add(trade)
                 await session.commit()
                 await session.refresh(trade)

@@ -120,9 +120,15 @@ Respond with JSON only."""
 
 # ─── Market Briefing Prompt ───────────────────────────────────────────────────
 
-MARKET_BRIEFING_SYSTEM = """You are a concise market analyst for an Indian equity trader.
-Summarise market conditions in 3-4 sentences. Focus on: overall trend, key risks today, and sectors to watch.
-Return plain text only — no markdown, no headers."""
+MARKET_BRIEFING_SYSTEM = """You are a concise market analyst for an Indian equity trading bot.
+Analyse market conditions and respond with a JSON object with exactly two fields:
+  "briefing": a 3-4 sentence plain text summary (no markdown) covering trend, key risks, sectors to watch
+  "macro_shock": true if there is a major macro event that warrants HIGH_VOLATILITY mode
+                 (war, terrorist attack, central bank emergency action, market circuit breaker, pandemic news)
+                 false otherwise
+
+Respond ONLY with valid JSON. Example:
+{"briefing": "Markets open cautiously...", "macro_shock": false}"""
 
 
 def build_market_briefing_prompt(
