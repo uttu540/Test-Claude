@@ -21,7 +21,7 @@ from sqlalchemy import text
 
 from config.settings import settings
 from database.connection import get_db_session
-from services.data_ingestion.nifty50_instruments import NIFTY50
+from services.data_ingestion.nifty500_instruments import NIFTY500
 
 log = structlog.get_logger(__name__)
 
@@ -93,7 +93,7 @@ class HistoricalSeeder:
             timeframes = ["1day"]   # Start with daily; intraday added after API key
 
         # Stocks + NIFTY 50 index (used for regime detection)
-        symbols = [sym for sym, _, _ in NIFTY50]
+        symbols = [sym for sym, _, _ in NIFTY500]
         index_symbols = [("NIFTY 50", "^NSEI")]   # (trading_symbol, yfinance_ticker)
 
         log.info("historical_seed.start", symbols=len(symbols), from_date=start_date, timeframes=timeframes)

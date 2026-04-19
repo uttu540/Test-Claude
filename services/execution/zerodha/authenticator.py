@@ -181,7 +181,7 @@ class ZerodhaAuthenticator:
         Fetch all NSE instrument tokens from Kite and cache in Redis.
         This maps trading_symbol → instrument_token (needed for WebSocket subscriptions).
         """
-        from services.data_ingestion.nifty50_instruments import NIFTY50, INDEX_INSTRUMENTS
+        from services.data_ingestion.nifty500_instruments import NIFTY500, INDEX_INSTRUMENTS
 
         self._kite.set_access_token(access_token)
         instruments = self._kite.instruments("NSE")
@@ -189,25 +189,25 @@ class ZerodhaAuthenticator:
         # Build symbol → token map
         token_map: dict[str, int] = {i["tradingsymbol"]: i["instrument_token"] for i in instruments}
 
-        # Filter to Nifty 50
-        nifty50_symbols = [sym for sym, _, _ in NIFTY50]
-        nifty50_tokens  = [token_map[sym] for sym in nifty50_symbols if sym in token_map]
+        # Filter to Nifty 500
+        nifty500_symbols = [sym for sym, _, _ in NIFTY500]
+        nifty500_tokens  = [token_map[sym] for sym in nifty500_symbols if sym in token_map]
 
         # Add index tokens
         index_tokens = [token for _, _, token in INDEX_INSTRUMENTS]
-        all_tokens   = list(set(nifty50_tokens + index_tokens))
+        all_tokens   = list(set(nifty500_tokens + index_tokens))
 
         redis = get_redis()
         await redis.setex(REDIS_TOKEN_MAP_KEY,      TOKEN_TTL_SECONDS, json.dumps(token_map))
         await redis.setex(REDIS_INSTRUMENTS_KEY,    TOKEN_TTL_SECONDS, json.dumps(all_tokens))
 
-        missing = [sym for sym in nifty50_symbols if sym not in token_map]
+        missing = [sym for sym in nifty500_symbols if sym not in token_map]
         if missing:
-            log.warning("zerodha_auth.missing_tokens", symbols=missing)
+            log.warning("zerodha_auth.missing_tokens", count=len(missing), symbols=missing[:20])
 
         log.info(
             "zerodha_auth.instruments_cached",
-            nifty50=len(nifty50_tokens),
+            nifty500=len(nifty500_tokens),
             total=len(all_tokens),
         )
 

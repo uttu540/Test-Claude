@@ -31,14 +31,14 @@ except ImportError:
 from config.settings import settings
 from database.connection import get_db_session
 from database.models import NewsItem
-from services.data_ingestion.nifty50_instruments import NIFTY50
+from services.data_ingestion.nifty500_instruments import NIFTY500
 
 log = structlog.get_logger(__name__)
 
 IST = ZoneInfo("Asia/Kolkata")
 
 # Map trading symbol → company name keywords for better news search
-SYMBOL_KEYWORDS: dict[str, str] = {sym: name for sym, name, _ in NIFTY50}
+SYMBOL_KEYWORDS: dict[str, str] = {sym: name for sym, name, _ in NIFTY500}
 
 # Batch size: how many symbols per NewsAPI query
 # Free tier = 100 req/day. 50 symbols ÷ 25 = 2 batches/cycle.
