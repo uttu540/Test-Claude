@@ -245,178 +245,98 @@ class ZerodhaFeed:
 
 class MockFeed:
     """
-    Generates realistic synthetic ticks for development.
+    Generates realistic synthetic ticks for development/paper trading.
     No Kite API key required.
-    Uses a random walk with mean reversion to simulate price movement.
-    Supports the full Nifty 500 universe — known prices seeded from
-    approximate April 2025 values; remaining symbols default to 500.0.
-    """
 
-    # Known seed prices (approximate April 2025 values, NSE)
-    _KNOWN_PRICES: dict[str, float] = {
-        # Nifty 50
-        "RELIANCE": 1280.0, "HDFCBANK": 1750.0, "ICICIBANK": 1320.0,
-        "INFY": 1580.0, "TCS": 3400.0, "HINDUNILVR": 2400.0,
-        "SBIN": 790.0, "BHARTIARTL": 1820.0, "ITC": 425.0,
-        "KOTAKBANK": 2050.0, "LT": 3300.0, "AXISBANK": 1120.0,
-        "HCLTECH": 1540.0, "WIPRO": 480.0, "SUNPHARMA": 1720.0,
-        "MARUTI": 11500.0, "BAJFINANCE": 8900.0, "TITAN": 3200.0,
-        "NTPC": 355.0, "ONGC": 275.0, "POWERGRID": 310.0,
-        "TECHM": 1320.0, "ASIANPAINT": 2200.0, "NESTLEIND": 2350.0,
-        "TATASTEEL": 155.0, "JSWSTEEL": 920.0, "HINDALCO": 660.0,
-        "TATAMOTORS": 720.0, "M&M": 2900.0, "BAJAJ-AUTO": 8800.0,
-        "HEROMOTOCO": 4300.0, "EICHERMOT": 4700.0, "DRREDDY": 1280.0,
-        "CIPLA": 1490.0, "DIVISLAB": 5200.0, "APOLLOHOSP": 6900.0,
-        "GRASIM": 2750.0, "ULTRACEMCO": 11800.0, "TATACONSUM": 930.0,
-        "BRITANNIA": 5100.0, "COALINDIA": 395.0, "BPCL": 310.0,
-        "HDFCLIFE": 630.0, "SBILIFE": 1620.0, "SHRIRAMFIN": 600.0,
-        "BAJAJFINSV": 1970.0, "INDUSINDBK": 1000.0, "ADANIPORTS": 1200.0,
-        "ADANIENT": 2350.0, "ETERNAL": 205.0,
-        # Nifty Next 50 (approximate)
-        "ABB": 5200.0, "AMBUJACEM": 620.0, "AUROPHARMA": 1100.0,
-        "BANKBARODA": 240.0, "BERGEPAINT": 530.0, "BOSCHLTD": 32000.0,
-        "CANBK": 110.0, "CHOLAFIN": 1200.0, "COLPAL": 2600.0,
-        "CUMMINSIND": 3200.0, "DLF": 820.0, "GODREJCP": 1100.0,
-        "GODREJPROP": 2200.0, "HAVELLS": 1700.0, "HINDZINC": 420.0,
-        "ICICIGI": 1700.0, "ICICIPRULI": 680.0, "IDFCFIRSTB": 70.0,
-        "IGL": 380.0, "INDUSTOWER": 330.0, "IOC": 165.0,
-        "IRCTC": 750.0, "LUPIN": 1700.0, "MARICO": 580.0,
-        "MCDOWELL-N": 1050.0, "MUTHOOTFIN": 1900.0, "NAUKRI": 6500.0,
-        "NHPC": 90.0, "NMDC": 220.0, "OFSS": 11500.0,
-        "PAGEIND": 40000.0, "PIDILITIND": 2900.0, "PIIND": 4000.0,
-        "PNB": 110.0, "RECLTD": 500.0, "SIEMENS": 7500.0,
-        "TRENT": 5000.0, "TORNTPHARM": 2800.0, "TVSMOTOR": 2400.0,
-        "UNIONBANK": 130.0, "UPL": 520.0, "VEDL": 430.0,
-        "VOLTAS": 1450.0, "ZYDUSLIFE": 950.0,
-        # Midcap (approximate)
-        "DMART": 4500.0, "LICI": 980.0, "MPHASIS": 2600.0,
-        "PERSISTENT": 5500.0, "COFORGE": 8000.0, "LTIM": 5500.0,
-        "LTTS": 5000.0, "TATAELXSI": 6500.0, "KPITTECH": 1500.0,
-        "POLYCAB": 5500.0, "DIXON": 14000.0, "SAIL": 145.0,
-        "JINDALSTEL": 900.0, "TATAPOWER": 400.0, "GAIL": 200.0,
-        "PFC": 470.0, "IRFC": 190.0, "HUDCO": 230.0,
-        "VBL": 600.0, "MAXHEALTH": 1000.0, "FORTIS": 620.0,
-        "JUBLFOOD": 650.0, "JUBILANT": 700.0, "FEDERALBNK": 190.0,
-        "BANDHANBNK": 185.0, "AUBANK": 600.0, "RBLBANK": 220.0,
-        "CUB": 175.0, "KARURVYSYA": 200.0, "INDIANB": 540.0,
-        "IDBI": 85.0, "IOB": 55.0, "PSB": 45.0,
-        "OBEROIRLTY": 1750.0, "PHOENIXLTD": 1700.0, "PRESTIGE": 1600.0,
-        "SOBHA": 1650.0, "BRIGADE": 950.0, "SUNTECK": 550.0,
-        "BSE": 4500.0, "CDSL": 1600.0, "ANGELONE": 2900.0,
-        "MOTILALOFS": 800.0, "ISEC": 700.0, "KFINTECH": 800.0,
-        "STAR": 600.0, "MFSL": 1000.0, "NIACL": 180.0,
-        "MRF": 125000.0, "CEATLTD": 2800.0, "BALKRISIND": 2700.0,
-        "AMARAJABAT": 800.0, "EXIDEIND": 450.0, "TATACHEM": 1050.0,
-        "DEEPAKNTR": 2200.0, "AARTIIND": 550.0, "VINATIORGA": 1900.0,
-        "NAVINFLUOR": 3500.0, "CLEAN": 1500.0, "LXCHEM": 330.0,
-        ("SOLARINDS"): 9000.0, "BHEL": 280.0, "BEL": 270.0,
-        "CONCOR": 850.0, "NMDC": 220.0, "MOIL": 350.0,
-        "NLCINDIA": 230.0, "SJVN": 120.0, "ADANIGREEN": 1800.0,
-        "ADANIPOWER": 550.0, "JSWENERGY": 550.0, "TORNTPOWER": 1600.0,
-        "SUZLON": 55.0, "INOXWIND": 190.0, "TATACOMM": 1750.0,
-        "SUNTV": 600.0, "ZEEL": 140.0, "NETWORK18": 90.0,
-        "TV18BRDCST": 55.0, "NAUKRI": 6500.0, "INDIAMART": 2800.0,
-        "JUSTDIAL": 950.0, "ROUTE": 1600.0, "TANLA": 1000.0,
-        "AFFLE": 1600.0, "MAPMYINDIA": 1500.0, "LATENTVIEW": 450.0,
-        "HAPPSTMNDS": 750.0, "MASTEK": 2500.0,
-        "ALKEM": 5000.0, "IPCA": 1450.0, "GLENMARK": 950.0,
-        "BIOCON": 330.0, "WOCKPHARMA": 650.0, "NATCOPHARM": 1000.0,
-        "GRANULES": 500.0, "IPCALAB": 1450.0, "LAURUSLABS": 450.0,
-        "SEQUENT": 80.0, "SOLARA": 500.0, "SPARC": 350.0,
-        "AJANTPHARM": 2500.0, "CAPLIPOINT": 900.0,
-        "METROPOLIS": 1700.0, "LALPATHLAB": 2100.0, "THYROCARE": 650.0,
-        "SYNGENE": 700.0, "MEDANTA": 1200.0,
-        "DELHIVERY": 400.0, "TEAMLEASE": 2800.0, "QUESS": 550.0,
-        "PVRINOX": 1500.0, "LEMONTREE": 130.0, "CHALET": 850.0,
-        "WONDERLA": 700.0, "MHRIL": 340.0,
-        "ASHOKLEY": 220.0, "ESCORTS": 3400.0, "MOTHERSON": 190.0,
-        "UNOMINDA": 950.0, "MINDACORP": 450.0, "SONACOMS": 600.0,
-        "BHARAT FORGE": 1300.0, "BHARATFORG": 1300.0, "TIINDIA": 3800.0,
-        "SUNDRMFAST": 1300.0, "CRAFTSMAN": 5500.0, "RKFORGE": 900.0,
-        "JBMA": 1700.0, "ENDURANCE": 2200.0, "VARROC": 600.0,
-        "GABRIEL": 220.0, "MAHINDCIE": 500.0, "PPAP": 190.0,
-        "PGIL": 450.0, "SUBROS": 330.0, "PARSONDES": 180.0,
-        "RAMCOCEM": 890.0, "DALBHARAT": 2100.0, "JKCEMENT": 4300.0,
-        "JKLAKSHMI": 820.0, "NUVOCO": 380.0, "STARCEMENT": 200.0,
-        "PRSMJOHNSN": 165.0, "ORIENTCEM": 185.0, "SHREDIGCEM": 175.0,
-        "SHREECEM": 24000.0, "AMBUJACEM": 620.0,
-        "CENTURYPLY": 650.0, "GREENPLY": 230.0, "ASTRAL": 1900.0,
-        "PRINCEPIPE": 700.0, "FINPIPE": 200.0,
-        "KAJARIACER": 1200.0, "CERA": 8000.0, "ORIENTELEC": 290.0,
-        "VGUARD": 450.0, "CROMPTON": 320.0, "HAVELLS": 1700.0,
-        "POLYCAB": 5500.0, "FINOLEX": 900.0,
-        "TITAGARH": 1200.0, "KALPATPOWR": 1200.0, "KPIL": 1200.0,
-        "KEC": 800.0, "IRB": 70.0, "HGINFRA": 1200.0,
-        "KNRCON": 700.0, "PATELENG": 60.0, "ITDCEM": 210.0,
-        "JKIL": 700.0, "NBCC": 130.0, "EIL": 185.0,
-        "SPMLINFRA": 50.0, "RAMKY": 135.0, "MNRE": 700.0,
-        "RATNAMANI": 3200.0, "WELCORP": 650.0, "MAHSEAMLES": 700.0,
-        "JSPL": 900.0, "SHYAMMETL": 600.0, "GPIL": 800.0,
-        "TINPLATE": 350.0, "TATASTLBSL": 120.0, "SUNFLAG": 290.0,
-        "HEG": 2000.0, "LLOYDSME": 700.0, "PCBL": 380.0,
-        "SAIL": 145.0, "NMDC": 220.0,
-        "GODREJAGRO": 700.0, "DHANUKA": 1000.0, "SHARDACROP": 600.0,
-        "INSECTICIDE": 650.0, "BAYERCROP": 5500.0, "SUMICHEM": 480.0,
-        "PIDILITIND": 2900.0, "ATUL": 7500.0, "VINATIORGA": 1900.0,
-        "DCMSHRIRAM": 1000.0, "GNFC": 650.0, "CHAMBLFERT": 350.0,
-        "FACT": 700.0, "EIDPARRY": 600.0, "KRBL": 350.0,
-        "BALRAMCHIN": 420.0, "VENKEYS": 1900.0, "TASTYB": 10000.0,
-        "TASTYBITE": 10000.0, "GODFRYPHLP": 5000.0, "VSTIND": 4000.0,
-        "RADICO": 1600.0, "MCDOWELL-N": 1050.0,
-        "EMAMILTD": 580.0, "MARICO": 580.0, "JYOTHYLAB": 360.0,
-        "SPENCERS": 130.0, "SHOPERSTOP": 700.0, "VMART": 2000.0,
-        "SAFARI": 2200.0, "VIPIND": 750.0, "TCNSBRANDS": 500.0,
-        "TRENT": 5000.0, "WESTLIFE": 850.0, "PVRINOX": 1500.0,
-        "DELTACORP": 200.0, "WONDERLA": 700.0,
-        "VBL": 600.0, "PATANJALI": 1600.0, "PGHH": 16000.0,
-        "COLPAL": 2600.0, "GODREJCP": 1100.0, "HINDUNILVR": 2400.0,
-        "CASTROLIND": 220.0, "GULFOILLUB": 800.0,
-        "OLECTRA": 1400.0, "JSWENERGY": 550.0, "SJVN": 120.0,
-        "TATAPOWER": 400.0, "TORNTPOWER": 1600.0, "SUZLON": 55.0,
-        "RPOWER": 25.0, "JPPOWER": 20.0, "INOXWIND": 190.0,
-        "SWSOLAR": 350.0,
-        "GESHIP": 1000.0, "CONCOR": 850.0, "BLUEDART": 7500.0,
-        "SNOWMAN": 80.0, "DELHIVERY": 400.0,
-        ("CGPOWER"): 700.0, "THERMAX": 3500.0, "CUMMINSIND": 3200.0,
-        "GRINDWELL": 2000.0, "SKF": 4500.0, "SKFINDIA": 4500.0,
-        "TIMKEN": 3300.0, "SCHAEFFLER": 3800.0, "KSB": 4000.0,
-        "ELGIEQUIP": 700.0, "ELECON": 550.0, "ACE": 250.0,
-        "ISGEC": 1100.0, "HARSHA": 600.0, "UNIPARTS": 500.0,
-        "PRAJIND": 600.0, "BEML": 4500.0, "MTAR": 1800.0,
-        "IDEAFORGE": 500.0, "KRISHNADEF": 650.0,
-        "SOLARINDS": 9000.0, "ZENTEC": 800.0,
-        "GMRINFRA": 80.0, "IRB": 70.0,
-    }
+    Seed prices fetched live from yfinance at startup in a single batch
+    call — every symbol gets a real current price, not a hardcoded guess.
+    Uses a mean-reverting random walk from that real price thereafter.
+    """
 
     def __init__(self, on_tick: Callable[[Tick], None], symbols: list[str] | None = None):
         self._on_tick = on_tick
-        # Build price dict from all N500 symbols; known prices seeded, rest default to 500
         from services.data_ingestion.nifty500_instruments import get_nifty500_symbols
-        universe = symbols or get_nifty500_symbols()
-        self._prices: dict[str, float] = {
-            sym: self._KNOWN_PRICES.get(sym, 500.0) for sym in universe
-        }
-        self._volumes: dict[str, int] = {s: 0 for s in self._prices}
+        self._universe: list[str] = symbols or get_nifty500_symbols()
+        # Populated in start() after yfinance fetch
+        self._seed_prices: dict[str, float] = {}
+        self._prices:      dict[str, float] = {}
+        self._volumes:     dict[str, int]   = {}
         self._running = False
 
     async def start(self) -> None:
+        self._seed_prices = await asyncio.get_event_loop().run_in_executor(
+            None, self._fetch_prices_yfinance
+        )
+        self._prices  = dict(self._seed_prices)
+        self._volumes = {s: 0 for s in self._prices}
         self._running = True
         log.info("mock_feed.start", mode="DEVELOPMENT", symbols=len(self._prices))
         asyncio.create_task(self._tick_loop())
 
+    def _fetch_prices_yfinance(self) -> dict[str, float]:
+        """
+        Batch-fetch latest close prices for all N500 symbols from yfinance.
+        Single network call using yf.download() — finishes in ~10s.
+        Falls back to 100.0 only if yfinance returns NaN for a symbol.
+        """
+        import yfinance as yf
+        import pandas as pd
+
+        tickers = [f"{sym}.NS" for sym in self._universe]
+        log.info("mock_feed.fetching_prices", count=len(tickers))
+
+        try:
+            # auto_adjust=True gives adjusted close; group_by="ticker" for multi-symbol
+            raw = yf.download(
+                tickers,
+                period="5d",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                threads=True,
+            )
+            # raw["Close"] is a DataFrame: rows=dates, cols="{sym}.NS"
+            close = raw["Close"]
+            if isinstance(close, pd.Series):
+                # Only one symbol returned as Series
+                close = close.to_frame(name=tickers[0])
+
+            latest = close.ffill().iloc[-1]   # last non-NaN close per symbol
+        except Exception as e:
+            log.error("mock_feed.yfinance_batch_error", error=str(e))
+            return {sym: 100.0 for sym in self._universe}
+
+        result: dict[str, float] = {}
+        missing = 0
+        for sym in self._universe:
+            col = f"{sym}.NS"
+            val = latest.get(col)
+            if val is not None and not pd.isna(val) and float(val) > 0:
+                result[sym] = round(float(val), 2)
+            else:
+                result[sym] = 100.0   # genuine fallback only for truly unknown tickers
+                missing += 1
+
+        log.info(
+            "mock_feed.prices_fetched",
+            fetched=len(result) - missing,
+            fallback=missing,
+            total=len(result),
+        )
+        return result
+
     async def _tick_loop(self) -> None:
-        token = 1000  # Fake token counter
-        symbol_tokens = {sym: token + i for i, sym in enumerate(self._prices)}
+        symbol_tokens = {sym: 1000 + i for i, sym in enumerate(self._prices)}
 
         while self._running:
             for sym, price in list(self._prices.items()):
-                # Random walk: ±0.05% per tick with mean reversion
-                seed_price = self._KNOWN_PRICES.get(sym, 500.0)
-                drift = (seed_price - price) * 0.0001   # mean reversion
-                noise = random.gauss(drift, price * 0.0005)
-                new_price = max(price + noise, price * 0.9)  # prevent extreme drops
+                seed_price = self._seed_prices[sym]
+                # Mean-reverting random walk: drift pulls price back toward seed
+                drift     = (seed_price - price) * 0.0001
+                noise     = random.gauss(drift, price * 0.0005)
+                new_price = max(price + noise, price * 0.9)
 
-                self._prices[sym] = round(new_price, 2)
+                self._prices[sym]  = round(new_price, 2)
                 self._volumes[sym] += random.randint(100, 2000)
 
                 tick = Tick(
@@ -426,10 +346,10 @@ class MockFeed:
                     volume           = self._volumes[sym],
                     buy_quantity     = random.randint(1000, 50000),
                     sell_quantity    = random.randint(1000, 50000),
-                    open             = self.SEED_PRICES[sym],
-                    high             = max(self.SEED_PRICES[sym], new_price),
-                    low              = min(self.SEED_PRICES[sym], new_price),
-                    close            = self.SEED_PRICES[sym],
+                    open             = seed_price,
+                    high             = max(seed_price, new_price),
+                    low              = min(seed_price, new_price),
+                    close            = seed_price,
                     change           = round((new_price - seed_price) / seed_price * 100, 2),
                 )
                 self._on_tick(tick)
