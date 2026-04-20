@@ -91,9 +91,15 @@ def _fetch_all_nse_symbols() -> list[str]:
     """
     Fetches the complete list of NSE-listed equities from NSE's public CSV.
     Falls back to the full NIFTY500 list if the download fails.
-    Filters out:
-      - SME/Emerge stocks (usually illiquid)
-      - Symbols with special characters beyond hyphen (warrants, DVRs etc.)
+
+    Filters applied here (universe-level, before any price data is loaded):
+      - EQ series ONLY: BE = T2T (no intraday), BZ = suspended/illiquid
+      - No special characters beyond hyphen (warrants, DVRs, rights shares)
+
+    Additional filters applied in MomentumBacktestEngine._backtest_symbol():
+      - Avg daily volume ≥ 1 lakh shares (liquidity gate)
+      - Avg closing price ≥ ₹20 (micro-cap penny stock filter)
+      - These are runtime filters because they need actual price data.
     """
     import re
     import io
@@ -110,15 +116,17 @@ def _fetch_all_nse_symbols() -> list[str]:
         reader = csv.DictReader(io.StringIO(resp.text))
         symbols = []
         for row in reader:
-            sym = (row.get("SYMBOL") or row.get("Symbol") or "").strip()
-            series = (row.get("SERIES") or row.get("Series") or "").strip()
-            if not sym or series not in ("EQ", "BE", "BZ", ""):
+            sym    = (row.get("SYMBOL") or row.get("Symbol") or "").strip()
+            # NSE CSV has a leading space in the SERIES column header
+            series = (row.get(" SERIES") or row.get("SERIES") or row.get("Series") or "").strip()
+            # EQ only: BE = Trade-to-Trade (no intraday), BZ = illiquid/suspended
+            if not sym or series != "EQ":
                 continue
-            # Skip symbols with spaces or weird chars; allow letters, digits, hyphen
+            # Skip symbols with spaces or weird chars; allow letters, digits, hyphen, &
             if not re.match(r'^[A-Z0-9&\-]+$', sym):
                 continue
             symbols.append(sym)
-        console.print(f"[dim]NSE universe: {len(symbols)} stocks[/dim]")
+        console.print(f"[dim]NSE EQ-series universe: {len(symbols)} stocks[/dim]")
         return symbols
     except Exception as e:
         console.print(f"[yellow]NSE fetch failed ({e}), falling back to Nifty 500[/yellow]")

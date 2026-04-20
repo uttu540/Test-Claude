@@ -338,6 +338,22 @@ class MomentumBacktestEngine:
             log.warning("momentum_bt.no_data", symbol=symbol)
             return []
 
+        # ── Liquidity + micro-cap filter ─────────────────────────────────────
+        # Applied on last 60 days of loaded data (recent liquidity matters more).
+        # Avg volume < 1 lakh/day = illiquid (wide spreads, slippage kills edge).
+        # Avg price < ₹20 = penny/micro-cap (manipulated, low float, unreliable).
+        _recent = df.tail(60)
+        _avg_vol   = float(_recent["volume"].mean()) if "volume" in _recent.columns else 0
+        _avg_price = float(_recent["close"].mean())  if "close"  in _recent.columns else 0
+        if _avg_vol < 100_000 or _avg_price < 20:
+            log.debug(
+                "momentum_bt.liquidity_skip",
+                symbol=symbol,
+                avg_vol=round(_avg_vol),
+                avg_price=round(_avg_price, 1),
+            )
+            return []
+
         # Pre-compute indicators once
         try:
             df = compute_all(df)
