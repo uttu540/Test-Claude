@@ -50,13 +50,14 @@ from services.momentum_engine.signals import (
 
 log = structlog.get_logger(__name__)
 
-# BREAKOUT_52W as standalone entry had 25% WR, ₹-25,972 in 2024 bull test —
-# buying AT new 52wk highs = chasing an extended move. Works better as
-# confluence booster when DARVAS_BREAKOUT also fires on the same bar.
-# Still detected by MomentumDetector so it boosts multi_signal score,
-# but cannot be the sole trigger.
+# Signals disabled as standalone entries (still detected for confluence scoring):
+#   BREAKOUT_52W: 25% WR, ₹-25,972 — buying at exact 52wk high = chasing extended move
+#   EMA_RIBBON:   23.1% WR, ₹-13,320 — EMA fan alone = too early, trend not confirmed
+# Both still boost multi_signal confluence when combined with DARVAS_BREAKOUT.
 _ENTRY_DISABLED: frozenset[MomentumSignalType] = frozenset({
     MomentumSignalType.BREAKOUT_52W,
+    MomentumSignalType.EMA_RIBBON,
+    MomentumSignalType.BULL_MOMENTUM,
 })
 
 # Max hold on daily TF: 20 trading days (~4 calendar weeks)
@@ -117,6 +118,7 @@ class MomentumBacktestEngine:
         end_date:             date,
         symbol_segments:      dict[str, str] | None = None,
         min_score:            int  = 8,    # Min confluence score to trade
+        max_score:            int  = 8,    # Max confluence score — above this = overextended
         min_confidence:       int  = 65,   # Min signal confidence to trade
         enable_sector_filter: bool = False,
     ) -> None:
@@ -125,16 +127,18 @@ class MomentumBacktestEngine:
         self._end             = end_date
         self._symbol_segments = symbol_segments or {}
         self._min_score       = min_score
+        self._max_score       = max_score
         self._min_confidence  = min_confidence
 
         self._detector = MomentumDetector()
 
         # Market-wide lookup tables (populated in run())
-        self._nifty_regime_by_date:      dict[date, str]  = {}   # TRENDING_UP/DOWN/RANGING
-        self._nifty_200ema_rising:       dict[date, bool] = {}
-        self._nifty_consec_up:           dict[date, int]  = {}   # consecutive TRENDING_UP days
-        self._midcap_regime_by_date:     dict[date, str]  = {}
-        self._smallcap_regime_by_date:   dict[date, str]  = {}
+        self._nifty_regime_by_date:      dict[date, str]   = {}   # TRENDING_UP/DOWN/RANGING
+        self._nifty_200ema_rising:       dict[date, bool]  = {}
+        self._nifty_consec_up:           dict[date, int]   = {}   # consecutive TRENDING_UP days
+        self._nifty_roc20_by_date:       dict[date, float] = {}   # 20-day ROC for RS calc
+        self._midcap_regime_by_date:     dict[date, str]   = {}
+        self._smallcap_regime_by_date:   dict[date, str]   = {}
 
         # Sector filter (opt-in)
         self._enable_sector_filter = enable_sector_filter
@@ -218,6 +222,14 @@ class MomentumBacktestEngine:
                     else:
                         consec = 0
                     self._nifty_consec_up[d] = consec
+
+                # Nifty 20-day ROC — used for relative strength calculation
+                # stock_roc20 - nifty_roc20 = how much the stock is outperforming
+                nifty_roc20 = (nifty_df["close"] / nifty_df["close"].shift(20) - 1) * 100
+                for ts, val in nifty_roc20.items():
+                    if not pd.isna(val):
+                        d = ts.date() if hasattr(ts, "date") else ts
+                        self._nifty_roc20_by_date[d] = round(float(val), 2)
 
                 log.info(
                     "momentum_bt.nifty_loaded",
@@ -338,6 +350,8 @@ class MomentumBacktestEngine:
         if trade_df.empty:
             return []
 
+        from dataclasses import replace as _dc_replace
+
         trades:     list[MomentumTrade] = []
         in_trade:   bool = False
         exit_after: int  = -1   # index in trade_df after which we're free
@@ -354,23 +368,41 @@ class MomentumBacktestEngine:
             candle_ts   = trade_df.index[i]
             candle_date = candle_ts.date() if hasattr(candle_ts, "date") else candle_ts
 
-            # ── Gate 1a: Nifty must be TRENDING_UP ───────────────────────────
-            nifty_regime = self._nifty_regime_by_date.get(candle_date)
-            if nifty_regime != "TRENDING_UP":
-                continue
+            nifty_regime = self._nifty_regime_by_date.get(candle_date, "UNKNOWN")
 
-            # ── Gate 1b: Nifty 200 EMA must still be rising ──────────────────
-            # ADX lags — EMA direction catches topping markets before ADX does.
-            # If 200 EMA has flattened/turned down, the trend is maturing; skip.
-            if not self._nifty_200ema_rising.get(candle_date, False):
+            # ── Gate 1: Regime + Relative Strength ───────────────────────────
+            # TRENDING_UP: fire freely (broad market tailwind).
+            # RANGING:     only fire if stock outperforms Nifty by ≥3% (20d ROC).
+            #              These are sector rotation plays: defense, sugar, capital
+            #              markets etc. making new highs while index is flat.
+            # TRENDING_DOWN: only fire if stock outperforms Nifty by ≥8% (20d ROC).
+            #              Exceptional relative strength = genuine sector leader.
+            # Firing on ALL stocks in RANGING/TRENDING_DOWN drowns good RS plays
+            # in noise — RS filter cuts 80%+ of bad entries while keeping the ones
+            # that actually have sector tailwind.
+            _nifty_roc20 = self._nifty_roc20_by_date.get(candle_date, 0.0)
+            _rs_threshold: float | None = None  # None = no RS check needed
+            if nifty_regime == "RANGING":
+                # RANGING market: too much noise even with RS filter (23% WR at RS>3%).
+                # Skip entirely — only fire in TRENDING_UP or clear sector leaders
+                # (TRENDING_DOWN with strong RS).
                 continue
+            elif nifty_regime == "TRENDING_DOWN":
+                # TRENDING_DOWN + strong RS: genuine sector rotation leaders
+                # (60% WR, avg +₹3,084 — exactly the defense/sugar/capital market plays)
+                _rs_threshold = 8.0
+            # TRENDING_UP and UNKNOWN: no RS threshold, proceed
 
-            # ── Gate 1c: Require ≥3 consecutive TRENDING_UP days ─────────────
-            # Blocks single ADX spikes at market tops while still catching
-            # signals within the breakout window (Darvas signals fire once —
-            # waiting 5 days risks the signal going stale before we enter).
-            if self._nifty_consec_up.get(candle_date, 0) < 3:
-                continue
+            # ── Nifty context: confidence penalties ───────────────────────────
+            _nifty_penalty = 0
+
+            # Penalty 1: Nifty 200 EMA not rising → late-stage or declining market
+            if not self._nifty_200ema_rising.get(candle_date, True):
+                _nifty_penalty += 10
+
+            # Penalty 2: fewer than 3 consecutive TRENDING_UP days → weak trend
+            if self._nifty_consec_up.get(candle_date, 3) < 3:
+                _nifty_penalty += 5
 
             # ── Gate 2: Segment-specific regime ──────────────────────────────
             if seg == "MID_CAP":
@@ -400,10 +432,30 @@ class MomentumBacktestEngine:
             if len(hist) < 60:
                 continue
 
+            # ── Gate 1 (cont): Relative strength check for RANGING/TRENDING_DOWN ──
+            # Computed here because we need the stock's price history.
+            if _rs_threshold is not None:
+                if len(hist) >= 21:
+                    _stock_roc20 = float(
+                        (hist["close"].iloc[-1] / hist["close"].iloc[-21] - 1) * 100
+                    )
+                else:
+                    _stock_roc20 = 0.0
+                _relative_strength = _stock_roc20 - _nifty_roc20
+                if _relative_strength < _rs_threshold:
+                    continue  # not outperforming enough — skip
+
             # ── Run momentum signal detection ─────────────────────────────────
             signals = self._detector.detect(hist, symbol)
             if not signals:
                 continue
+
+            # Apply Nifty context penalty before confidence filter
+            if _nifty_penalty > 0:
+                signals = [
+                    _dc_replace(s, confidence=max(0, s.confidence - _nifty_penalty))
+                    for s in signals
+                ]
 
             # Filter by min confidence
             signals = [s for s in signals if s.confidence >= self._min_confidence]
@@ -415,6 +467,13 @@ class MomentumBacktestEngine:
             if not confluence.passed or confluence.total < self._min_score:
                 log.debug(
                     "momentum_bt.confluence_failed",
+                    symbol=symbol, score=confluence.total,
+                    signals=[s.signal_type.value for s in signals],
+                )
+                continue
+            if confluence.total > self._max_score:
+                log.debug(
+                    "momentum_bt.confluence_overextended",
                     symbol=symbol, score=confluence.total,
                     signals=[s.signal_type.value for s in signals],
                 )
@@ -443,7 +502,6 @@ class MomentumBacktestEngine:
                         penalised_conf=penalised_conf,
                     )
                     continue
-                from dataclasses import replace as _dc_replace
                 top = _dc_replace(
                     top,
                     confidence = penalised_conf,
@@ -466,9 +524,22 @@ class MomentumBacktestEngine:
             entry_date = trade_df.index[next_idx]
             entry_date = entry_date.date() if hasattr(entry_date, "date") else entry_date
 
-            # ── Stop and target ───────────────────────────────────────────────
-            # Momentum longs: tight stop (1.5× ATR), wide target (7× ATR → 1:4.7)
-            stop_loss = round(entry_price - 1.5 * atr, 2)
+            # ── Stop, target and hold — regime-calibrated ────────────────────
+            # TRENDING_UP: tight stop (1.5× ATR), 20-day hold.
+            #   Broad market tailwind means less noise; tighter stop is fine.
+            # RANGING / TRENDING_DOWN (sector rotation play):
+            #   Wider stop (2.0× ATR) — stock goes against market, more intraday
+            #   noise even while the sector trend is intact. Tighter stop = whipsaw.
+            #   Longer hold (40 days) — sector rotation themes run for months,
+            #   not weeks. 20-day hold exits too early.
+            if nifty_regime == "TRENDING_UP":
+                _stop_atr_mult = 1.5
+                _trade_max_hold = MAX_HOLD_DAYS          # 20 days
+            else:
+                _stop_atr_mult  = 2.0
+                _trade_max_hold = 40                     # sector rotation hold
+
+            stop_loss = round(entry_price - _stop_atr_mult * atr, 2)
             target    = round(entry_price + 7.0 * atr, 2)
 
             # ── Position size (fixed risk per trade) ─────────────────────────
@@ -490,6 +561,7 @@ class MomentumBacktestEngine:
                 position_size = position_size,
                 future_df     = future,
                 nifty_regime  = nifty_regime,
+                max_hold      = _trade_max_hold,
                 top           = top,
                 confluence    = confluence,
             )
@@ -511,6 +583,7 @@ class MomentumBacktestEngine:
         position_size: int,
         future_df:     pd.DataFrame,
         nifty_regime:  str,
+        max_hold:      int,
         top,
         confluence,
     ) -> MomentumTrade | None:
@@ -552,7 +625,7 @@ class MomentumBacktestEngine:
                 break
 
             # Max hold
-            if hold >= MAX_HOLD_DAYS:
+            if hold >= max_hold:
                 exit_price  = c
                 exit_reason = "MAX_HOLD"
                 break

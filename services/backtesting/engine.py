@@ -621,6 +621,8 @@ class BacktestEngine:
             if self._regime_aligned_only and regime in ("RANGING", "UNKNOWN", "HIGH_VOLATILITY"):
                 continue
 
+            _regime_threshold_boost = 0   # default; overridden in long-only BULLISH block
+
             # ── Level 1: Market regime (Nifty) must agree with stock regime ───
             # If Nifty is trending up but this stock is trending down (or vice
             # versa), the stock is fighting the market — skip it entirely.
@@ -634,14 +636,9 @@ class BacktestEngine:
             if setup_bias is None:
                 continue
 
-            # ── P1: Hard gate — never short when Nifty 200 EMA is rising ─────
-            # A rising 200 EMA = Nifty is in a long-term bull phase.
-            # Individual stock shorts in a bull market fight the market tide and
-            # fail 63–69% of the time (vs 42–48% in bear phases). Skip them all.
+            # ── System is long-only: drop all BEARISH signals ────────────────
             if setup_bias == Direction.BEARISH:
-                nifty_200_rising = self._nifty_200ema_rising_by_date.get(candle_date)
-                if nifty_200_rising is True:
-                    continue
+                continue
 
             # ── Sector ROC gate (Phase 1 — opt-in via enable_sector_filter) ────
             # Rule:
@@ -673,15 +670,35 @@ class BacktestEngine:
             else:
                 _sector_headwind = False
 
-            # ── Long trades only in RANGING Nifty market ─────────────────────
-            # In TRENDING_UP: longs chase an extended market → 24% WR, ₹-ve
-            # In TRENDING_DOWN: longs fight the tape → 9-13% WR, ₹-ve
-            # In RANGING: bottoming/reversal patterns (DOUBLE_BOTTOM, HAMMER,
-            # MORNING_STAR) have real meaning at range lows → best long context.
+            # ── Long trades: allow across all regimes, stock-level check ─────
+            # System is long-only. BULLISH trades allowed in any Nifty regime.
+            # In RANGING / TRENDING_DOWN: stock must be in its own uptrend
+            # (above 200 EMA or positive EMA stack) — no Nifty tailwind, so
+            # the stock itself must carry the setup.
             if setup_bias == Direction.BULLISH:
                 _nifty_regime = self._market_regime_by_date.get(candle_date)
-                if _nifty_regime and _nifty_regime != "RANGING":
-                    continue
+
+                if _nifty_regime in ("RANGING", "TRENDING_DOWN"):
+                    _ind    = {}
+                    _ref_tf = self._setup_tf if self._setup_tf in snapshot else (
+                              "1day" if "1day" in snapshot else None)
+                    if _ref_tf:
+                        _last = snapshot[_ref_tf].iloc[-1]
+                        _ind  = {col: _last.get(col) for col in snapshot[_ref_tf].columns}
+                    _above_200 = bool(_ind.get("above_200ema", False))
+                    _ema_stack = int(_ind.get("ema_stack") or 0)
+                    if not (_above_200 or _ema_stack > 0):
+                        continue   # Stock not in own uptrend → skip
+
+                # Regime-based confidence threshold boost
+                _regime_threshold_boost = {
+                    "TRENDING_UP":   0,
+                    "RANGING":       5,
+                    "TRENDING_DOWN": 12,
+                    "UNKNOWN":       5,
+                }.get(_nifty_regime or "UNKNOWN", 5)
+            else:
+                _regime_threshold_boost = 0
 
             # ── Segment-specific regime gate ──────────────────────────────────
             # Nifty 50 can be trending up while midcap/smallcap indices are
@@ -806,7 +823,8 @@ class BacktestEngine:
                     notes           = (top.notes or "") + " | sector_headwind",
                 )
 
-            if top.confidence < self._min_confidence:
+            _effective_min_confidence = self._min_confidence + _regime_threshold_boost
+            if top.confidence < _effective_min_confidence:
                 continue
 
             # ── DCB intercept for BREAKOUT_LOW signals ────────────────────────

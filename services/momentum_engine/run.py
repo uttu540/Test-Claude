@@ -52,101 +52,101 @@ console = Console()
 # ── Universe ──────────────────────────────────────────────────────────────────
 
 def _get_universe(name: str) -> list[str]:
-    nifty50 = [
-        "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
-        "HINDUNILVR", "ITC", "SBIN", "BAJFINANCE", "BHARTIARTL",
-        "KOTAKBANK", "LT", "HCLTECH", "ASIANPAINT", "AXISBANK",
-        "MARUTI", "SUNPHARMA", "TITAN", "ULTRACEMCO", "NESTLEIND",
-        "WIPRO", "ONGC", "NTPC", "POWERGRID", "COALINDIA",
-        "TATAMOTORS", "TATASTEEL", "JSWSTEEL", "ADANIENT", "ADANIPORTS",
-        "BAJAJFINSV", "BAJAJ-AUTO", "HEROMOTOCO", "EICHERMOT", "M&M",
-        "CIPLA", "DRREDDY", "DIVISLAB", "APOLLOHOSP", "HDFCLIFE",
-        "SBILIFE", "ICICIPRULI", "TECHM", "INDUSINDBK", "GRASIM",
-        "HINDALCO", "VEDL", "BPCL", "IOC", "UPL",
-    ]
+    """
+    nifty50   — Nifty 50 from nifty500_instruments.py
+    nifty500  — Full 493-stock real Nifty 500 from nifty500_instruments.py
+    all_nse   — Every equity listed on NSE, fetched live from NSE's public CSV
+                (~1,800–2,000 stocks). Use for backtests only.
+    """
+    from services.data_ingestion.nifty500_instruments import NIFTY500
+
+    # Nifty 50: first 50 entries in NIFTY500 (sorted by index membership)
+    nifty50_syms = [sym for sym, _, _ in NIFTY500 if
+                    any(sym == s for s in [
+                        "ADANIENT","ADANIPORTS","APOLLOHOSP","ASIANPAINT","AXISBANK",
+                        "BAJAJ-AUTO","BAJAJFINSV","BAJFINANCE","BHARTIARTL","BPCL",
+                        "BRITANNIA","CIPLA","COALINDIA","DIVISLAB","DRREDDY",
+                        "EICHERMOT","GRASIM","HCLTECH","HDFCBANK","HDFCLIFE",
+                        "HEROMOTOCO","HINDALCO","HINDUNILVR","ICICIBANK","INDUSINDBK",
+                        "INFY","IOC","ITC","JSWSTEEL","KOTAKBANK",
+                        "LT","M&M","MARUTI","NESTLEIND","NTPC",
+                        "ONGC","POWERGRID","RELIANCE","SBILIFE","SBIN",
+                        "SUNPHARMA","TATAMOTORS","TATASTEEL","TCS","TECHM",
+                        "TITAN","ULTRACEMCO","UPL","VEDL","WIPRO",
+                    ])]
+
     if name == "nifty50":
-        return nifty50
+        return nifty50_syms
 
     if name == "nifty500":
-        midcap = [
-            "MUTHOOTFIN", "CHOLAFIN", "BAJAJHLDNG", "SUNDARMFIN", "LICHSGFIN",
-            "MANAPPURAM", "PNBHOUSING", "AAVAS", "HOMEFIRST", "CREDITACC",
-            "NAUKRI", "PERSISTENT", "LTTS", "COFORGE", "MPHASIS",
-            "TATATECH", "KPITTECH", "ZENSARTECH", "MASTEK", "SONATSOFTW",
-            "ALKEM", "LALPATHLAB", "METROPOLIS", "IPCALAB", "JBCHEPHARM",
-            "SYNGENE", "GRANULES", "GLAND", "NATCOPHARM", "ERIS",
-            "TATACONSUM", "GODREJCP", "MARICO", "DABUR", "EMAMILTD",
-            "COLPAL", "PGHH", "VBL", "RADICO", "PATANJALI",
-            "SIEMENS", "ABB", "HAVELLS", "VOLTAS", "CUMMINSIND",
-            "THERMAX", "BHEL", "GRINDWELL", "SCHAEFFLER", "TIMKEN",
-            "MOTHERSON", "EXIDEIND", "AMARAJABAT", "SUNDRMFAST", "ENDURANCE",
-            "SUBROS", "SUPRAJIT", "GABRIEL", "MINDA", "BORORENEW",
-            "OBEROIRLTY", "PRESTIGE", "GODREJPROP", "SOBHA", "BRIGADE",
-            "PHOENIXLTD", "NESCO", "MAHSEAMLES", "CAPACITE", "KNRCON",
-            "PIDILITIND", "BERGEPAINT", "KANSAINER", "AKZOINDIA", "VINATIORGA",
-            "DEEPAKNTR", "NAVINFLUOR", "AARTI", "SUDARSCHEM", "FINEORG",
-            "IRCTC", "DMART", "NYKAA", "ZOMATO", "JUBLFOOD",
-            "WESTLIFE", "SAPPHIRE", "DEVYANI", "BARBEQUE", "EIDPARRY",
-            "CESC", "TORNTPOWER", "JSWENERGY", "GREENPANEL", "RPOWER",
-            "TATAPOWER", "ADANIGREEN", "ADANITRANS", "NHPC", "SJVN",
-        ]
-        smallcap = [
-            "UJJIVANSFB", "EQUITASBNK", "SURYODAY", "ESAFSFB", "UTKARSHBNK",
-            "PAISALO", "IIFL", "MOTILALOS", "ANGELONE", "5PAISA",
-            "RATEGAIN", "TANLA", "INTELLECT", "NEWGEN", "NUCLEUS",
-            "SAKSOFT", "DATAMATICS", "VAKRANGEE", "INFOBEAN", "CYIENT",
-            "SUVEN", "SOLARA", "SEQUENT", "LAURUS", "NUVOCO",
-            "MARKSANS", "SHILPAMED", "POLYMED", "MEDICAMEN", "BLISSGVS",
-            "BEL", "HAL", "BEML", "MTAR", "PARAS",
-            "DATAPATTNS", "ASTRALDTEX", "GREAVESCOT", "ELGIEQUIP", "KALYANKJIL",
-            "PAGEIND", "GOKEX", "RUPA", "NIITLTD", "GARFIBRES",
-            "KRBL", "LTFOODS", "AVANTIFEED", "APEX", "GLOBUSSPR",
-        ]
-        return nifty50 + midcap + smallcap
+        return [sym for sym, _, _ in NIFTY500]
+
+    if name == "all_nse":
+        return _fetch_all_nse_symbols()
 
     return []
 
 
-def _get_segments() -> dict[str, str]:
+def _fetch_all_nse_symbols() -> list[str]:
+    """
+    Fetches the complete list of NSE-listed equities from NSE's public CSV.
+    Falls back to the full NIFTY500 list if the download fails.
+    Filters out:
+      - SME/Emerge stocks (usually illiquid)
+      - Symbols with special characters beyond hyphen (warrants, DVRs etc.)
+    """
+    import re
+    import io
+    try:
+        import requests
+        console.print("[dim]Fetching full NSE equity list...[/dim]")
+        resp = requests.get(
+            "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        import csv
+        reader = csv.DictReader(io.StringIO(resp.text))
+        symbols = []
+        for row in reader:
+            sym = (row.get("SYMBOL") or row.get("Symbol") or "").strip()
+            series = (row.get("SERIES") or row.get("Series") or "").strip()
+            if not sym or series not in ("EQ", "BE", "BZ", ""):
+                continue
+            # Skip symbols with spaces or weird chars; allow letters, digits, hyphen
+            if not re.match(r'^[A-Z0-9&\-]+$', sym):
+                continue
+            symbols.append(sym)
+        console.print(f"[dim]NSE universe: {len(symbols)} stocks[/dim]")
+        return symbols
+    except Exception as e:
+        console.print(f"[yellow]NSE fetch failed ({e}), falling back to Nifty 500[/yellow]")
+        from services.data_ingestion.nifty500_instruments import NIFTY500
+        return [sym for sym, _, _ in NIFTY500]
+
+
+def _get_segments(symbols: list[str]) -> dict[str, str]:
+    """
+    Derive segment from NIFTY500 metadata where available.
+    Anything not in NIFTY500 gets SMALL_CAP (conservative default).
+    """
+    from services.data_ingestion.nifty500_instruments import NIFTY500
+
+    nifty50_set = set(_get_universe("nifty50"))
+    # Nifty Next 50 = positions 51-100 in NIFTY500 (approx large cap extension)
+    nifty500_syms = [sym for sym, _, _ in NIFTY500]
+    nifty_next50  = set(nifty500_syms[50:100])
+    midcap_set    = set(nifty500_syms[100:350])
+
     mapping: dict[str, str] = {}
-    for sym in _get_universe("nifty50"):
-        mapping[sym] = "LARGE_CAP"
-    for sym in [
-        "MUTHOOTFIN", "CHOLAFIN", "BAJAJHLDNG", "SUNDARMFIN", "LICHSGFIN",
-        "MANAPPURAM", "PNBHOUSING", "AAVAS", "HOMEFIRST", "CREDITACC",
-        "NAUKRI", "PERSISTENT", "LTTS", "COFORGE", "MPHASIS",
-        "TATATECH", "KPITTECH", "ZENSARTECH", "MASTEK", "SONATSOFTW",
-        "ALKEM", "LALPATHLAB", "METROPOLIS", "IPCALAB", "JBCHEPHARM",
-        "SYNGENE", "GRANULES", "GLAND", "NATCOPHARM", "ERIS",
-        "TATACONSUM", "GODREJCP", "MARICO", "DABUR", "EMAMILTD",
-        "COLPAL", "PGHH", "VBL", "RADICO", "PATANJALI",
-        "SIEMENS", "ABB", "HAVELLS", "VOLTAS", "CUMMINSIND",
-        "THERMAX", "BHEL", "GRINDWELL", "SCHAEFFLER", "TIMKEN",
-        "MOTHERSON", "EXIDEIND", "AMARAJABAT", "SUNDRMFAST", "ENDURANCE",
-        "SUBROS", "SUPRAJIT", "GABRIEL", "MINDA", "BORORENEW",
-        "OBEROIRLTY", "PRESTIGE", "GODREJPROP", "SOBHA", "BRIGADE",
-        "PHOENIXLTD", "NESCO", "MAHSEAMLES", "CAPACITE", "KNRCON",
-        "PIDILITIND", "BERGEPAINT", "KANSAINER", "AKZOINDIA", "VINATIORGA",
-        "DEEPAKNTR", "NAVINFLUOR", "AARTI", "SUDARSCHEM", "FINEORG",
-        "IRCTC", "DMART", "NYKAA", "ZOMATO", "JUBLFOOD",
-        "WESTLIFE", "SAPPHIRE", "DEVYANI", "BARBEQUE", "EIDPARRY",
-        "CESC", "TORNTPOWER", "JSWENERGY", "GREENPANEL", "RPOWER",
-        "TATAPOWER", "ADANIGREEN", "ADANITRANS", "NHPC", "SJVN",
-    ]:
-        mapping[sym] = "MID_CAP"
-    for sym in [
-        "UJJIVANSFB", "EQUITASBNK", "SURYODAY", "ESAFSFB", "UTKARSHBNK",
-        "PAISALO", "IIFL", "MOTILALOS", "ANGELONE", "5PAISA",
-        "RATEGAIN", "TANLA", "INTELLECT", "NEWGEN", "NUCLEUS",
-        "SAKSOFT", "DATAMATICS", "VAKRANGEE", "INFOBEAN", "CYIENT",
-        "SUVEN", "SOLARA", "SEQUENT", "LAURUS", "NUVOCO",
-        "MARKSANS", "SHILPAMED", "POLYMED", "MEDICAMEN", "BLISSGVS",
-        "BEL", "HAL", "BEML", "MTAR", "PARAS",
-        "DATAPATTNS", "ASTRALDTEX", "GREAVESCOT", "ELGIEQUIP", "KALYANKJIL",
-        "PAGEIND", "GOKEX", "RUPA", "NIITLTD", "GARFIBRES",
-        "KRBL", "LTFOODS", "AVANTIFEED", "APEX", "GLOBUSSPR",
-    ]:
-        mapping[sym] = "SMALL_CAP"
+    for sym in symbols:
+        if sym in nifty50_set or sym in nifty_next50:
+            mapping[sym] = "LARGE_CAP"
+        elif sym in midcap_set:
+            mapping[sym] = "MID_CAP"
+        else:
+            mapping[sym] = "SMALL_CAP"
     return mapping
 
 
@@ -259,6 +259,35 @@ def _print_report(trades: list[MomentumTrade], start: date, end: date, n_symbols
         )
     console.print(ct)
 
+    # By regime
+    console.print()
+    console.rule("[dim]By Nifty Regime[/dim]")
+    by_regime: dict[str, list] = {}
+    for t in trades:
+        by_regime.setdefault(t.regime, []).append(t)
+
+    rt = Table(box=None, padding=(0, 2))
+    rt.add_column("Regime",   style="bold")
+    rt.add_column("Trades",   justify="right")
+    rt.add_column("Win Rate", justify="right")
+    rt.add_column("Net P&L",  justify="right")
+    rt.add_column("Avg P&L",  justify="right")
+
+    for reg, grp in sorted(by_regime.items(), key=lambda x: -sum(t.pnl for t in x[1])):
+        g_pnls = [t.pnl for t in grp]
+        g_wr   = len([t for t in grp if t.pnl > 0]) / len(grp)
+        g_net  = sum(g_pnls)
+        wr_col = "green" if g_wr >= 0.5 else "red"
+        pn_col = "green" if g_net >= 0 else "red"
+        rt.add_row(
+            reg,
+            str(len(grp)),
+            f"[{wr_col}]{g_wr:.1%}[/{wr_col}]",
+            f"[{pn_col}]₹{g_net:,.0f}[/{pn_col}]",
+            f"₹{np.mean(g_pnls):,.0f}",
+        )
+    console.print(rt)
+
     # Exit reasons
     console.print()
     console.rule("[dim]Exit Reasons[/dim]")
@@ -301,6 +330,7 @@ def _save_json(
                 "pnl_pct":          t.pnl_pct,
                 "holding_days":     t.holding_days,
                 "confluence_score": t.confluence_score,
+                "regime":           t.regime,
                 "rvol":             t.rvol,
                 "rsi":              t.rsi,
                 "adx":              t.adx,
@@ -322,7 +352,7 @@ def _parse_args() -> argparse.Namespace:
         description = "Momentum engine backtest — long-only, TRENDING_UP markets.",
     )
     p.add_argument("--symbols",   nargs="+", metavar="SYM")
-    p.add_argument("--universe",  default="nifty50", choices=["nifty50", "nifty500"])
+    p.add_argument("--universe",  default="nifty50", choices=["nifty50", "nifty500", "all_nse"])
     p.add_argument("--days",      type=int, default=90)
     p.add_argument("--start",     type=str)
     p.add_argument("--end",       type=str, default=date.today().isoformat())
@@ -346,7 +376,7 @@ async def main() -> None:
         console.print("[red]No symbols. Use --symbols or --universe.[/red]")
         sys.exit(1)
 
-    seg_map = _get_segments() if not args.symbols else None
+    seg_map = _get_segments(symbols) if not args.symbols else None
 
     end_date   = date.fromisoformat(args.end)
     start_date = (

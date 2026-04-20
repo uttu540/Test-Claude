@@ -40,10 +40,8 @@ from services.execution.trade_lifecycle import get_lifecycle_manager
 from services.market_regime.detector import get_regime_detector
 from services.notifications.telegram_bot import get_notifier
 from services.execution.trade_executor import TradeExecutor
-from services.technical_engine.signal_generator import (
-    MultiTimeframeSignalEngine,
-    Signal,
-)
+from services.technical_engine.signal_generator import Signal
+# MultiTimeframeSignalEngine (swing engine) — preserved but not used in live routing
 
 # ─── Logging Setup ────────────────────────────────────────────────────────────
 
@@ -214,9 +212,21 @@ async def _run_signals(symbol: str) -> None:
                 await redis.setex(
                     "momentum:nifty_consec_up", 48 * 3600, str(_consec),
                 )
+
+                # RS gate: Nifty 20-day ROC for relative strength calculations
+                # stock_roc20 - this value = how much the stock is outperforming
+                _nifty_roc20 = 0.0
+                if "close" in _nifty_df.columns and len(_nifty_df) >= 21:
+                    _cl = _nifty_df["close"].dropna()
+                    if len(_cl) >= 21:
+                        _nifty_roc20 = float((_cl.iloc[-1] / _cl.iloc[-21] - 1) * 100)
+                await redis.setex(
+                    "momentum:nifty_roc20", 48 * 3600, str(round(_nifty_roc20, 2)),
+                )
                 log.debug(
                     "momentum.nifty_context_updated",
                     ema200_rising=_ema200_rising, consec_up=_consec,
+                    nifty_roc20=round(_nifty_roc20, 2),
                 )
             except Exception as _e:
                 log.warning("momentum.nifty_context_error", error=str(_e))
@@ -239,19 +249,28 @@ async def _run_signals(symbol: str) -> None:
                 pass
 
         # ── Regime-gated engine routing ───────────────────────────────────────
+        #
+        # Strategy: LONG-ONLY, momentum engine only (swing engine code preserved).
+        #
+        # Regime handling is done inside MomentumLiveEngine.detect():
+        #   HIGH_VOLATILITY  → hard block here (VIX > 20 or macro shock)
+        #   TRENDING_UP      → fire freely
+        #   RANGING          → blocked (23% WR even with RS filter — too noisy)
+        #   TRENDING_DOWN    → fire only if stock RS > Nifty 20d ROC by ≥8%
+        #                      (sector rotation leaders — defense, PSU, sugar etc.)
+        #   UNKNOWN          → treated same as TRENDING_UP
+        #
         signals = []
 
-        # Signals with no standalone directional edge — backed by backtest data:
-        # HIGH_RVOL: 26.2% WR, ₹-8,467 | BULL_FLAG: 0% WR | BEAR_FLAG: 16.7% WR
-        # SHOOTING_STAR: 9.1% WR, ₹-3,561 | ENGULFING_BULL: 25-27% WR
-        _DISABLED_AS_ENTRY = frozenset({
-            "HIGH_RVOL", "BULL_FLAG", "BEAR_FLAG", "SHOOTING_STAR", "ENGULFING_BULL",
-        })
+        if regime == "HIGH_VOLATILITY":
+            log.info("signal.blocked_high_volatility", symbol=symbol)
+            return
+
         # Signals that only make sense intraday (VWAP resets daily, ORB is 9:15-9:30)
         _INTRADAY_ONLY = frozenset({"VWAP_RECLAIM", "ORB_BREAKOUT"})
 
-        if regime == "TRENDING_UP" and "1day" in ohlcv_by_tf:
-            # Momentum engine: long-only, daily TF, Darvas/52wk/EMA ribbon signals
+        # Momentum engine — regime/RS logic handled inside MomentumLiveEngine
+        if "1day" in ohlcv_by_tf:
             momentum_engine = MomentumLiveEngine()
             signals = await momentum_engine.detect(
                 symbol   = symbol,
@@ -259,17 +278,9 @@ async def _run_signals(symbol: str) -> None:
                 regime   = regime,
                 redis    = redis,
             )
-            signals = [s for s in signals if s.signal_type.value not in _DISABLED_AS_ENTRY]
-            if not signals:
-                # Momentum found nothing — fall back to swing for any valid long setups
-                swing_engine = MultiTimeframeSignalEngine(config=cfg)
-                signals = swing_engine.analyse(symbol, ohlcv_by_tf, regime=regime)
-                signals = [s for s in signals if s.signal_type.value not in _DISABLED_AS_ENTRY]
-        else:
-            # TRENDING_DOWN / RANGING / UNKNOWN → swing engine
-            swing_engine = MultiTimeframeSignalEngine(config=cfg)
-            signals = swing_engine.analyse(symbol, ohlcv_by_tf, regime=regime)
-            signals = [s for s in signals if s.signal_type.value not in _DISABLED_AS_ENTRY]
+
+        # Long-only: short-side code preserved but disabled from paper/live
+        signals = [s for s in signals if s.direction.value == "BULLISH"]
 
         if not signals:
             log.info("signal.none", symbol=symbol, regime=regime, timeframes=list(ohlcv_by_tf.keys()))

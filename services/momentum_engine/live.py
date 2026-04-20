@@ -7,17 +7,20 @@ Converts MomentumSignal → Signal so TradeExecutor can handle it
 without any changes to detection logic, scoring, or R:R.
 
 Key design:
-  - Only fires when Nifty regime = TRENDING_UP (same gate as backtest)
   - Daily TF only — reads "1day" candle buffer
   - One signal per symbol per calendar day (Redis cooldown key prevents
     the same Darvas setup firing on every 15min trigger throughout the day)
   - compute_all() called here, same as backtest engine does before detect()
 
+Regime logic (RS-based):
+  - TRENDING_UP   → fire freely
+  - RANGING       → require stock RS > Nifty by ≥3% (20d ROC) — sector rotation
+  - TRENDING_DOWN → require stock RS > Nifty by ≥8% (20d ROC) — strong sector leader
+
 Nothing in MomentumDetector is changed. This is a pure translation layer.
 """
 from __future__ import annotations
 
-import asyncio
 from datetime import date
 
 import pandas as pd
@@ -31,6 +34,15 @@ log = structlog.get_logger(__name__)
 
 # Minimum daily candles needed for reliable indicator warm-up
 MIN_DAILY_BARS = 60
+
+# Regime behaviour:
+#   TRENDING_UP   → fire freely
+#   RANGING       → skip (too noisy even with RS filter — 23% WR empirically)
+#   TRENDING_DOWN → require RS ≥ 8% vs Nifty 20d ROC (genuine sector leaders only)
+_RS_THRESHOLD = {
+    "TRENDING_DOWN": 8.0,
+}
+_REGIME_BLOCKED = {"RANGING"}
 
 
 class MomentumLiveEngine:
@@ -54,40 +66,54 @@ class MomentumLiveEngine:
     ) -> list[Signal]:
         """
         Run momentum detection on the latest daily candle.
+
         Returns [] immediately if:
-          - regime != TRENDING_UP
           - not enough daily history
           - already fired for this symbol today (cooldown)
+          - regime is RANGING/TRENDING_DOWN and stock doesn't have sufficient
+            relative strength vs Nifty (sector rotation filter)
         """
-        if regime != "TRENDING_UP":
-            return []
-
-        # ── Gate 1b: Nifty 200 EMA must be rising ────────────────────────────
-        # Catches late-stage bull tops where ADX is still elevated but EMA has
-        # flattened. Stored in Redis by main.py each time Nifty daily bar closes.
-        # If key is absent (startup / first day) we skip the gate — don't block.
-        _ema200_raw = await redis.get("momentum:nifty_200ema_rising")
-        if _ema200_raw is not None and str(_ema200_raw) == "0":
-            log.debug("momentum_live.gate1b_blocked", symbol=symbol,
-                      reason="nifty_200ema_not_rising")
-            return []
-
-        # ── Gate 1c: 3+ consecutive TRENDING_UP days ─────────────────────────
-        # Prevents entries on day-1 of a new ADX spike that may be a false start.
-        # Stored in Redis by main.py alongside the 200 EMA key.
-        _consec_raw = await redis.get("momentum:nifty_consec_up")
-        if _consec_raw is not None:
-            try:
-                if int(_consec_raw) < 3:
-                    log.debug("momentum_live.gate1c_blocked", symbol=symbol,
-                              consec=int(_consec_raw))
-                    return []
-            except ValueError:
-                pass
-
         if len(daily_df) < MIN_DAILY_BARS:
             log.debug("momentum_live.insufficient_bars", symbol=symbol, bars=len(daily_df))
             return []
+
+        # ── Gate 1: Regime filter ─────────────────────────────────────────────
+        # TRENDING_UP: fire freely.
+        # RANGING: skip — too noisy even with RS filter (23% WR empirically).
+        # TRENDING_DOWN: only fire if stock has strong relative strength (RS ≥ 8%)
+        #   — these are genuine sector rotation leaders (defense, sugar etc.)
+        if regime in _REGIME_BLOCKED:
+            log.debug("momentum_live.regime_blocked", symbol=symbol, regime=regime)
+            return []
+
+        rs_threshold = _RS_THRESHOLD.get(regime)  # None = TRENDING_UP / UNKNOWN
+        if rs_threshold is not None:
+            nifty_roc20_raw = await redis.get("momentum:nifty_roc20")
+            nifty_roc20 = 0.0
+            if nifty_roc20_raw is not None:
+                try:
+                    nifty_roc20 = float(nifty_roc20_raw)
+                except ValueError:
+                    pass
+
+            # Stock 20-day ROC from the last 21 bars of daily_df
+            if len(daily_df) >= 21:
+                closes = daily_df["close"] if "close" in daily_df.columns else daily_df["Close"]
+                stock_roc20 = float((closes.iloc[-1] / closes.iloc[-21] - 1) * 100)
+            else:
+                stock_roc20 = 0.0
+
+            relative_strength = stock_roc20 - nifty_roc20
+            if relative_strength < rs_threshold:
+                log.debug(
+                    "momentum_live.rs_skip",
+                    symbol=symbol, regime=regime,
+                    stock_roc20=round(stock_roc20, 1),
+                    nifty_roc20=round(nifty_roc20, 1),
+                    rs=round(relative_strength, 1),
+                    threshold=rs_threshold,
+                )
+                return []
 
         # Per-symbol, per-day cooldown — prevents same setup re-firing every 15min
         cooldown_key = f"momentum_live:fired:{symbol}:{date.today().isoformat()}"
@@ -120,7 +146,7 @@ class MomentumLiveEngine:
         # Set cooldown for today so this symbol doesn't re-fire until tomorrow
         await redis.setex(cooldown_key, 86_400, "1")
 
-        # Convert MomentumSignal → Signal (format translation only)
+        # Convert MomentumSignal → Signal
         live_signals: list[Signal] = []
         for ms in momentum_signals:
             try:
@@ -154,6 +180,7 @@ class MomentumLiveEngine:
             log.info(
                 "momentum_live.signal",
                 symbol     = symbol,
+                regime     = regime,
                 signal     = signal_type.value,
                 confidence = ms.confidence,
                 price      = ms.price,

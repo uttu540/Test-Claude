@@ -116,7 +116,8 @@ _REGIME_ALLOWED: dict[str, set[str] | None] = {
         "HIGH_RVOL", "BB_EXPANSION", "ABOVE_200_EMA",
         "ORB_BREAKOUT", "VWAP_RECLAIM",
         # Candlestick continuation / momentum
-        "HAMMER", "ENGULFING_BULL", "MORNING_STAR",
+        # MORNING_STAR removed — 3-candle bearish reversal has no edge in uptrend
+        "HAMMER", "ENGULFING_BULL",
         # Chart patterns
         "DOUBLE_BOTTOM", "BULL_FLAG", "DARVAS_BREAKOUT", "NR7_SETUP",
     },
@@ -284,12 +285,16 @@ class SignalDetector:
         rvol        = latest.get("rvol", 1.0)
 
         # ── Breakout above 20-period high ────────────────────────────────────
+        # Daily TF only — 20-bar high on 15min = 5 hours, not meaningful resistance.
+        # On 1day the 20-bar high = 4-week swing high = real structural level.
         # Requirements (all mandatory — any failure blocks the signal):
-        #   1. RVOL ≥ 2.0×  — real breakouts need institutional volume
-        #   2. ATR contracting — price was coiling before the break
-        #   3. Near 52-week high (within 20%) — breakout at a meaningful level
-        #   4. Tight 10-bar base (range < 3× ATR) — consolidation, not a trend day
-        if price > recent_high:
+        #   1. Daily TF only
+        #   2. RVOL ≥ 2.0×  — real breakouts need institutional volume
+        #   3. ATR contracting AND tight base — both required (AND not OR)
+        #   4. Near 52-week high (within 20%) — breakout at a meaningful level
+        if tf != "1day":
+            pass   # BREAKOUT_HIGH only valid on daily timeframe
+        elif price > recent_high:
             atr_key = f"atr_{self._cfg.atr_period}"
             atr_val = latest.get(atr_key) or latest.get("atr_14", 0) or 0
 
@@ -315,8 +320,9 @@ class SignalDetector:
                     range_10 = df["high"].iloc[-11:-1].max() - df["low"].iloc[-11:-1].min()
                     tight_base = range_10 < 3.0 * atr_val
 
-                # Need ATR contraction OR (near 52w high AND tight base)
-                quality = atr_contracting or (near_52w and tight_base)
+                # Require BOTH ATR contraction AND tight base (removed the OR loophole —
+                # near_52w alone was letting too many noise breakouts through)
+                quality = atr_contracting and tight_base
                 if quality:
                     confidence = 60   # base — RVOL gate already passed
                     if rvol >= 3.0:                        confidence += 15
@@ -931,10 +937,11 @@ class SignalDetector:
                 ))
 
         # ── Morning Star (3-candle bullish reversal) ──────────────────────────
+        # Daily TF only — on 15min/1hr this pattern completes in 45 min, pure noise.
         # c1 (p2): large bearish candle
         # c2 (p):  small body (indecision / star) — can be bullish or bearish
         # c3 (c):  large bullish candle closing above c1's midpoint
-        if p2_range > 0 and c_range > 0:
+        if tf == "1day" and p2_range > 0 and c_range > 0:
             c1_mid = (p2["open"] + p2["close"]) / 2
             morning_star = (
                 p2["close"] < p2["open"]                  and   # c1 bearish
@@ -1014,55 +1021,74 @@ class SignalDetector:
         rvol = latest.get("rvol", 1.0) or 1.0
 
         # ── Double Bottom ─────────────────────────────────────────────────────
-        if "swing_low" in df.columns:
-            recent = df["swing_low"].iloc[-80:].dropna()
-            if len(recent) >= 2:
-                l1_val, l2_val = recent.iloc[-2], recent.iloc[-1]
-                l1_idx, l2_idx = recent.index[-2], recent.index[-1]
-                sep = (df.index.get_loc(l2_idx) - df.index.get_loc(l1_idx))  # bars apart
-                price_diff = abs(l1_val - l2_val) / l1_val if l1_val else 1
+        # Daily TF only — double bottoms on 15min/1hr are 2-hour noise, not structure.
+        # Also requires prior downtrend on the stock (EMA stack was bearish before
+        # the pattern formed) — a reversal pattern needs something to reverse from.
+        if tf == "1day" and "swing_low" in df.columns:
+            # Prior downtrend check: EMA stack in the 10-20 bars before first low
+            # should have been bearish (ema_stack == -1) at some point recently.
+            prior_bearish = False
+            if "ema_stack" in df.columns and len(df) >= 30:
+                prior_stack = df["ema_stack"].iloc[-30:-5].dropna()
+                prior_bearish = (prior_stack == -1).any()
 
-                if sep >= 8 and price_diff < 0.020:   # tightened from 2.5% → 2.0%
-                    # Neckline = highest high between the two lows
-                    between_mask = (df.index >= l1_idx) & (df.index <= l2_idx)
-                    neckline = df.loc[between_mask, "high"].max()
-                    if price > neckline:               # neckline broken
-                        conf = 65   # reduced base from 70
-                        # RVOL on neckline break — low-volume breaks fail 71% (Bulkowski)
-                        if rvol > 1.5:    conf += 15
-                        else:             conf -= 15
-                        # Bull structure confirmation
-                        if latest.get("above_200ema"):          conf += 5
-                        if latest.get("ema_stack") == 1:        conf += 10
-                        conf = min(conf + max(0, int((1 - price_diff / 0.020) * 10)), 100)
-                        # RSI divergence: second low should have HIGHER RSI than first
-                        # (price makes equal/lower low but momentum holds up = bullish)
-                        rsi_col = f"rsi_{self._cfg.rsi_period}"
-                        rsi_note = ""
-                        if rsi_col in df.columns:
-                            l1_iloc = df.index.get_loc(l1_idx)
-                            l2_iloc = df.index.get_loc(l2_idx)
-                            rsi_at_l1 = float(df[rsi_col].iloc[l1_iloc]) if not pd.isna(df[rsi_col].iloc[l1_iloc]) else None
-                            rsi_at_l2 = float(df[rsi_col].iloc[l2_iloc]) if not pd.isna(df[rsi_col].iloc[l2_iloc]) else None
-                            if rsi_at_l1 is not None and rsi_at_l2 is not None:
-                                if rsi_at_l2 > rsi_at_l1:
-                                    conf += 15   # bullish RSI divergence confirmed
-                                    rsi_note = f" | RSI div {rsi_at_l1:.0f}→{rsi_at_l2:.0f}"
-                                else:
-                                    conf -= 10   # no divergence, weaker pattern
-                        signals.append(Signal(
-                            trading_symbol  = symbol,
-                            timeframe       = tf,
-                            signal_type     = SignalType.DOUBLE_BOTTOM,
-                            direction       = Direction.BULLISH,
-                            confidence      = min(max(conf, 0), 100),
-                            price_at_signal = price,
-                            indicators      = self._key_indicators(latest),
-                            notes           = f"Double Bottom W | lows {l1_val:.2f}/{l2_val:.2f} | neckline {neckline:.2f}{rsi_note}",
-                        ))
+            if prior_bearish:
+                recent = df["swing_low"].iloc[-80:].dropna()
+                if len(recent) >= 2:
+                    l1_val, l2_val = recent.iloc[-2], recent.iloc[-1]
+                    l1_idx, l2_idx = recent.index[-2], recent.index[-1]
+                    sep = (df.index.get_loc(l2_idx) - df.index.get_loc(l1_idx))  # bars apart
+                    price_diff = abs(l1_val - l2_val) / l1_val if l1_val else 1
+
+                    if sep >= 8 and price_diff < 0.020:   # tightened from 2.5% → 2.0%
+                        # Neckline = highest high between the two lows
+                        between_mask = (df.index >= l1_idx) & (df.index <= l2_idx)
+                        neckline = df.loc[between_mask, "high"].max()
+                        if price > neckline:               # neckline broken
+                            conf = 65   # reduced base from 70
+                            # RVOL on neckline break — low-volume breaks fail 71% (Bulkowski)
+                            if rvol > 1.5:    conf += 15
+                            else:             conf -= 15
+                            # Bull structure confirmation
+                            if latest.get("above_200ema"):          conf += 5
+                            if latest.get("ema_stack") == 1:        conf += 10
+                            conf = min(conf + max(0, int((1 - price_diff / 0.020) * 10)), 100)
+                            # RSI divergence: second low should have HIGHER RSI than first
+                            # (price makes equal/lower low but momentum holds up = bullish)
+                            rsi_col = f"rsi_{self._cfg.rsi_period}"
+                            rsi_note = ""
+                            if rsi_col in df.columns:
+                                l1_iloc = df.index.get_loc(l1_idx)
+                                l2_iloc = df.index.get_loc(l2_idx)
+                                rsi_at_l1 = float(df[rsi_col].iloc[l1_iloc]) if not pd.isna(df[rsi_col].iloc[l1_iloc]) else None
+                                rsi_at_l2 = float(df[rsi_col].iloc[l2_iloc]) if not pd.isna(df[rsi_col].iloc[l2_iloc]) else None
+                                if rsi_at_l1 is not None and rsi_at_l2 is not None:
+                                    if rsi_at_l2 > rsi_at_l1:
+                                        conf += 15   # bullish RSI divergence confirmed
+                                        rsi_note = f" | RSI div {rsi_at_l1:.0f}→{rsi_at_l2:.0f}"
+                                    else:
+                                        conf -= 10   # no divergence, weaker pattern
+                            signals.append(Signal(
+                                trading_symbol  = symbol,
+                                timeframe       = tf,
+                                signal_type     = SignalType.DOUBLE_BOTTOM,
+                                direction       = Direction.BULLISH,
+                                confidence      = min(max(conf, 0), 100),
+                                price_at_signal = price,
+                                indicators      = self._key_indicators(latest),
+                                notes           = f"Double Bottom W | lows {l1_val:.2f}/{l2_val:.2f} | neckline {neckline:.2f}{rsi_note}",
+                            ))
 
         # ── Double Top ────────────────────────────────────────────────────────
-        if "swing_high" in df.columns:
+        # Daily TF only + prior uptrend required — mirror of DOUBLE_BOTTOM fix.
+        # A reversal pattern needs something to reverse from.
+        if tf == "1day" and "swing_high" in df.columns:
+            prior_bullish = False
+            if "ema_stack" in df.columns and len(df) >= 30:
+                prior_stack = df["ema_stack"].iloc[-30:-5].dropna()
+                prior_bullish = (prior_stack == 1).any()
+
+        if tf == "1day" and "swing_high" in df.columns and prior_bullish:
             recent = df["swing_high"].iloc[-80:].dropna()
             if len(recent) >= 2:
                 h1_val, h2_val = recent.iloc[-2], recent.iloc[-1]
