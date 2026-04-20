@@ -87,15 +87,15 @@ class TelegramNotifier:
         msg = (
             f"📊 *TRADE ENTRY*\n"
             f"──────────────────\n"
-            f"*{direction} {symbol}* @ ₹{price:.2f}\n"
+            f"*{self._md(direction)} {self._md(symbol)}* @ ₹{price:.2f}\n"
             f"Qty: {quantity} shares\n"
             f"Stop Loss:  ₹{stop_loss:.2f}  (-{abs(price - stop_loss):.2f})\n"
             f"Target 1:   ₹{target_1:.2f}  (+{abs(target_1 - price):.2f})\n"
             + t2_line +
             f"\nR:R Ratio:  {rr:.1f}x\n"
-            f"Strategy:   {strategy}\n"
+            f"Strategy:   {self._md(strategy)}\n"
             f"AI Conf:    {confidence:.0%}\n"
-            f"Broker:     {broker}\n"
+            f"Broker:     {self._md(broker)}\n"
             f"Time:       {datetime.now().strftime('%H:%M:%S IST')}"
         )
         await self._send(msg, parse_mode="Markdown")
@@ -111,7 +111,7 @@ class TelegramNotifier:
         emoji = "✅" if abs(slippage) < 0.05 else "⚠️"
         msg = (
             f"{emoji} *ORDER FILLED*\n"
-            f"{direction} {symbol} × {quantity} @ ₹{price:.2f}\n"
+            f"{self._md(direction)} {self._md(symbol)} × {quantity} @ ₹{price:.2f}\n"
             f"Slippage: ₹{slippage:+.2f}"
         )
         await self._send(msg, parse_mode="Markdown")
@@ -179,8 +179,8 @@ class TelegramNotifier:
             f"Target:   ₹{req.target:.2f}  (+{abs(req.target - req.entry_price):.2f})\n"
             f"Qty: {req.quantity}  |  Risk: ₹{req.risk_inr:.0f}  |  R:R {req.rr_ratio:.1f}x\n"
             f"──────────────────────────\n"
-            f"Strategy: {req.strategy}  |  Signal: {req.signal_conf}%\n"
-            f"AI ({req.ai_conf:.0%}): _{req.ai_reasoning[:120]}_\n"
+            f"Strategy: {self._md(req.strategy)}  |  Signal: {req.signal_conf}%\n"
+            f"AI ({req.ai_conf:.0%}): _{self._md(req.ai_reasoning[:120])}_\n"
             f"──────────────────────────\n"
             f"⏱ Expires in {settings.approval_timeout_secs}s"
         )
@@ -351,6 +351,15 @@ class TelegramNotifier:
         await self._send(msg, parse_mode="Markdown")
 
     # ── Internal ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _md(text: str) -> str:
+        """Escape special chars for Telegram Markdown mode (v1).
+        Telegram Markdown v1 only interprets: * _ ` [
+        Anything else that happens to appear mid-word (e.g. BREAKOUT_HIGH)
+        must have its underscore escaped.
+        """
+        return str(text).replace("_", "\\_").replace("*", "\\*").replace("`", "\\`").replace("[", "\\[")
 
     async def _send(self, text: str, parse_mode: str | None = None) -> None:
         if not self._enabled or not self._bot:

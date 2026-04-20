@@ -115,8 +115,13 @@ class TradeExecutor:
                 await self._record_rejection(signal, stage="APPROVAL", reason="rejected_or_timed_out")
                 return None
 
-        # ── 4. Entry order ────────────────────────────────────────────────────
-        broker    = get_broker()
+        # ── 4. Record trade in DB first ───────────────────────────────────────
+        # Must happen BEFORE place_order so the FK constraint on orders.parent_trade_id
+        # is satisfied when _record_order runs inside place_order / place_stop_loss.
+        broker = get_broker()
+        trade  = await self._record_trade(trade_id, signal, direction, decision, ai_decision, broker.BROKER)
+
+        # ── 5. Entry order ────────────────────────────────────────────────────
         broker_id = await broker.place_order(
             symbol           = signal.trading_symbol,
             exchange         = EXCHANGE,
@@ -131,9 +136,6 @@ class TradeExecutor:
         if not broker_id:
             log.error("executor.entry_failed", symbol=signal.trading_symbol)
             return None
-
-        # ── 5. Record trade in DB ─────────────────────────────────────────────
-        trade = await self._record_trade(trade_id, signal, direction, decision, ai_decision, broker.BROKER)
 
         # ── 6. Stop-loss order ────────────────────────────────────────────────
         await broker.place_stop_loss(
