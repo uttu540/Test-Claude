@@ -790,9 +790,9 @@ async def _preseed_candle_buffer() -> None:
     import asyncio
     import pandas as pd
     from sqlalchemy import text as _text
-    from services.data_ingestion.nifty500_instruments import NIFTY500
+    from services.data_ingestion.nifty500_instruments import get_live_universe
 
-    symbols = [s for s, *_ in NIFTY500] + ["NIFTY 50"]
+    symbols = get_live_universe() + ["NIFTY 50"]
     loaded = 0
 
     try:

@@ -29,6 +29,7 @@ from database.connection import get_redis
 from services.data_ingestion.nifty500_instruments import (
     INDEX_INSTRUMENTS,
     NIFTY500,
+    get_live_universe,
     get_nifty500_symbols,
 )
 
@@ -255,8 +256,8 @@ class MockFeed:
 
     def __init__(self, on_tick: Callable[[Tick], None], symbols: list[str] | None = None):
         self._on_tick = on_tick
-        from services.data_ingestion.nifty500_instruments import get_nifty500_symbols
-        self._universe: list[str] = symbols or get_nifty500_symbols()
+        from services.data_ingestion.nifty500_instruments import get_live_universe
+        self._universe: list[str] = symbols or get_live_universe()
         # Populated in start() after yfinance fetch
         self._seed_prices: dict[str, float] = {}
         self._prices:      dict[str, float] = {}

@@ -593,6 +593,52 @@ def get_nifty500_symbols() -> list[str]:
     return [row[0] for row in NIFTY500]
 
 
+def get_live_universe() -> list[str]:
+    """
+    Fetch the full NSE EQ-series equity universe for live/paper trading.
+
+    Downloads NSE's public EQUITY_L.csv and returns all EQ-series symbols
+    (excludes BE = trade-to-trade, BZ = suspended/illiquid, rights shares,
+    warrants, DVRs etc.).
+
+    Falls back to NIFTY500 if the download fails — ensures the bot always
+    starts even without internet access to NSE's website.
+
+    Typical size: ~1700–2200 symbols (EQ-series, normal equities).
+    """
+    import csv
+    import io
+    import re
+
+    import requests
+
+    NSE_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+    fallback = get_nifty500_symbols()
+
+    try:
+        resp = requests.get(NSE_URL, timeout=15,
+                            headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        reader = csv.DictReader(io.StringIO(resp.text))
+        symbols: list[str] = []
+        for row in reader:
+            sym    = (row.get("SYMBOL") or row.get("Symbol") or "").strip()
+            series = (row.get(" SERIES") or row.get("SERIES") or row.get("Series") or "").strip()
+            if not sym or series != "EQ":
+                continue
+            if not re.match(r'^[A-Z0-9&\-]+$', sym):
+                continue
+            symbols.append(sym)
+
+        if len(symbols) < 100:          # sanity check — partial/corrupt response
+            return fallback
+
+        return symbols
+
+    except Exception:
+        return fallback
+
+
 def get_nifty500_by_sector() -> dict[str, list[str]]:
     """Return {sector: [symbols]} mapping."""
     result: dict[str, list[str]] = {}
