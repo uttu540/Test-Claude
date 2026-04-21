@@ -72,6 +72,7 @@ console = Console()
 # Format: {symbol: {timeframe: deque([candle_dicts...], maxlen=BUFFER_MAX)}}
 _candle_buffer: dict[str, dict[str, deque]] = {}
 _active_signal_tasks: set[str] = set()   # Symbols with an in-flight signal task
+_signal_semaphore: asyncio.Semaphore | None = None  # Initialised in main() after event loop starts
 BUFFER_MAX = 300   # Keep last 300 candles per symbol/timeframe
 _scheduler: AsyncIOScheduler | None = None   # Set in main(); used by retry jobs
 _tick_count: int = 0                          # Rolling tick counter for diagnostics
@@ -128,6 +129,12 @@ async def _run_signals(symbol: str) -> None:
 
     Both engines feed the same TradeExecutor → Claude → broker pipeline.
     """
+    # Throttle: with 2000+ symbols, all first 15min candles close simultaneously.
+    # Without a semaphore this creates 2000+ concurrent Redis operations and exhausts
+    # the connection pool (max_connections=100). Queue tasks; run at most 75 at once.
+    sem = _signal_semaphore
+    if sem is not None:
+        await sem.acquire()
     try:
         from config.market_hours import is_market_open
         if not is_market_open():
@@ -468,6 +475,9 @@ async def _run_signals(symbol: str) -> None:
 
     except Exception as e:
         log.error("signal.run_error", symbol=symbol, error=str(e))
+    finally:
+        if sem is not None:
+            sem.release()
 
 
 # ─── Scheduled Jobs ───────────────────────────────────────────────────────────
@@ -1166,6 +1176,10 @@ async def shutdown(scheduler: AsyncIOScheduler) -> None:
 
 async def main() -> None:
     await startup()
+
+    # Semaphore must be created inside the running event loop
+    global _signal_semaphore
+    _signal_semaphore = asyncio.Semaphore(75)  # max 75 concurrent signal scans
 
     # ── Feed ─────────────────────────────────────────────────────────────────
     feed = FeedManager()
