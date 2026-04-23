@@ -41,9 +41,12 @@ IST = ZoneInfo("Asia/Kolkata")
 SYMBOL_KEYWORDS: dict[str, str] = {sym: name for sym, name, _ in NIFTY500}
 
 # Batch size: how many symbols per NewsAPI query
-# Free tier = 100 req/day. 50 symbols ÷ 25 = 2 batches/cycle.
-# At 60-min interval: 2 × 24 = 48 req/day — well within limit.
-QUERY_BATCH_SIZE = 25
+# Free tier = 100 req/day. Smaller batches avoid URL length 400 errors.
+# NewsAPI rejects queries > ~500 chars. At 5 symbols × ~20 chars = ~100 chars.
+# 50 Nifty50 symbols ÷ 5 = 10 batches. At 60-min interval: 10 × 24 = 240/day
+# — use the paid plan or reduce poll interval if hitting limits.
+QUERY_BATCH_SIZE = 5
+MAX_QUERY_CHARS  = 450   # Hard cap — truncate if still too long
 
 # NewsAPI base URL
 NEWSAPI_URL = "https://newsapi.org/v2/everything"
@@ -114,11 +117,19 @@ class NewsFeedService:
         Returns number of new articles stored.
         """
         # Build query: "Reliance Industries" OR "HDFC Bank" OR ...
+        # Use first 3 words of company name to keep URL short
+        def _short_name(full: str) -> str:
+            words = full.replace(" Ltd", "").replace(" Limited", "").strip().split()
+            return " ".join(words[:3])
+
         query_terms = [
-            f'"{SYMBOL_KEYWORDS[sym]}"' for sym in symbols
+            f'"{_short_name(SYMBOL_KEYWORDS[sym])}"' for sym in symbols
             if sym in SYMBOL_KEYWORDS
         ]
         query = " OR ".join(query_terms)
+        # Hard cap to avoid 400 from NewsAPI
+        if len(query) > MAX_QUERY_CHARS:
+            query = query[:MAX_QUERY_CHARS].rsplit(" OR ", 1)[0]
 
         # Only fetch articles from the last 24 hours
         from_dt = (datetime.now(IST) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S")

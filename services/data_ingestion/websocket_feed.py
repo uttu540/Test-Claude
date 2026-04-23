@@ -294,7 +294,7 @@ class MockFeed:
                 interval="1d",
                 auto_adjust=True,
                 progress=False,
-                threads=True,
+                threads=False,   # Avoid "can't start new thread" with 2000+ symbols
             )
             # raw["Close"] is a DataFrame: rows=dates, cols="{sym}.NS"
             close = raw["Close"]
