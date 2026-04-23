@@ -655,6 +655,49 @@ async def job_market_open_briefing() -> None:
     )
 
 
+async def job_orb_scan() -> None:
+    """
+    10:00 AM IST — Scan all symbols for ORB breakouts.
+
+    The 9:45 candle (9:45–10:00 IST) closes at exactly 10:00. This job runs
+    immediately after, reads today's 15-min candles from _candle_buffer, applies
+    the ORB rules (Nifty gate + OR high breakout + volume surge), and routes
+    qualifying setups directly through TradeExecutor — bypassing the daily-signal
+    dedup and momentum confluence gate (ORB has its own entry criteria).
+    """
+    from config.market_hours import is_trading_day
+    if not is_trading_day():
+        return
+
+    from datetime import date as _date
+    from services.orb_engine.live import scan_orb_signals
+    from services.data_ingestion.nifty500_instruments import get_live_universe
+    from services.execution.trade_executor import TradeExecutor
+
+    symbols = get_live_universe()
+    today   = _date.today()
+
+    log.info("orb_scan.start", symbols=len(symbols))
+    signals = scan_orb_signals(_candle_buffer, symbols, today)
+
+    if not signals:
+        log.info("orb_scan.no_setups")
+        return
+
+    log.info("orb_scan.firing", count=len(signals), symbols=[s.trading_symbol for s in signals])
+
+    executor = TradeExecutor()
+    for sig in signals:
+        try:
+            trade = await executor.execute(sig)
+            if trade:
+                log.info("orb_scan.trade_opened",
+                         symbol=sig.trading_symbol, entry=sig.price_at_signal,
+                         stop=sig.indicators.get("stop_price"))
+        except Exception as e:
+            log.warning("orb_scan.execute_error", symbol=sig.trading_symbol, error=str(e))
+
+
 async def job_square_off_intraday() -> None:
     """3:12 PM IST — Square off all intraday positions and close them in DB."""
     from config.market_hours import is_trading_day
@@ -1195,6 +1238,7 @@ async def main() -> None:
     # Weekdays only (Mon=0 … Fri=4)
     scheduler.add_job(job_daily_auth,          CronTrigger(day_of_week="0-4", hour=8,  minute=30, timezone="Asia/Kolkata"))
     scheduler.add_job(job_market_open_briefing, CronTrigger(day_of_week="0-4", hour=9, minute=10, timezone="Asia/Kolkata"))
+    scheduler.add_job(job_orb_scan,             CronTrigger(day_of_week="0-4", hour=10, minute=0, timezone="Asia/Kolkata"))
     scheduler.add_job(job_square_off_intraday,  CronTrigger(day_of_week="0-4", hour=15, minute=12, timezone="Asia/Kolkata"))
     scheduler.add_job(job_eod_summary,          CronTrigger(day_of_week="0-4", hour=16, minute=30, timezone="Asia/Kolkata"))
     scheduler.add_job(job_db_backup,            CronTrigger(day_of_week="0-4", hour=16, minute=45, timezone="Asia/Kolkata"))

@@ -540,7 +540,24 @@ async def start_telegram_polling() -> object | None:
     # Inline button callbacks — semi-auto trade approvals
     app.add_handler(CallbackQueryHandler(_handle_approval_callback))
 
-    await app.initialize()
+    # Retry until internet is available — startup may run before network is up
+    import asyncio as _asyncio
+    from telegram.error import NetworkError as _TGNetworkError
+    _attempt = 0
+    _delays = [5, 10, 15, 30, 60]   # seconds between retries
+    while True:
+        try:
+            await app.initialize()
+            break
+        except (_TGNetworkError, Exception) as _e:
+            if "ConnectError" not in str(type(_e).__name__) and not isinstance(_e, _TGNetworkError):
+                raise
+            _delay = _delays[min(_attempt, len(_delays) - 1)]
+            log.warning("telegram.no_internet_retry",
+                        attempt=_attempt + 1, retry_in=_delay, error=str(_e)[:80])
+            await _asyncio.sleep(_delay)
+            _attempt += 1
+
     await app.start()
     await app.updater.start_polling(allowed_updates=["message", "callback_query"])
     log.info("telegram.polling_started",
