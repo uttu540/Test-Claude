@@ -886,8 +886,11 @@ async def _preseed_candle_buffer() -> None:
     except Exception as e:
         log.warning("startup.candle_buffer_preseed_error", error=str(e))
 
-    # ── 15min preseed from yfinance ───────────────────────────────────────────
-    try:
+    # ── 15min preseed from yfinance (background) ─────────────────────────────
+    # Runs as a background task — 2175 symbols × 0.2s sleep = 7+ min if awaited.
+    # Signals and Telegram are fully functional before this completes.
+    async def _preseed_15min_bg():
+      try:
         import yfinance as yf
 
         loop = asyncio.get_event_loop()
@@ -947,8 +950,10 @@ async def _preseed_candle_buffer() -> None:
             symbols=seeded_15min,
             bars_per_symbol=bars_per_symbol_15min,
         )
-    except Exception as e:
+      except Exception as e:
         log.warning("startup.candle_buffer_15min_preseed_error", error=str(e))
+
+    asyncio.create_task(_preseed_15min_bg())
 
 
 async def job_status_heartbeat() -> None:
@@ -1153,36 +1158,9 @@ async def startup() -> None:
     await redis.ping()
     log.info("startup.redis_ok")
 
-    # 3. Seed historical data (skips if already seeded today)
-    last_seed = await redis.get("meta:last_seed_date")
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    seeder = HistoricalSeeder(use_kite=bool(settings.kite_api_key))
-    if last_seed != today_str:
-        log.info("startup.seeding_historical_data")
-        await seeder.create_hypertable()
-        await seeder.seed_all(timeframes=["1day"])
-        await redis.setex("meta:last_seed_date", 86_400 * 2, today_str)
-    else:
-        log.info("startup.seed_skip", reason="Already seeded today")
-        # Always ensure NIFTY 50 index is seeded — needed for regime detection.
-        # Runs even when stocks are already seeded (index was missing before this fix).
-        await _ensure_index_seeded(seeder)
-
-    # 4. Pre-seed candle buffer from DB so signals fire from first live candle close
-    await _preseed_candle_buffer()
-
-    # 5. Bootstrap market regime from historical data so it's never UNKNOWN at open
-    await _bootstrap_regime()
-
-    # 6. News feed (background polling — no-op if NEWS_API_KEY not set)
-    news_service = get_news_service()
-    await news_service.start()
-
-    # 7. Trade lifecycle manager (monitors open trades, closes on SL/target hit)
-    asyncio.create_task(get_lifecycle_manager().run())
-
-    # 8. Telegram polling — commands (/status, /pnl, /positions) available in all
-    #    modes; approval callbacks only triggered in semi-auto mode.
+    # 3. Telegram polling — start EARLY so commands work immediately.
+    #    The 15-min preseed below takes 7+ minutes; starting Telegram last
+    #    meant commands were unavailable for the entire startup window.
     if settings.telegram_bot_token:
         if settings.is_semi_auto and not settings.authorized_telegram_ids:
             log.warning(
@@ -1193,6 +1171,33 @@ async def startup() -> None:
         app_tg = await start_telegram_polling()
         import main as _self
         _self._telegram_app = app_tg
+
+    # 4. Seed historical data (skips if already seeded today)
+    last_seed = await redis.get("meta:last_seed_date")
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    seeder = HistoricalSeeder(use_kite=bool(settings.kite_api_key))
+    if last_seed != today_str:
+        log.info("startup.seeding_historical_data")
+        await seeder.create_hypertable()
+        await seeder.seed_all(timeframes=["1day"])
+        await redis.setex("meta:last_seed_date", 86_400 * 2, today_str)
+    else:
+        log.info("startup.seed_skip", reason="Already seeded today")
+        await _ensure_index_seeded(seeder)
+
+    # 5. Pre-seed candle buffer from DB (fast) then 15-min from yfinance (slow —
+    #    runs as background task so startup completes quickly)
+    await _preseed_candle_buffer()
+
+    # 6. Bootstrap market regime from historical data so it's never UNKNOWN at open
+    await _bootstrap_regime()
+
+    # 7. News feed (background polling — no-op if NEWS_API_KEY not set)
+    news_service = get_news_service()
+    await news_service.start()
+
+    # 8. Trade lifecycle manager (monitors open trades, closes on SL/target hit)
+    asyncio.create_task(get_lifecycle_manager().run())
 
     log.info("startup.complete", env=settings.app_env.value)
 
