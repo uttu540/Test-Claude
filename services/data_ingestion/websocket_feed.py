@@ -330,7 +330,7 @@ class MockFeed:
         symbol_tokens = {sym: 1000 + i for i, sym in enumerate(self._prices)}
 
         while self._running:
-            for sym, price in list(self._prices.items()):
+            for i, (sym, price) in enumerate(list(self._prices.items())):
                 seed_price = self._seed_prices[sym]
                 # Mean-reverting random walk: drift pulls price back toward seed
                 drift     = (seed_price - price) * 0.0001
@@ -354,6 +354,11 @@ class MockFeed:
                     change           = round((new_price - seed_price) / seed_price * 100, 2),
                 )
                 self._on_tick(tick)
+
+                # Yield to event loop every 100 symbols so Telegram polling,
+                # Redis writes, and other coroutines get CPU time.
+                if i % 100 == 0:
+                    await asyncio.sleep(0)
 
             await asyncio.sleep(1)   # emit ticks every second
 
