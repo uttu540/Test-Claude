@@ -559,7 +559,10 @@ async def start_telegram_polling() -> object | None:
             _attempt += 1
 
     await app.start()
-    await app.updater.start_polling(allowed_updates=["message", "callback_query"])
+    await app.updater.start_polling(
+        allowed_updates=["message", "callback_query"],
+        drop_pending_updates=True,   # Discard messages queued while bot was offline
+    )
     log.info("telegram.polling_started",
              commands=["/status", "/pnl", "/positions", "/help"],
              semi_auto=settings.is_semi_auto)
