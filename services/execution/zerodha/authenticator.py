@@ -90,6 +90,18 @@ class ZerodhaAuthenticator:
             try:
                 page = await browser.new_page()
 
+                # Listen for all network requests to capture request_token.
+                # Kite redirects to redirect_url (127.0.0.1) after auth — browser errors,
+                # but the request event fires before the error, giving us the token URL.
+                _captured_token: list[str] = []
+
+                def _on_request(request):
+                    token = self._extract_request_token(request.url)
+                    if token:
+                        _captured_token.append(token)
+
+                page.on("request", _on_request)
+
                 # Go to Kite login page
                 await page.goto(login_url, timeout=30_000)
                 await page.wait_for_load_state("networkidle", timeout=15_000)
@@ -120,16 +132,30 @@ class ZerodhaAuthenticator:
                     # Fallback: fill whatever input is visible
                     await page.fill('input[type="number"]', totp_code, timeout=10_000)
 
-                await page.wait_for_timeout(3000)
+                # Wait for TOTP to auto-submit and redirect to redirect_url with token.
+                # Redirect URL = 127.0.0.1 (Kite dev console) → browser errors, but
+                # the request event fires first and _on_request captures the token.
+                await page.wait_for_timeout(4000)
 
-                # Wait for redirect to our redirect URL containing request_token
+                # Fallback: if authorize page still showing, click the button
+                if "connect/authorize" in page.url:
+                    try:
+                        authorize_btn = page.locator(
+                            'button:has-text("Authorize"), button:has-text("Authorise"), button:has-text("I Allow"), button:has-text("Allow")'
+                        ).first
+                        if await authorize_btn.count() > 0:
+                            try:
+                                async with page.expect_navigation(timeout=10_000):
+                                    await authorize_btn.click(timeout=10_000)
+                            except Exception:
+                                pass
+                            await page.wait_for_timeout(2000)
+                    except Exception as _e:
+                        log.warning("zerodha_auth.authorize_click_failed", error=str(_e))
+
+                request_token = _captured_token[0] if _captured_token else None
                 current_url = page.url
-                request_token = self._extract_request_token(current_url)
-
                 if not request_token:
-                    # Sometimes takes a moment
-                    await page.wait_for_timeout(2000)
-                    current_url   = page.url
                     request_token = self._extract_request_token(current_url)
 
             except Exception as e:
