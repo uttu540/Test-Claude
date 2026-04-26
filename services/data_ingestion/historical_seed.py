@@ -101,8 +101,8 @@ class HistoricalSeeder:
         if timeframes is None:
             timeframes = ["1day"]   # Start with daily; intraday added after API key
 
-        # Stocks + NIFTY 50 index (used for regime detection)
-        symbols = [sym for sym, _, _ in NIFTY500]
+        # Use full Kite instrument universe when available, else fall back to Nifty 500
+        symbols = await self._get_universe()
         index_symbols = [("NIFTY 50", "^NSEI")]   # (trading_symbol, yfinance_ticker)
 
         log.info("historical_seed.start", symbols=len(symbols), from_date=start_date, timeframes=timeframes)
@@ -146,6 +146,30 @@ class HistoricalSeeder:
                 return
 
             await self._upsert_candles(symbol, tf, df)
+
+    # ── Universe ──────────────────────────────────────────────────────────────
+
+    async def _get_universe(self) -> list[str]:
+        """
+        Return the full trading universe.
+        If Kite token map is in Redis (set during auth), use all ~2160 NSE EQ symbols.
+        Otherwise fall back to Nifty 500.
+        """
+        try:
+            from database.connection import get_redis
+            import json
+            redis = get_redis()
+            token_map_raw = await redis.get("kite:token_map")
+            if token_map_raw:
+                token_map = json.loads(token_map_raw)
+                symbols = sorted(token_map.keys())
+                log.info("historical_seed.universe", source="kite_token_map", count=len(symbols))
+                return symbols
+        except Exception as e:
+            log.warning("historical_seed.universe_fallback", error=str(e))
+        symbols = [sym for sym, _, _ in NIFTY500]
+        log.info("historical_seed.universe", source="nifty500_fallback", count=len(symbols))
+        return symbols
 
     # ── yfinance (free fallback) ──────────────────────────────────────────────
 
