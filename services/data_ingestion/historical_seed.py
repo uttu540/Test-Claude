@@ -70,12 +70,21 @@ class HistoricalSeeder:
         self._use_kite = use_kite and bool(settings.kite_api_key)
 
     async def create_hypertable(self) -> None:
-        """Create the TimescaleDB ohlcv hypertable if it doesn't exist."""
+        """Create the ohlcv table. Uses TimescaleDB hypertable if available, plain table otherwise."""
         statements = [s.strip() for s in OHLCV_TABLE_DDL.split(";") if s.strip()]
         async with get_db_session() as session:
             for stmt in statements:
-                await session.execute(text(stmt))
-            await session.commit()
+                try:
+                    await session.execute(text(stmt))
+                    await session.commit()
+                except Exception as e:
+                    await session.rollback()
+                    if "create_hypertable" in stmt or "add_retention_policy" in stmt:
+                        log.warning("historical_seed.timescale_unavailable",
+                                    msg="TimescaleDB not installed — using plain Postgres table",
+                                    error=str(e))
+                    else:
+                        raise
         log.info("historical_seed.hypertable", status="ready")
 
     async def seed_all(
