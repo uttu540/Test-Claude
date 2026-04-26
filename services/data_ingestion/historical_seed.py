@@ -151,19 +151,15 @@ class HistoricalSeeder:
 
     async def _get_universe(self) -> list[str]:
         """
-        Return the full trading universe.
-        If Kite token map is in Redis (set during auth), use all ~2160 NSE EQ symbols.
-        Otherwise fall back to Nifty 500.
+        Return NSE EQ trading universe (~2160 stocks).
+        Uses get_live_universe() which is already filtered to equity-only.
+        Falls back to Nifty 500 if unavailable.
         """
         try:
-            from database.connection import get_redis
-            import json
-            redis = get_redis()
-            token_map_raw = await redis.get("kite:token_map")
-            if token_map_raw:
-                token_map = json.loads(token_map_raw)
-                symbols = sorted(token_map.keys())
-                log.info("historical_seed.universe", source="kite_token_map", count=len(symbols))
+            from services.data_ingestion.nifty500_instruments import get_live_universe
+            symbols = get_live_universe()
+            if symbols:
+                log.info("historical_seed.universe", source="live_universe", count=len(symbols))
                 return symbols
         except Exception as e:
             log.warning("historical_seed.universe_fallback", error=str(e))
