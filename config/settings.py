@@ -115,6 +115,16 @@ class Settings(BaseSettings):
         return self.app_env in (AppEnv.DEVELOPMENT, AppEnv.PAPER)
 
     @property
+    def use_real_feed(self) -> bool:
+        """True when live Zerodha WebSocket feed should be used.
+        Paper mode uses real feed if API key is configured — real prices, simulated orders."""
+        if self.app_env in (AppEnv.LIVE, AppEnv.SEMI_AUTO):
+            return True
+        if self.app_env == AppEnv.PAPER and self.kite_api_key:
+            return True
+        return False
+
+    @property
     def authorized_telegram_ids(self) -> list[str]:
         """Parsed list of Telegram user IDs allowed to approve trades and use commands."""
         return [x.strip() for x in self.telegram_authorized_ids.split(",") if x.strip()]

@@ -422,10 +422,10 @@ class FeedManager:
         self._flush_scheduled: bool = False
         self._total_ticks: int = 0
 
-        if settings.uses_simulated_broker:   # dev + paper → no Kite token needed
-            self._feed = MockFeed(self._on_tick)
-        else:
+        if settings.use_real_feed:
             self._feed = ZerodhaFeed(self._on_tick)
+        else:
+            self._feed = MockFeed(self._on_tick)
 
     def add_candle_listener(self, callback: Callable[[OHLCVCandle], None]) -> None:
         """Register a callback to receive completed OHLCV candles."""
