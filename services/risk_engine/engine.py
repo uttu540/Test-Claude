@@ -108,6 +108,11 @@ class RiskEngine:
         if position_value > settings.max_position_size_inr:
             qty = int(settings.max_position_size_inr / entry_price)
 
+        # Reject if position value too small — not worth brokerage cost
+        MIN_POSITION_VALUE = 5_000
+        if qty * entry_price < MIN_POSITION_VALUE:
+            return RiskDecision(approved=False, reason=f"Position value ₹{qty*entry_price:.0f} below minimum ₹{MIN_POSITION_VALUE}")
+
         risk_amount = qty * risk_per_share
 
         log.info(

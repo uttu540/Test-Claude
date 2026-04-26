@@ -94,6 +94,58 @@ def _nifty_trend_up(candle_buffer: dict[str, dict[str, deque]], today: date) -> 
     return result
 
 
+def _backfill_today_from_yfinance(
+    candle_buffer: dict[str, dict[str, deque]],
+    symbols: list[str],
+    today: date,
+) -> None:
+    """
+    If bot restarted after 9:15 AM, live feed hasn't built today's candles yet.
+    Fetch today's 15-min bars from yfinance for symbols missing today's data.
+    Synchronous — called once at scan time, runs fast (only missing symbols).
+    """
+    import yfinance as yf
+
+    missing = []
+    for sym in symbols + ["NIFTY 50"]:
+        buf = candle_buffer.get(sym, {}).get("15min")
+        if not buf:
+            missing.append(sym)
+            continue
+        has_today = any(
+            (c["ts"].astimezone(IST) if hasattr(c["ts"], "tzinfo") and c["ts"].tzinfo else c["ts"]).date() == today
+            for c in buf
+        )
+        if not has_today:
+            missing.append(sym)
+
+    if not missing:
+        return
+
+    log.info("orb_live.backfill_start", symbols=len(missing))
+    for sym in missing:
+        try:
+            ticker = "^NSEI" if sym == "NIFTY 50" else f"{sym}.NS"
+            df = yf.Ticker(ticker).history(period="1d", interval="15m", auto_adjust=True)
+            if df is None or df.empty:
+                continue
+            df.columns = [c.lower() for c in df.columns]
+            df = df[["open", "high", "low", "close", "volume"]].dropna()
+            if sym not in candle_buffer:
+                candle_buffer[sym] = {}
+            if "15min" not in candle_buffer[sym]:
+                candle_buffer[sym]["15min"] = deque(maxlen=300)
+            for ts, row in df.iterrows():
+                candle_buffer[sym]["15min"].append({
+                    "open": float(row["open"]), "high": float(row["high"]),
+                    "low": float(row["low"]),   "close": float(row["close"]),
+                    "volume": int(row["volume"]), "ts": ts,
+                })
+        except Exception as e:
+            log.warning("orb_live.backfill_error", symbol=sym, error=str(e))
+    log.info("orb_live.backfill_done", symbols=len(missing))
+
+
 def scan_orb_signals(
     candle_buffer: dict[str, dict[str, deque]],
     symbols: list[str],
@@ -108,6 +160,9 @@ def scan_orb_signals(
     """
     if today is None:
         today = datetime.now(IST).date()
+
+    # If bot restarted mid-morning, backfill today's candles from yfinance
+    _backfill_today_from_yfinance(candle_buffer, symbols, today)
 
     # ── Nifty trend-day gate ──────────────────────────────────────────────────
     if not _nifty_trend_up(candle_buffer, today):

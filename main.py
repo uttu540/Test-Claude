@@ -674,15 +674,44 @@ async def job_orb_scan() -> None:
     from services.data_ingestion.nifty500_instruments import get_live_universe
     from services.execution.trade_executor import TradeExecutor
 
+    # Check daily loss limit before scanning — no point firing if already at limit
+    from services.risk_engine.engine import RiskEngine
+    _risk = RiskEngine()
+    daily_pnl = await _risk._get_todays_pnl()
+    from config.settings import settings as _settings
+    if daily_pnl <= -_settings.daily_loss_limit_inr:
+        log.warning("orb_scan.blocked_daily_loss_limit", daily_pnl=daily_pnl)
+        return
+
     symbols = get_live_universe()
     today   = _date.today()
 
     log.info("orb_scan.start", symbols=len(symbols))
     signals = scan_orb_signals(_candle_buffer, symbols, today)
 
+    # Audit log — persist daily scan results to Redis (TTL 7 days)
+    import json as _json
+    _redis = get_redis()
+    _audit = {
+        "date": str(today),
+        "total_symbols": len(symbols),
+        "setups_found": len(signals),
+        "setups": [
+            {"symbol": s.trading_symbol, "entry": s.price_at_signal,
+             "or_high": s.indicators.get("or_high"), "or_low": s.indicators.get("or_low"),
+             "vol_ratio": s.indicators.get("vol_ratio")}
+            for s in signals
+        ],
+    }
+    await _redis.setex(f"orb:audit:{today}", 7 * 86400, _json.dumps(_audit))
+
     if not signals:
         log.info("orb_scan.no_setups")
         return
+
+    # Cap at top 5 setups by volume ratio — prevents flooding positions on strong trend days
+    MAX_ORB_TRADES = 5
+    signals = sorted(signals, key=lambda s: s.indicators.get("vol_ratio", 0), reverse=True)[:MAX_ORB_TRADES]
 
     log.info("orb_scan.firing", count=len(signals), symbols=[s.trading_symbol for s in signals])
 
@@ -909,7 +938,13 @@ async def _preseed_candle_buffer() -> None:
                     t = yf.Ticker(ticker_name)
                     return t.history(period="5d", interval="15m", auto_adjust=True)
 
-                df = await loop.run_in_executor(None, _fetch, yf_ticker)
+                df = None
+                for _attempt in range(3):
+                    try:
+                        df = await loop.run_in_executor(None, _fetch, yf_ticker)
+                        break
+                    except Exception:
+                        await asyncio.sleep(2 ** _attempt)
 
                 if df is None or df.empty:
                     continue
@@ -1283,9 +1318,42 @@ async def main() -> None:
     await shutdown(scheduler)
 
 
+def _acquire_pid_lock() -> None:
+    """
+    Write PID file to /tmp/trading_bot.pid.
+    Abort if another instance is already running.
+    """
+    import os
+    pid_file = "/tmp/trading_bot.pid"
+    if os.path.exists(pid_file):
+        try:
+            old_pid = int(open(pid_file).read().strip())
+            os.kill(old_pid, 0)   # signal 0 = check existence only
+            console.print(
+                f"[red]ERROR: Bot already running (PID {old_pid}). "
+                f"Stop it first or delete {pid_file}.[/red]"
+            )
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pass   # stale lock — overwrite
+    with open(pid_file, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def _release_pid_lock() -> None:
+    import os
+    try:
+        os.unlink("/tmp/trading_bot.pid")
+    except FileNotFoundError:
+        pass
+
+
 if __name__ == "__main__":
+    _acquire_pid_lock()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user.[/yellow]")
+    finally:
+        _release_pid_lock()
         sys.exit(0)
