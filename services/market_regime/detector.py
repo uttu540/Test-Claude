@@ -42,9 +42,9 @@ Regime = Literal["TRENDING_UP", "TRENDING_DOWN", "RANGING", "HIGH_VOLATILITY", "
 # India VIX threshold for HIGH_VOLATILITY override
 VIX_HIGH_THRESHOLD = 20.0
 
-# ADX thresholds
-ADX_TRENDING = 25.0
-ADX_RANGING  = 20.0
+# ADX thresholds — aligned with backtest (backtest uses ADX 20 as single cutoff)
+ADX_TRENDING = 20.0
+ADX_RANGING  = 18.0
 
 
 class MarketRegimeDetector:
