@@ -450,6 +450,7 @@ class FeedManager:
         self._tick_batch: list[Tick] = []
         self._flush_scheduled: bool = False
         self._total_ticks: int = 0
+        self._loop: asyncio.AbstractEventLoop | None = None
 
         if settings.use_real_feed:
             self._feed = ZerodhaFeed(self._on_tick)
@@ -473,7 +474,17 @@ class FeedManager:
 
         if not self._flush_scheduled:
             self._flush_scheduled = True
-            asyncio.create_task(self._flush_ticks())
+            try:
+                loop = asyncio.get_event_loop()
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(self._flush_ticks())
+                )
+            except RuntimeError:
+                # Called from non-asyncio thread (KiteTicker) — use running loop ref
+                if self._loop:
+                    self._loop.call_soon_threadsafe(
+                        lambda: asyncio.ensure_future(self._flush_ticks())
+                    )
 
     async def _flush_ticks(self) -> None:
         """Drain the tick buffer and write to Redis in one pipeline call."""
@@ -492,6 +503,7 @@ class FeedManager:
                 log.warning("feed_manager.candle_callback_error", error=str(e))
 
     async def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
         await self._feed.start()
         log.info("feed_manager.started", env=settings.app_env.value)
 
