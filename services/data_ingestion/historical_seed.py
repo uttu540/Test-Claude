@@ -136,10 +136,10 @@ class HistoricalSeeder:
         timeframes: list[str],
     ) -> None:
         for tf in timeframes:
-            if self._use_kite:
-                df = await self._fetch_kite(symbol, start_date, tf)
-            else:
-                df = self._fetch_yfinance(symbol, start_date, tf)
+            # Always use yfinance for daily historical seeding — Kite historical API
+            # has a daily request quota that gets exhausted when bulk-seeding 2000+ symbols.
+            # Kite is reserved for live intraday data only.
+            df = self._fetch_yfinance(symbol, start_date, tf)
 
             if df is None or df.empty:
                 log.warning("historical_seed.no_data", symbol=symbol, timeframe=tf)
@@ -188,6 +188,7 @@ class HistoricalSeeder:
                 start=start_date.strftime("%Y-%m-%d"),
                 interval=interval,
                 auto_adjust=True,
+                timeout=10,
             )
             if df.empty:
                 return None
