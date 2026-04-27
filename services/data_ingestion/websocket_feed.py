@@ -495,12 +495,18 @@ class FeedManager:
         await self._redis_writer.write_batch(batch)
 
     def _on_candle_complete(self, candle: OHLCVCandle) -> None:
-        """Called when a candle period closes."""
-        for cb in self._candle_callbacks:
-            try:
-                cb(candle)
-            except Exception as e:
-                log.warning("feed_manager.candle_callback_error", error=str(e))
+        """Called when a candle period closes — may be in KiteTicker's thread."""
+        if self._loop and self._loop.is_running():
+            # Cross thread boundary safely — callbacks may call asyncio.create_task
+            for cb in self._candle_callbacks:
+                _cb = cb  # capture for lambda
+                self._loop.call_soon_threadsafe(_cb, candle)
+        else:
+            for cb in self._candle_callbacks:
+                try:
+                    cb(candle)
+                except Exception as e:
+                    log.warning("feed_manager.candle_callback_error", error=str(e))
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
