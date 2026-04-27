@@ -206,15 +206,44 @@ class ZerodhaFeed:
 
     def _on_close(self, ws, code, reason) -> None:
         log.warning("zerodha_feed.closed", code=code, reason=reason)
+        # 403 = token expired — schedule full restart with fresh token from Redis
+        if code == 1006 and reason and "403" in str(reason):
+            self._schedule_token_refresh()
 
     def _on_error(self, ws, code, reason) -> None:
         log.error("zerodha_feed.error", code=code, reason=reason)
+        if code == 1006 and reason and "403" in str(reason):
+            self._schedule_token_refresh()
 
     def _on_reconnect(self, ws, attempts) -> None:
         log.info("zerodha_feed.reconnect", attempt=attempts)
 
     def _on_noreconnect(self, ws) -> None:
         log.error("zerodha_feed.no_reconnect", status="max_retries_exceeded")
+        self._schedule_token_refresh()
+
+    def _schedule_token_refresh(self) -> None:
+        """Schedule a feed restart with fresh token — called from ticker thread."""
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(self._restart_with_fresh_token())
+                )
+        except Exception as e:
+            log.error("zerodha_feed.schedule_refresh_error", error=str(e))
+
+    async def _restart_with_fresh_token(self) -> None:
+        """Stop current ticker, re-read token from Redis, reconnect."""
+        log.info("zerodha_feed.token_refresh", status="restarting")
+        try:
+            if self._ticker:
+                self._ticker.close()
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+        await self.start()
 
     @staticmethod
     def _normalise_tick(raw: dict) -> Tick | None:
