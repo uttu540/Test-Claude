@@ -149,8 +149,10 @@ class ZerodhaFeed:
         self._on_tick = on_tick
         self._ticker: KiteTicker | None = None
         self._running = False
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
         redis = get_redis()
         access_token = await redis.get("kite:access_token")
 
@@ -225,14 +227,12 @@ class ZerodhaFeed:
     def _schedule_token_refresh(self) -> None:
         """Schedule a feed restart with fresh token — called from ticker thread."""
         import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.ensure_future(self._restart_with_fresh_token())
-                )
-        except Exception as e:
-            log.error("zerodha_feed.schedule_refresh_error", error=str(e))
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self._restart_with_fresh_token())
+            )
+        else:
+            log.error("zerodha_feed.schedule_refresh_error", error="no loop ref — restart bot manually")
 
     async def _restart_with_fresh_token(self) -> None:
         """Stop current ticker, re-read token from Redis, reconnect."""
