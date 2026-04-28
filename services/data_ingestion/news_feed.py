@@ -176,15 +176,20 @@ class NewsFeedService:
 
     def _match_symbol(self, text: str, symbols: list[str]) -> str | None:
         """
-        Find which symbol the article is about by checking
-        if the company name appears in the article text.
+        Find which symbol the article is about.
+        Uses word-boundary matching to avoid false positives like
+        'LT' matching 'belt' or 'health'.
         Returns the first match, or None for market-wide news.
         """
+        import re
         text_lower = text.lower()
         for sym in symbols:
             company = SYMBOL_KEYWORDS.get(sym, "")
-            # Check both company name and trading symbol
-            if company.lower() in text_lower or sym.lower() in text_lower:
+            # Company name: substring match is fine (long multi-word names are unambiguous)
+            if company and len(company) >= 5 and company.lower() in text_lower:
+                return sym
+            # Trading symbol: require word boundary to avoid short-code false positives
+            if sym and re.search(r'\b' + re.escape(sym.lower()) + r'\b', text_lower):
                 return sym
         return None   # Market-wide news
 

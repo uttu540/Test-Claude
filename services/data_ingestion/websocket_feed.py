@@ -85,38 +85,56 @@ class CandleAggregator:
         self._on_candle = on_candle_complete
         # {symbol: {timeframe: current_candle_data}}
         self._candles: dict[str, dict[str, dict]] = {}
+        # Track last seen cumulative day-volume per symbol to compute per-tick delta.
+        # Kite sends volume_traded as running total for the session, not per-tick delta.
+        self._last_cum_vol: dict[str, int] = {}
 
     def process_tick(self, tick: Tick) -> None:
         sym = tick.trading_symbol
         if sym not in self._candles:
             self._candles[sym] = {}
 
+        # Compute per-tick volume delta from Kite's cumulative day volume.
+        cum_vol  = tick.volume
+        prev_vol = self._last_cum_vol.get(sym, cum_vol)
+        vol_delta = max(0, cum_vol - prev_vol)   # guard against resets / reconnects
+        self._last_cum_vol[sym] = cum_vol
+
+        # Normalise timestamp to IST naive for bucketing (Kite sends UTC-aware).
+        ts = self._to_ist_naive(tick.timestamp)
+
         for tf, delta in self.TIMEFRAMES.items():
-            # Bucket the tick into its candle period
-            period_start = self._get_period_start(tick.timestamp, delta)
+            period_start = self._get_period_start(ts, delta)
 
             if tf not in self._candles[sym]:
-                # Start a new candle
-                self._candles[sym][tf] = self._new_candle(sym, tf, period_start, tick)
+                self._candles[sym][tf] = self._new_candle(sym, tf, period_start, tick, vol_delta)
                 continue
 
             candle = self._candles[sym][tf]
 
             if candle["timestamp"] == period_start:
-                # Update existing candle
                 candle["high"]   = max(candle["high"],   tick.last_price)
                 candle["low"]    = min(candle["low"],    tick.last_price)
                 candle["close"]  = tick.last_price
-                candle["volume"] += tick.volume
+                candle["volume"] += vol_delta
             else:
-                # Candle period rolled over — emit the completed candle
+                # Candle period rolled over — emit completed candle then start fresh
                 completed = OHLCVCandle(**candle)
                 self._on_candle(completed)
-                # Start fresh
-                self._candles[sym][tf] = self._new_candle(sym, tf, period_start, tick)
+                self._candles[sym][tf] = self._new_candle(sym, tf, period_start, tick, vol_delta)
+
+    def flush_open_candles(self) -> None:
+        """Emit all in-progress candles — call at market close (3:30 PM) so the
+        last candle of the session is not silently dropped."""
+        for sym, tfs in self._candles.items():
+            for tf, candle in tfs.items():
+                if candle.get("close") is not None:
+                    self._on_candle(OHLCVCandle(**candle))
+        self._candles.clear()
+        self._last_cum_vol.clear()
 
     @staticmethod
-    def _new_candle(symbol: str, tf: str, ts: datetime, tick: Tick) -> dict:
+    def _new_candle(symbol: str, tf: str, ts: datetime, tick: Tick, vol_delta: int) -> dict:
         return {
             "trading_symbol": symbol,
             "timeframe": tf,
@@ -124,12 +142,22 @@ class CandleAggregator:
             "high":    tick.last_price,
             "low":     tick.last_price,
             "close":   tick.last_price,
-            "volume":  tick.volume,
+            "volume":  vol_delta,
             "timestamp": ts,
         }
 
     @staticmethod
+    def _to_ist_naive(ts: datetime) -> datetime:
+        """Convert any datetime to IST naive for consistent bucket arithmetic."""
+        from zoneinfo import ZoneInfo
+        IST = ZoneInfo("Asia/Kolkata")
+        if ts.tzinfo is not None:
+            ts = ts.astimezone(IST).replace(tzinfo=None)
+        return ts
+
+    @staticmethod
     def _get_period_start(ts: datetime, delta: timedelta) -> datetime:
+        """ts must be IST naive (ensured by _to_ist_naive before calling)."""
         from config.market_hours import MARKET_OPEN
         epoch = datetime(ts.year, ts.month, ts.day, MARKET_OPEN.hour, MARKET_OPEN.minute)
         elapsed = (ts - epoch).total_seconds()
@@ -424,7 +452,7 @@ class TickRedisWriter:
                         "bq":  tick.buy_quantity,
                         "sq":  tick.sell_quantity,
                     })
-                    pipe.setex(f"market:tick:{tick.trading_symbol}", 60, data)
+                    pipe.setex(f"market:tick:{tick.trading_symbol}", 300, data)
                     pipe.zadd("market:prices", {tick.trading_symbol: tick.last_price})
                 await pipe.execute()
         except Exception as e:
@@ -512,6 +540,10 @@ class FeedManager:
         self._loop = asyncio.get_running_loop()
         await self._feed.start()
         log.info("feed_manager.started", env=settings.app_env.value)
+
+    def flush_open_candles(self) -> None:
+        """Emit all in-progress candles — call at EOD so last bar is not lost."""
+        self._candle_aggregator.flush_open_candles()
 
     async def stop(self) -> None:
         self._feed.stop()

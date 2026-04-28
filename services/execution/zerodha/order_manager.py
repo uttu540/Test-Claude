@@ -112,7 +112,10 @@ class ZerodhaOrderManager(BrokerInterface):
             if order_type in ("SL", "SL-M"):
                 params["trigger_price"] = trigger_price
 
-            broker_order_id = self._place_with_retry(kite, params)
+            import asyncio as _asyncio, functools as _functools
+            broker_order_id = await _asyncio.get_event_loop().run_in_executor(
+                None, _functools.partial(self._place_with_retry, kite, params)
+            )
 
             await self._record_order(
                 internal_id      = order_db_id,
@@ -219,7 +222,10 @@ class ZerodhaOrderManager(BrokerInterface):
             if order_kwargs["order_type"] in ("SL", "SL-M"):
                 params["trigger_price"] = order_kwargs["trigger_price"]
 
-            broker_order_id = self._place_with_retry(kite, params)
+            import asyncio as _asyncio, functools as _functools
+            broker_order_id = await _asyncio.get_event_loop().run_in_executor(
+                None, _functools.partial(self._place_with_retry, kite, params)
+            )
             log.info("order.reauth_retry_success", symbol=order_kwargs["symbol"], broker_id=broker_order_id)
             await get_notifier().system_error(
                 "OrderManager",

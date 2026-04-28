@@ -284,7 +284,7 @@ NIFTY500: list[tuple[str, str, str]] = [
     ("YESBANK",      "Yes Bank Ltd",                                "Financials"),
     ("ZEEL",         "Zee Entertainment Enterprises Ltd",           "Communication Services"),
     ("ZENSARTECH",   "Zensar Technologies Ltd",                     "Information Technology"),
-    ("ZOMATO",       "Zomato Ltd",                                  "Consumer Discretionary"),
+    # ZOMATO renamed to ETERNAL on NSE (Sep 2024) — removed to avoid dead-ticker subscriptions
 
     # ── Nifty Smallcap (liquid subset) ───────────────────────────────────────
     ("AARTIDRUGS",   "Aarti Drugs Ltd",                             "Healthcare"),

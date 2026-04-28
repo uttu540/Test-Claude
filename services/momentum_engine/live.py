@@ -99,7 +99,8 @@ class MomentumLiveEngine:
             # Stock 20-day ROC from the last 21 bars of daily_df
             if len(daily_df) >= 21:
                 closes = daily_df["close"] if "close" in daily_df.columns else daily_df["Close"]
-                stock_roc20 = float((closes.iloc[-1] / closes.iloc[-21] - 1) * 100)
+                base_close = float(closes.iloc[-21])
+                stock_roc20 = float((closes.iloc[-1] / base_close - 1) * 100) if base_close > 0 else 0.0
             else:
                 stock_roc20 = 0.0
 
@@ -143,10 +144,9 @@ class MomentumLiveEngine:
         if not momentum_signals:
             return []
 
-        # Set cooldown for today so this symbol doesn't re-fire until tomorrow
-        await redis.setex(cooldown_key, 86_400, "1")
-
         # Convert MomentumSignal → Signal
+        # Cooldown is set in main.py AFTER TradeExecutor succeeds — not here.
+        # Setting it here would lock out a symbol even if risk/AI blocked the trade.
         live_signals: list[Signal] = []
         for ms in momentum_signals:
             try:

@@ -93,6 +93,13 @@ class Signal:
     notes:           str            = ""
 
     def to_dict(self) -> dict:
+        import numpy as _np
+        def _clean(v):
+            if isinstance(v, (_np.integer,)):  return int(v)
+            if isinstance(v, (_np.floating,)): return float(v)
+            if isinstance(v, (_np.bool_,)):    return bool(v)
+            if isinstance(v, dict):            return {k: _clean(vv) for k, vv in v.items()}
+            return v
         return {
             "symbol":        self.trading_symbol,
             "timeframe":     self.timeframe,
@@ -102,7 +109,7 @@ class Signal:
             "price":         self.price_at_signal,
             "timestamp":     self.timestamp.isoformat(),
             "notes":         self.notes,
-            "indicators":    self.indicators,
+            "indicators":    _clean(self.indicators),
         }
 
 
@@ -120,6 +127,8 @@ _REGIME_ALLOWED: dict[str, set[str] | None] = {
         "HAMMER", "ENGULFING_BULL",
         # Chart patterns
         "DOUBLE_BOTTOM", "BULL_FLAG", "DARVAS_BREAKOUT", "NR7_SETUP",
+        # Momentum engine (daily TF) — fire only in TRENDING_UP by design
+        "BREAKOUT_52W", "VOLUME_THRUST",
     },
     "TRENDING_DOWN": {
         "BREAKOUT_LOW", "EMA_CROSSOVER_DOWN", "MACD_CROSS_DOWN",
@@ -1082,11 +1091,11 @@ class SignalDetector:
         # ── Double Top ────────────────────────────────────────────────────────
         # Daily TF only + prior uptrend required — mirror of DOUBLE_BOTTOM fix.
         # A reversal pattern needs something to reverse from.
+        prior_bullish = False
         if tf == "1day" and "swing_high" in df.columns:
-            prior_bullish = False
             if "ema_stack" in df.columns and len(df) >= 30:
                 prior_stack = df["ema_stack"].iloc[-30:-5].dropna()
-                prior_bullish = (prior_stack == 1).any()
+                prior_bullish = bool((prior_stack == 1).any())
 
         if tf == "1day" and "swing_high" in df.columns and prior_bullish:
             recent = df["swing_high"].iloc[-80:].dropna()

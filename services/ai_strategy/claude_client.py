@@ -86,6 +86,9 @@ class ClaudeStrategyClient:
         try:
             ctx      = await self._build_context(signal)
             decision = await self._call_claude(ctx)
+            if decision is None:
+                # tenacity reraise=False exhausted all retries without a result
+                return AIDecision.skip("Claude API temporarily unavailable — retries exhausted")
             await self._log_decision(signal, ctx, decision)
 
             log.info(
@@ -200,12 +203,15 @@ class ClaudeStrategyClient:
                 system     = SYSTEM_PROMPT,
                 messages   = [{"role": "user", "content": user_prompt}],
             )
-        except APITimeoutError:
+        except APITimeoutError as e:
             log.warning("claude_client.timeout", symbol=ctx.symbol)
-            return AIDecision.skip("Claude API timeout")
+            raise   # let tenacity retry on transient timeout
         except APIError as e:
+            status = getattr(e, "status_code", None)
+            if status and status >= 500:
+                raise   # server error — retry
             log.error("claude_client.api_error", symbol=ctx.symbol, error=str(e))
-            return AIDecision.skip(f"Claude API error: {e}")
+            return AIDecision.skip(f"Claude API error: {e}")  # 4xx permanent — don't retry
 
         latency_ms    = int(time.time() * 1000) - start_ms
         raw_text      = response.content[0].text.strip()

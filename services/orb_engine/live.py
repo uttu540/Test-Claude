@@ -57,8 +57,11 @@ def _nifty_trend_up(candle_buffer: dict[str, dict[str, deque]], today: date) -> 
     """
     nifty_buf = candle_buffer.get("NIFTY 50", {}).get("15min")
     if not nifty_buf:
-        # No Nifty data in buffer — default to True (don't block if unknown)
-        log.warning("orb_live.nifty_missing", msg="No Nifty 15min data in buffer — assuming trend-up")
+        from config.settings import settings as _s
+        if _s.uses_real_broker:
+            log.warning("orb_live.nifty_missing", msg="No Nifty 15min data — blocking ORB in live mode")
+            return False
+        log.warning("orb_live.nifty_missing", msg="No Nifty 15min data in buffer — assuming trend-up (paper)")
         return True
 
     candles = _today_15min(nifty_buf, today)

@@ -32,6 +32,16 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+# Set by main.py at startup so /orb command can call job_orb_scan()
+_orb_scan_callback: "Callable | None" = None
+
+from typing import Callable
+
+
+def register_orb_scan_callback(fn: Callable) -> None:
+    global _orb_scan_callback
+    _orb_scan_callback = fn
+
 
 class AlertLevel(str, Enum):
     INFO    = "ℹ️"
@@ -514,6 +524,34 @@ async def _cmd_positions(update: object, context: object) -> None:
         await update.message.reply_text(f"⚠️ Could not fetch positions: {e}")
 
 
+async def _cmd_orb(update: object, context: object) -> None:
+    """Handle /orb — manually trigger ORB scan from within the running bot."""
+    from telegram import Update
+    if not isinstance(update, Update) or not update.message:
+        return
+    if not _is_authorized(str(update.effective_user.id)):
+        return
+    if _orb_scan_callback is None:
+        await update.message.reply_text("⚠️ ORB scan not wired — bot may be starting up.")
+        return
+    await update.message.reply_text("🔍 Triggering ORB scan...")
+    try:
+        signals = await _orb_scan_callback()
+        if not signals:
+            await update.message.reply_text("📭 ORB scan complete — no setups found.")
+        else:
+            lines = [f"🎯 *ORB scan: {len(signals)} setup(s) found*\n──────────────────"]
+            for s in signals:
+                lines.append(
+                    f"▲ *{s.trading_symbol}* @ ₹{s.price_at_signal:.2f}\n"
+                    f"   Stop ₹{s.indicators.get('stop_price', 0):.2f}  "
+                    f"rvol {s.indicators.get('rvol', 0):.1f}×"
+                )
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"🚨 ORB scan error: {e}")
+
+
 async def start_telegram_polling() -> object | None:
     """
     Start a Telegram Application that handles:
@@ -536,6 +574,7 @@ async def start_telegram_polling() -> object | None:
     app.add_handler(CommandHandler("status",    _cmd_status))
     app.add_handler(CommandHandler("pnl",       _cmd_pnl))
     app.add_handler(CommandHandler("positions", _cmd_positions))
+    app.add_handler(CommandHandler("orb",       _cmd_orb))
 
     # Inline button callbacks — semi-auto trade approvals
     app.add_handler(CallbackQueryHandler(_handle_approval_callback))
@@ -564,7 +603,7 @@ async def start_telegram_polling() -> object | None:
         drop_pending_updates=True,   # Discard messages queued while bot was offline
     )
     log.info("telegram.polling_started",
-             commands=["/status", "/pnl", "/positions", "/help"],
+             commands=["/status", "/pnl", "/positions", "/orb", "/help"],
              semi_auto=settings.is_semi_auto)
     return app
 

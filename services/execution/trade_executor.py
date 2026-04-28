@@ -70,22 +70,33 @@ class TradeExecutor:
             return None
 
         # ── 2. Claude AI evaluation ───────────────────────────────────────────
-        ai_decision: AIDecision = await get_claude_client().analyse(signal)
+        # ORB_BREAKOUT has its own quality gates (OR range, volume, Nifty gate)
+        # and lacks RSI/MACD/ATR% — skip AI to avoid false "data anomaly" rejections.
+        from services.technical_engine.signal_generator import SignalType
+        if signal.signal_type != SignalType.ORB_BREAKOUT:
+            ai_decision: AIDecision = await get_claude_client().analyse(signal)
 
-        if not ai_decision.is_actionable:
-            log.info(
-                "executor.ai_blocked",
-                symbol     = signal.trading_symbol,
-                action     = ai_decision.action.value,
-                confidence = ai_decision.confidence,
-                reasoning  = ai_decision.reasoning[:120],
+            if not ai_decision.is_actionable:
+                log.info(
+                    "executor.ai_blocked",
+                    symbol     = signal.trading_symbol,
+                    action     = ai_decision.action.value,
+                    confidence = ai_decision.confidence,
+                    reasoning  = ai_decision.reasoning[:120],
+                )
+                await self._record_rejection(
+                    signal,
+                    stage  = "AI",
+                    reason = f"{ai_decision.action.value}: {ai_decision.reasoning[:200]}",
+                )
+                return None
+        else:
+            from services.ai_strategy.schemas import TradeAction
+            ai_decision = AIDecision(
+                action     = TradeAction.BUY,
+                confidence = signal.confidence / 100.0,
+                reasoning  = "ORB_BREAKOUT: AI evaluation skipped — strategy uses own quality gates",
             )
-            await self._record_rejection(
-                signal,
-                stage  = "AI",
-                reason = f"{ai_decision.action.value}: {ai_decision.reasoning[:200]}",
-            )
-            return None
 
         trade_id  = uuid.uuid4()
         direction = "LONG" if signal.direction == Direction.BULLISH else "SHORT"
@@ -120,6 +131,10 @@ class TradeExecutor:
         # is satisfied when _record_order runs inside place_order / place_stop_loss.
         broker = get_broker()
         trade  = await self._record_trade(trade_id, signal, direction, decision, ai_decision, broker.BROKER)
+        if trade is None:
+            # DB write failed — abort; no order should be placed without a trade record
+            log.error("executor.aborted_no_db_record", symbol=signal.trading_symbol)
+            return None
 
         # ── 5. Entry order ────────────────────────────────────────────────────
         broker_id = await broker.place_order(
@@ -135,10 +150,15 @@ class TradeExecutor:
 
         if not broker_id:
             log.error("executor.entry_failed", symbol=signal.trading_symbol)
+            # Mark orphan trade CANCELLED so lifecycle does not try to manage it
+            await self._cancel_trade_record(trade_id)
             return None
 
+        # Back-fill entry_order_id so reports can JOIN trades → orders
+        await self._update_entry_order_id(trade_id, side)
+
         # ── 6. Stop-loss order ────────────────────────────────────────────────
-        await broker.place_stop_loss(
+        sl_id = await broker.place_stop_loss(
             symbol        = signal.trading_symbol,
             exchange      = EXCHANGE,
             quantity      = decision.position_size,
@@ -148,6 +168,17 @@ class TradeExecutor:
             tag           = "BOT_SL",
             trade_id      = str(trade_id),
         )
+        if not sl_id:
+            log.error("executor.sl_failed", symbol=signal.trading_symbol,
+                      note="position is naked — squaring off immediately")
+            await broker.place_order(
+                symbol=signal.trading_symbol, exchange=EXCHANGE,
+                transaction_type="SELL" if side == "BUY" else "BUY",
+                quantity=decision.position_size, order_type="MARKET",
+                product=PRODUCT, tag="BOT_EMERGENCY_SQ", trade_id=str(trade_id),
+            )
+            await self._cancel_trade_record(trade_id)
+            return None
 
         # ── 7. Target order ───────────────────────────────────────────────────
         await broker.place_target(
@@ -191,6 +222,44 @@ class TradeExecutor:
         return trade
 
     # ── DB ────────────────────────────────────────────────────────────────────
+
+    async def _update_entry_order_id(self, trade_id: uuid.UUID, side: str) -> None:
+        """Back-fill Trade.entry_order_id after the entry MARKET order is confirmed."""
+        try:
+            from sqlalchemy import text
+            async with get_db_session() as session:
+                result = await session.execute(
+                    text("""
+                        SELECT id FROM orders
+                        WHERE parent_trade_id = :tid
+                          AND transaction_type = :side
+                          AND order_type = 'MARKET'
+                        ORDER BY placed_at DESC LIMIT 1
+                    """),
+                    {"tid": str(trade_id), "side": side},
+                )
+                row = result.fetchone()
+                if row:
+                    await session.execute(
+                        text("UPDATE trades SET entry_order_id = :oid WHERE id = :tid"),
+                        {"oid": str(row.id), "tid": str(trade_id)},
+                    )
+                    await session.commit()
+        except Exception as e:
+            log.warning("executor.entry_order_id_failed", trade_id=str(trade_id), error=str(e))
+
+    async def _cancel_trade_record(self, trade_id: uuid.UUID) -> None:
+        """Mark a Trade row CANCELLED — used when entry order fails after DB insert."""
+        try:
+            from sqlalchemy import text
+            async with get_db_session() as session:
+                await session.execute(
+                    text("UPDATE trades SET status='CANCELLED' WHERE id=:id"),
+                    {"id": str(trade_id)},
+                )
+                await session.commit()
+        except Exception as e:
+            log.error("executor.cancel_record_failed", error=str(e), trade_id=str(trade_id))
 
     async def _record_rejection(
         self,
@@ -274,5 +343,4 @@ class TradeExecutor:
                 return trade
         except Exception as e:
             log.error("executor.db_record_failed", error=str(e), trade_id=str(trade_id))
-
-        return trade
+            return None

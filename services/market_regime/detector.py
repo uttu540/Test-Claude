@@ -131,9 +131,14 @@ class MarketRegimeDetector:
         else:
             base = "RANGING"
 
+        # ── Hard news override: extreme panic regardless of trend ────────────
+        if news_sentiment is not None and news_sentiment < -0.7:
+            log.info("regime.news_panic_override", news=news_sentiment, from_base=base)
+            base = "HIGH_VOLATILITY"
+
         # ── Soft overrides: GIFT Nifty + news nudge RANGING only ─────────────
         # We only upgrade RANGING — strong trends aren't reversed by pre-market data.
-        if base == "RANGING":
+        elif base == "RANGING":
             base = self._apply_soft_overrides(base, gift_nifty_pct, news_sentiment)
 
         log.info(

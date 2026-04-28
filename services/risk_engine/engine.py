@@ -107,6 +107,8 @@ class RiskEngine:
         position_value = qty * entry_price
         if position_value > settings.max_position_size_inr:
             qty = int(settings.max_position_size_inr / entry_price)
+            if qty <= 0:
+                return RiskDecision(approved=False, reason="Position capped to 0 shares — price too high for max_position_size_inr")
 
         # Reject if position value too small — not worth brokerage cost
         MIN_POSITION_VALUE = 5_000
@@ -147,9 +149,11 @@ class RiskEngine:
                     {"today": today},
                 )
                 return float(result.scalar() or 0)
-        except Exception:
-            pass
-        return 0.0
+        except Exception as e:
+            # Fail-safe: treat DB error as if daily limit is hit — never allow trades when
+            # we can't verify the loss limit. Returning 0 would silently bypass the check.
+            log.error("risk.db_error.daily_pnl", error=str(e))
+            return -float("inf")
 
     async def _get_open_count(self) -> int:
         try:
@@ -158,9 +162,10 @@ class RiskEngine:
                     text("SELECT COUNT(*) FROM trades WHERE status = 'OPEN'")
                 )
                 return int(result.scalar() or 0)
-        except Exception:
-            pass
-        return 0
+        except Exception as e:
+            # Fail-safe: report max positions so the check blocks trading.
+            log.error("risk.db_error.open_count", error=str(e))
+            return settings.max_open_positions
 
     async def _has_open_position(self, symbol: str) -> bool:
         try:
@@ -170,9 +175,10 @@ class RiskEngine:
                     {"sym": symbol},
                 )
                 return int(result.scalar() or 0) > 0
-        except Exception:
-            pass
-        return False
+        except Exception as e:
+            # Fail-safe: assume open position exists so we don't enter a duplicate.
+            log.error("risk.db_error.open_position", symbol=symbol, error=str(e))
+            return True
 
     async def _has_traded_today(self, symbol: str) -> bool:
         today = date.today()
@@ -188,6 +194,7 @@ class RiskEngine:
                     {"sym": symbol, "today": today},
                 )
                 return int(result.scalar() or 0) > 0
-        except Exception:
-            pass
-        return False
+        except Exception as e:
+            # Fail-safe: assume traded today to prevent duplicate entries.
+            log.error("risk.db_error.traded_today", symbol=symbol, error=str(e))
+            return True

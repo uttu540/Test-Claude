@@ -122,15 +122,30 @@ CONFIG_SCHEMA: dict[str, dict] = {
     "regime_cap_high_volatility":{"default": 60,  "type": "int", "min": 0, "max": 100, "step": 5, "label": "HIGH_VOLATILITY cap", "group": "regime_caps"},
     # ── Regime allowed signals (comma-separated signal type names) ─────────────
     "regime_trending_up_signals": {
-        "default": "BREAKOUT_HIGH,EMA_CROSSOVER_UP,MACD_CROSS_UP,HIGH_RVOL,BB_EXPANSION,ABOVE_200_EMA,ORB_BREAKOUT,VWAP_RECLAIM",
+        "default": (
+            "BREAKOUT_HIGH,EMA_CROSSOVER_UP,MACD_CROSS_UP,HIGH_RVOL,BB_EXPANSION,"
+            "ABOVE_200_EMA,ORB_BREAKOUT,VWAP_RECLAIM,"
+            "HAMMER,ENGULFING_BULL,"
+            "DOUBLE_BOTTOM,BULL_FLAG,DARVAS_BREAKOUT,NR7_SETUP,"
+            "BREAKOUT_52W,VOLUME_THRUST"
+        ),
         "type": "str", "label": "TRENDING_UP signals", "group": "regime_signals",
     },
     "regime_trending_down_signals": {
-        "default": "BREAKOUT_LOW,EMA_CROSSOVER_DOWN,MACD_CROSS_DOWN,HIGH_RVOL,BB_EXPANSION,BELOW_200_EMA,ORB_BREAKOUT,VWAP_RECLAIM",
+        "default": (
+            "BREAKOUT_LOW,EMA_CROSSOVER_DOWN,MACD_CROSS_DOWN,HIGH_RVOL,BB_EXPANSION,"
+            "BELOW_200_EMA,ORB_BREAKOUT,VWAP_RECLAIM,"
+            "SHOOTING_STAR,ENGULFING_BEAR,EVENING_STAR,"
+            "DOUBLE_TOP,BEAR_FLAG,NR7_SETUP"
+        ),
         "type": "str", "label": "TRENDING_DOWN signals", "group": "regime_signals",
     },
     "regime_ranging_signals": {
-        "default": "RSI_OVERSOLD,RSI_OVERBOUGHT,BB_SQUEEZE,BB_EXPANSION,VWAP_RECLAIM,HIGH_RVOL",
+        "default": (
+            "RSI_OVERSOLD,RSI_OVERBOUGHT,BB_SQUEEZE,BB_EXPANSION,VWAP_RECLAIM,HIGH_RVOL,"
+            "HAMMER,SHOOTING_STAR,ENGULFING_BULL,ENGULFING_BEAR,"
+            "MORNING_STAR,EVENING_STAR,DOUBLE_BOTTOM,DOUBLE_TOP,NR7_SETUP"
+        ),
         "type": "str", "label": "RANGING signals", "group": "regime_signals",
     },
     "regime_high_volatility_signals": {
@@ -170,6 +185,17 @@ async def get_bot_config() -> dict:
     return result
 
 
+_VALID_SIGNAL_NAMES: set[str] | None = None
+
+
+def _get_valid_signal_names() -> set[str]:
+    global _VALID_SIGNAL_NAMES
+    if _VALID_SIGNAL_NAMES is None:
+        from services.technical_engine.signal_generator import SignalType
+        _VALID_SIGNAL_NAMES = {st.value for st in SignalType}
+    return _VALID_SIGNAL_NAMES
+
+
 async def set_bot_config(updates: dict) -> dict:
     """Merge updates into stored config, persist to Redis, and return the full config."""
     from database.connection import get_redis
@@ -178,9 +204,18 @@ async def set_bot_config(updates: dict) -> dict:
     raw = await redis.get(REDIS_KEY)
     stored: dict = json.loads(raw) if raw else {}
 
+    valid_signal_names = _get_valid_signal_names()
     for key, val in updates.items():
-        if key in CONFIG_SCHEMA:
-            stored[key] = val
+        if key not in CONFIG_SCHEMA:
+            continue
+        # Validate regime signal lists against SignalType enum
+        if key.startswith("regime_") and key.endswith("_signals") and isinstance(val, str):
+            names = [n.strip() for n in val.split(",") if n.strip()]
+            bad = [n for n in names if n not in valid_signal_names]
+            if bad:
+                log.warning("bot_config.invalid_signal_names", key=key, unknown=bad)
+                raise ValueError(f"Unknown signal type(s) in {key}: {bad}")
+        stored[key] = val
 
     await redis.set(REDIS_KEY, json.dumps(stored))
     log.info("bot_config.updated", keys=list(updates.keys()))

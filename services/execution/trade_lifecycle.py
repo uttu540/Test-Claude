@@ -452,10 +452,25 @@ class TradeLifecycleManager:
         # ── Update Trade record ───────────────────────────────────────────────
         try:
             async with get_db_session() as session:
+                # Find the exit order's internal UUID (best-effort; NULL if not found)
+                exit_order_result = await session.execute(
+                    text("""
+                        SELECT id FROM orders
+                        WHERE parent_trade_id = :tid
+                          AND status = 'COMPLETE'
+                          AND order_type IN ('SL-M', 'LIMIT', 'MARKET')
+                        ORDER BY placed_at DESC LIMIT 1
+                    """),
+                    {"tid": str(trade_id)},
+                )
+                exit_order_row = exit_order_result.fetchone()
+                exit_order_id  = str(exit_order_row.id) if exit_order_row else None
+
                 await session.execute(
                     text("""
                         UPDATE trades SET
                             status            = 'CLOSED',
+                            exit_order_id     = :exit_order_id,
                             exit_price        = :exit_price,
                             exit_quantity     = :qty,
                             exit_time         = :exit_time,
@@ -478,6 +493,7 @@ class TradeLifecycleManager:
                         WHERE id = :trade_id
                     """),
                     {
+                        "exit_order_id":    exit_order_id,
                         "exit_price":       exit_price,
                         "qty":              quantity,
                         "exit_time":        now,

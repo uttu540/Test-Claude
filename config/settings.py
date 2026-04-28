@@ -60,7 +60,7 @@ class Settings(BaseSettings):
 
     # ── Anthropic / Claude ────────────────────────────────────────────────────
     anthropic_api_key: str = ""
-    claude_model: str = "claude-opus-4-6"
+    claude_model: str = "claude-sonnet-4-6"
 
     # ── Telegram ──────────────────────────────────────────────────────────────
     telegram_bot_token: str = ""

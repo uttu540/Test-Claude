@@ -30,7 +30,17 @@ log = structlog.get_logger(__name__)
 REDIS_ACCESS_TOKEN_KEY   = "kite:access_token"
 REDIS_TOKEN_MAP_KEY      = "kite:token_map"       # symbol → instrument_token
 REDIS_INSTRUMENTS_KEY    = "kite:instrument_tokens"
-TOKEN_TTL_SECONDS        = 86_400                  # 24 hours
+
+
+def _ttl_until_midnight_ist() -> int:
+    """Zerodha tokens expire at midnight IST regardless of when they were issued.
+    Return seconds remaining until then, minus a 60s safety buffer."""
+    from datetime import timezone, timedelta
+    IST = timezone(timedelta(hours=5, minutes=30))
+    now = datetime.now(IST)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    secs = int((midnight - now).total_seconds()) - 60
+    return max(secs, 300)   # at least 5 min in edge cases
 
 
 class ZerodhaAuthenticator:
@@ -87,6 +97,7 @@ class ZerodhaAuthenticator:
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
+            current_url = login_url   # fallback if exception fires before page.url is read
             try:
                 page = await browser.new_page()
 
@@ -197,8 +208,9 @@ class ZerodhaAuthenticator:
 
     async def _store_in_redis(self, access_token: str) -> None:
         redis = get_redis()
-        await redis.setex(REDIS_ACCESS_TOKEN_KEY, TOKEN_TTL_SECONDS, access_token)
-        log.info("zerodha_auth.token_stored", ttl_hours=TOKEN_TTL_SECONDS // 3600)
+        ttl = _ttl_until_midnight_ist()
+        await redis.setex(REDIS_ACCESS_TOKEN_KEY, ttl, access_token)
+        log.info("zerodha_auth.token_stored", ttl_secs=ttl, expires_at="midnight_IST")
 
     # ── Instrument Token Cache ────────────────────────────────────────────────
 

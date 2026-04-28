@@ -56,7 +56,10 @@ class PaperBroker(BrokerInterface):
         tag:              str   = "",
         trade_id:         str | None = None,
     ) -> str | None:
-        fill_price = self._apply_slippage(price or trigger_price, transaction_type, order_type)
+        base_price = price or trigger_price
+        if not base_price and order_type == "MARKET":
+            base_price = await self._get_market_price(symbol)
+        fill_price = self._apply_slippage(base_price, transaction_type, order_type)
         fake_id    = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
 
         log.info(
@@ -116,7 +119,24 @@ class PaperBroker(BrokerInterface):
         # No broker call needed for paper.
         log.info("paper.square_off_all_intraday", note="handled_by_lifecycle_manager")
 
-    # ── Slippage model ────────────────────────────────────────────────────────
+    # ── Price + slippage ──────────────────────────────────────────────────────
+
+    async def _get_market_price(self, symbol: str) -> float:
+        """Fetch last traded price from Redis tick cache for paper MARKET fills."""
+        import json as _json
+        try:
+            from database.connection import get_redis
+            redis = get_redis()
+            raw = await redis.get(f"market:tick:{symbol}")
+            if raw:
+                lp = float(_json.loads(raw).get("lp", 0) or 0)
+                if lp > 0:
+                    return lp
+        except Exception:
+            pass
+        log.warning("paper.no_market_price", symbol=symbol,
+                    note="fill at 0 — tick not in Redis, restart feed or check subscription")
+        return 0.0
 
     def _apply_slippage(
         self,
@@ -124,11 +144,8 @@ class PaperBroker(BrokerInterface):
         transaction_type: str,
         order_type:       str,
     ) -> float:
-        """
-        Apply simulated slippage to market orders.
-        Override this to implement more realistic fill models.
-        """
-        if not price or order_type != "MARKET":
+        """Apply simulated slippage to market orders."""
+        if price <= 0 or order_type != "MARKET":
             return price
         direction = 1 if transaction_type == "BUY" else -1
         return round(price * (1 + direction * _SLIPPAGE_PCT), 4)

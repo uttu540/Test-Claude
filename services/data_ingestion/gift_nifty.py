@@ -26,7 +26,6 @@ log = structlog.get_logger(__name__)
 
 # Tickers tried in order until one succeeds
 _GIFT_NIFTY_TICKERS = [
-    "^NIFTYFUTURES",   # GIFT Nifty futures (may not be on Yahoo Finance)
     "^NSEI",           # Nifty 50 spot — pre-open session shows indicative price
 ]
 

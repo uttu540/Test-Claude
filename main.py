@@ -73,9 +73,19 @@ console = Console()
 _candle_buffer: dict[str, dict[str, deque]] = {}
 _active_signal_tasks: set[str] = set()   # Symbols with an in-flight signal task
 _signal_semaphore: asyncio.Semaphore | None = None  # Initialised in main() after event loop starts
-BUFFER_MAX = 300   # Keep last 300 candles per symbol/timeframe
+BUFFER_MAX = 300   # Default; overridden per-timeframe by BUFFER_MAX_BY_TF
+# 1min: 375 candles/session — 300 would silently drop the first ~75 bars of the day.
+# Use 500 to keep today + partial yesterday without unbounded memory growth.
+BUFFER_MAX_BY_TF: dict[str, int] = {
+    "1min":  500,
+    "5min":  300,
+    "15min": 300,
+    "1hr":   300,
+    "1day":  300,
+}
 _scheduler: AsyncIOScheduler | None = None   # Set in main(); used by retry jobs
 _tick_count: int = 0                          # Rolling tick counter for diagnostics
+_feed_manager: "FeedManager | None" = None   # Set in main(); used by EOD flush
 
 
 # ─── Candle Handler ───────────────────────────────────────────────────────────
@@ -92,7 +102,7 @@ def on_candle_complete(candle: OHLCVCandle) -> None:
     if sym not in _candle_buffer:
         _candle_buffer[sym] = {}
     if tf not in _candle_buffer[sym]:
-        _candle_buffer[sym][tf] = deque(maxlen=BUFFER_MAX)
+        _candle_buffer[sym][tf] = deque(maxlen=BUFFER_MAX_BY_TF.get(tf, BUFFER_MAX))
 
     _candle_buffer[sym][tf].append({
         "open":   candle.open,
@@ -462,7 +472,12 @@ async def _run_signals(symbol: str) -> None:
         confidence_threshold = cfg.get("confidence_threshold", 75)
         if top.confidence >= confidence_threshold:
             executor = TradeExecutor()
-            await executor.execute(top)
+            trade = await executor.execute(top)
+            # Set momentum cooldown ONLY after a trade actually opened —
+            # not before, so risk/AI rejections don't block the symbol tomorrow.
+            if trade is not None and top.timeframe == "1day":
+                cooldown_key = f"momentum:cooldown:{symbol}"
+                await redis.setex(cooldown_key, 86_400, "1")
         else:
             log.info(
                 "signal.below_threshold",
@@ -655,7 +670,7 @@ async def job_market_open_briefing() -> None:
     )
 
 
-async def job_orb_scan() -> None:
+async def job_orb_scan() -> list:
     """
     10:00 AM IST — Scan all symbols for ORB breakouts.
 
@@ -667,7 +682,7 @@ async def job_orb_scan() -> None:
     """
     from config.market_hours import is_trading_day
     if not is_trading_day():
-        return
+        return []
 
     from datetime import date as _date
     from services.orb_engine.live import scan_orb_signals
@@ -681,13 +696,17 @@ async def job_orb_scan() -> None:
     from config.settings import settings as _settings
     if daily_pnl <= -_settings.daily_loss_limit_inr:
         log.warning("orb_scan.blocked_daily_loss_limit", daily_pnl=daily_pnl)
-        return
+        return []
 
     symbols = get_live_universe()
     today   = _date.today()
 
     log.info("orb_scan.start", symbols=len(symbols))
-    signals = scan_orb_signals(_candle_buffer, symbols, today)
+    import asyncio as _asyncio
+    import functools as _functools
+    signals = await _asyncio.get_event_loop().run_in_executor(
+        None, _functools.partial(scan_orb_signals, _candle_buffer, symbols, today)
+    )
 
     # Audit log — persist daily scan results to Redis (TTL 7 days)
     import json as _json
@@ -707,7 +726,7 @@ async def job_orb_scan() -> None:
 
     if not signals:
         log.info("orb_scan.no_setups")
-        return
+        return []
 
     # Cap at top 5 setups by volume ratio — prevents flooding positions on strong trend days
     MAX_ORB_TRADES = 5
@@ -726,6 +745,8 @@ async def job_orb_scan() -> None:
         except Exception as e:
             log.warning("orb_scan.execute_error", symbol=sig.trading_symbol, error=str(e))
 
+    return signals
+
 
 async def job_square_off_intraday() -> None:
     """3:12 PM IST — Square off all intraday positions and close them in DB."""
@@ -739,6 +760,13 @@ async def job_square_off_intraday() -> None:
     # Close all remaining OPEN trades in DB at current market price
     closed = await get_lifecycle_manager().close_all_open_trades(reason="TIME_EXIT")
     log.info("scheduler.square_off_db_closed", count=closed)
+
+
+async def job_flush_eod_candles() -> None:
+    """3:31 PM IST — Flush any open (in-progress) candles so last bar of day is not lost."""
+    if _feed_manager is not None:
+        _feed_manager.flush_open_candles()
+        log.info("scheduler.eod_candle_flush", status="done")
 
 
 async def job_eod_summary() -> None:
@@ -897,7 +925,7 @@ async def _preseed_candle_buffer() -> None:
                 if symbol not in _candle_buffer:
                     _candle_buffer[symbol] = {}
                 if "1day" not in _candle_buffer[symbol]:
-                    _candle_buffer[symbol]["1day"] = deque(maxlen=BUFFER_MAX)
+                    _candle_buffer[symbol]["1day"] = deque(maxlen=BUFFER_MAX_BY_TF.get("1day", BUFFER_MAX))
 
                 # Insert oldest-first into the deque
                 for row in reversed(rows):
@@ -959,7 +987,7 @@ async def _preseed_candle_buffer() -> None:
                 if symbol not in _candle_buffer:
                     _candle_buffer[symbol] = {}
                 if "15min" not in _candle_buffer[symbol]:
-                    _candle_buffer[symbol]["15min"] = deque(maxlen=BUFFER_MAX)
+                    _candle_buffer[symbol]["15min"] = deque(maxlen=BUFFER_MAX_BY_TF.get("15min", BUFFER_MAX))
 
                 for ts, row in df.iterrows():
                     _candle_buffer[symbol]["15min"].append({
@@ -1202,8 +1230,9 @@ async def startup() -> None:
                 "startup.semi_auto_no_auth",
                 reason="TELEGRAM_AUTHORIZED_IDS is empty — any Telegram user can approve trades!",
             )
-        from services.notifications.telegram_bot import start_telegram_polling
+        from services.notifications.telegram_bot import start_telegram_polling, register_orb_scan_callback
         app_tg = await start_telegram_polling()
+        register_orb_scan_callback(job_orb_scan)
         import main as _self
         _self._telegram_app = app_tg
 
@@ -1281,7 +1310,9 @@ async def main() -> None:
     _signal_semaphore = asyncio.Semaphore(75)  # max 75 concurrent signal scans
 
     # ── Feed ─────────────────────────────────────────────────────────────────
+    global _feed_manager
     feed = FeedManager()
+    _feed_manager = feed
     feed.add_candle_listener(on_candle_complete)
     await feed.start()
 
@@ -1296,6 +1327,7 @@ async def main() -> None:
     scheduler.add_job(job_market_open_briefing, CronTrigger(day_of_week="0-4", hour=9, minute=10, timezone="Asia/Kolkata"))
     scheduler.add_job(job_orb_scan,             CronTrigger(day_of_week="0-4", hour=10, minute=0, timezone="Asia/Kolkata"))
     scheduler.add_job(job_square_off_intraday,  CronTrigger(day_of_week="0-4", hour=15, minute=12, timezone="Asia/Kolkata"))
+    scheduler.add_job(job_flush_eod_candles,    CronTrigger(day_of_week="0-4", hour=15, minute=31, timezone="Asia/Kolkata"))
     scheduler.add_job(job_eod_summary,          CronTrigger(day_of_week="0-4", hour=16, minute=30, timezone="Asia/Kolkata"))
     scheduler.add_job(job_db_backup,            CronTrigger(day_of_week="0-4", hour=16, minute=45, timezone="Asia/Kolkata"))
     # Paper/dev only: status heartbeat every 5 minutes
