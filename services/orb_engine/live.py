@@ -165,9 +165,16 @@ def scan_orb_signals(
     _backfill_today_from_yfinance(candle_buffer, symbols, today)
 
     # ── Nifty trend-day gate ──────────────────────────────────────────────────
-    if not _nifty_trend_up(candle_buffer, today):
-        log.info("orb_live.blocked", reason="Nifty not trend-up — skipping all ORB scans")
-        return []
+    # Paper/dev: skip gate so trades execute end-to-end for validation.
+    # Live/semi-auto: strict gate — ranging-day bypass has 30% WR in backtest.
+    from config.settings import settings as _cfg
+    nifty_ok = _nifty_trend_up(candle_buffer, today)
+    if not nifty_ok:
+        if _cfg.uses_real_broker:
+            log.info("orb_live.blocked", reason="Nifty not trend-up — skipping all ORB scans")
+            return []
+        else:
+            log.info("orb_live.nifty_gate_bypassed", reason="paper/dev mode — trading anyway")
 
     signals: list[Signal] = []
     skipped_no_data = skipped_filter = 0
