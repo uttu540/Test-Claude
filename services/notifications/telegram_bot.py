@@ -565,8 +565,28 @@ async def start_telegram_polling() -> object | None:
         log.warning("telegram.polling_skip", reason="No bot token configured")
         return None
 
+    from telegram import Bot
     from telegram.ext import Application, CallbackQueryHandler, CommandHandler
-    app = Application.builder().token(settings.telegram_bot_token).build()
+    from telegram.request import HTTPXRequest
+
+    # Explicit timeouts: getUpdates long-polls for 10s, so read_timeout must exceed that.
+    # Default PTB read_timeout (5s) races with the long-poll window and causes silent retries.
+    _request = HTTPXRequest(
+        connect_timeout=10.0,
+        read_timeout=20.0,    # long-poll timeout (10s) + 10s headroom
+        write_timeout=10.0,
+        pool_timeout=5.0,
+    )
+
+    # concurrent_updates=True: commands run in parallel asyncio tasks.
+    # Default (False) means sequential — /orb scan blocks /status until scan finishes.
+    app = (
+        Application.builder()
+        .token(settings.telegram_bot_token)
+        .request(_request)
+        .concurrent_updates(True)
+        .build()
+    )
 
     # Commands — available in all modes
     app.add_handler(CommandHandler("start",     _cmd_help))
@@ -597,14 +617,29 @@ async def start_telegram_polling() -> object | None:
             await _asyncio.sleep(_delay)
             _attempt += 1
 
+    # Explicitly delete any stale webhook before starting polling.
+    # If a webhook was ever set (testing, previous deploy), Telegram routes
+    # commands to it for ~15-30 min before giving up. deleteWebhook clears this.
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        log.info("telegram.webhook_cleared")
+    except Exception as _e:
+        log.warning("telegram.webhook_clear_failed", error=str(_e)[:100])
+
     await app.start()
     await app.updater.start_polling(
         allowed_updates=["message", "callback_query"],
-        drop_pending_updates=True,   # Discard messages queued while bot was offline
+        drop_pending_updates=True,
+        timeout=10,           # getUpdates long-poll window (seconds)
+        read_timeout=20,      # HTTP read timeout — must exceed long-poll timeout
+        write_timeout=10,
+        connect_timeout=10,
+        pool_timeout=5,
     )
     log.info("telegram.polling_started",
              commands=["/status", "/pnl", "/positions", "/orb", "/help"],
-             semi_auto=settings.is_semi_auto)
+             semi_auto=settings.is_semi_auto,
+             concurrent_updates=True)
     return app
 
 
