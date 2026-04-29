@@ -8,10 +8,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 _Next up: Paper trading validation run (#33) — 2-week live gate before semi-auto_
 
+### Changed (Frontend — Dashboard Redesign)
+- **`frontend/src/pages/Dashboard.jsx`** — Full visual redesign with retro-fintech aesthetic. Layout reordered for clearer information hierarchy:
+  1. **Masthead header** — `Playfair Display` wordmark, left-bordered mode/regime tags, live IST clock, inline refresh; replaces cluttered badge row
+  2. **Hero P&L** — 56px serif number with directional glow (`+₹X,XX,XXX.XX`) as the first visible element; secondary stats (trade count, win rate) shown inline
+  3. **Full-width sparkline** — amber/green/red gradient fills, retro tooltip with left-border color coding; replaces 3/5-col cramped layout
+  4. **Loss gauge** — percentage-first display with tick-mark bar and ₹ label; replaces `PnLBar` component
+  5. **4 secondary stat cards** — amber top-border accent, no icons, cleaner label/value hierarchy
+  6. **Serif section dividers** — `Playfair Display` italic labels with hairline rules before Signals and Positions tables
+  - Palette: warm near-black `#0d0b07`, amber accent `#c9952a`, parchment text `#e4cfa0`
+  - Fonts: `Playfair Display` (display), `JetBrains Mono` (all numeric data), `Inter` (labels)
+  - Removed unused `StatCard` and `PnLBar` component imports
+- **`frontend/index.html`** — added `Playfair Display` (700, 800) to Google Fonts link
+
 ### Fixed (Frontend)
-- **`frontend/src/pages/Dashboard.jsx`** — `RegimeBadge` now handles all five regime values the backend emits: `TRENDING_UP` (green ↑), `TRENDING_DOWN` (red ↓), `RANGING` (yellow), `HIGH_VOLATILITY` (orange), `UNKNOWN` (muted). Previously only `TRENDING`, `RANGING`, `UNKNOWN` were mapped — any other value silently fell through to UNKNOWN styling.
-- **`frontend/src/pages/Dashboard.jsx`** — Added `ModeBadge` component and `fetchBotStatus()` call to show the bot's operating mode (DEV / PAPER / SEMI_AUTO / LIVE) in the dashboard header. The API endpoint `/api/bot/status` existed but was never called from the UI.
-- **`frontend/src/pages/Settings.jsx`** — `ALL_SIGNAL_TYPES` now includes all 29 signal types the backend can generate. Previously missing: `HAMMER`, `SHOOTING_STAR`, `ENGULFING_BULL`, `ENGULFING_BEAR`, `MORNING_STAR`, `EVENING_STAR`, `DOUBLE_BOTTOM`, `DOUBLE_TOP`, `BULL_FLAG`, `BEAR_FLAG`, `DARVAS_BREAKOUT`, `NR7_SETUP`, `BREAKOUT_52W`, `VOLUME_THRUST`, `EMA_RIBBON`, `BULL_MOMENTUM`.
+- **`frontend/src/pages/Dashboard.jsx`** — All five backend regime values now correctly styled: `TRENDING_UP` (green ↑), `TRENDING_DOWN` (red ↓), `RANGING` (yellow), `HIGH_VOLATILITY` (orange), `UNKNOWN` (muted). Previously only `TRENDING`, `RANGING`, `UNKNOWN` were mapped.
+- **`frontend/src/pages/Dashboard.jsx`** — `fetchBotStatus()` now called on load; bot mode (DEV / PAPER / SEMI_AUTO / LIVE) shown in masthead. The `/api/bot/status` endpoint existed but was never surfaced in the UI.
+- **`frontend/src/pages/Settings.jsx`** — `ALL_SIGNAL_TYPES` expanded from 15 → 29 to match all signal types the backend can generate. Added: `HAMMER`, `SHOOTING_STAR`, `ENGULFING_BULL`, `ENGULFING_BEAR`, `MORNING_STAR`, `EVENING_STAR`, `DOUBLE_BOTTOM`, `DOUBLE_TOP`, `BULL_FLAG`, `BEAR_FLAG`, `DARVAS_BREAKOUT`, `NR7_SETUP`, `BREAKOUT_52W`, `VOLUME_THRUST`, `EMA_RIBBON`, `BULL_MOMENTUM`.
 
 ### Added
 - **`services/momentum_engine/`** — long-only engine for TRENDING_UP markets
