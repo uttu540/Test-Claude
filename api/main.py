@@ -38,9 +38,10 @@ app = FastAPI(title="Trading Bot API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Tighten in production
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins     = settings.cors_origins,   # set ALLOWED_ORIGINS in .env for production
+    allow_methods     = ["GET", "POST", "OPTIONS"],
+    allow_headers     = ["Content-Type", "Authorization"],
+    allow_credentials = False,
 )
 
 # ── WebSocket connection manager ───────────────────────────────────────────────
@@ -155,7 +156,7 @@ def _row_to_dict(row) -> dict:
 @app.get("/api/positions")
 async def get_positions() -> list[dict]:
     """All currently open trades."""
-    async for session in get_db_session():
+    async with get_db_session() as session:
         result = await session.execute(
             text("""
                 SELECT
@@ -179,7 +180,7 @@ async def get_positions() -> list[dict]:
 async def get_trades(page: int = 1, per_page: int = 50) -> dict:
     """Paginated trade history, most recent first."""
     offset = (max(page, 1) - 1) * per_page
-    async for session in get_db_session():
+    async with get_db_session() as session:
         total_result = await session.execute(text("SELECT COUNT(*) FROM trades"))
         total = total_result.scalar() or 0
 
@@ -215,7 +216,7 @@ async def get_trades(page: int = 1, per_page: int = 50) -> dict:
 @app.get("/api/trades/{trade_id}")
 async def get_trade(trade_id: str) -> dict:
     """Full detail for a single trade including all orders."""
-    async for session in get_db_session():
+    async with get_db_session() as session:
         result = await session.execute(
             text("SELECT * FROM trades WHERE id = :id"),
             {"id": trade_id},
@@ -240,7 +241,7 @@ async def get_trade(trade_id: str) -> dict:
 async def get_today_pnl() -> dict:
     """Today's aggregated P&L summary."""
     today = date.today()
-    async for session in get_db_session():
+    async with get_db_session() as session:
         result = await session.execute(
             text("""
                 SELECT
@@ -311,7 +312,7 @@ async def get_today_pnl() -> dict:
 @app.get("/api/pnl/history")
 async def get_pnl_history(days: int = 30) -> list[dict]:
     """Daily P&L for the last N days."""
-    async for session in get_db_session():
+    async with get_db_session() as session:
         result = await session.execute(
             text("""
                 SELECT
@@ -347,6 +348,57 @@ async def get_recent_signals() -> list[dict]:
             signals.append(json.loads(raw))
     signals.sort(key=lambda s: s.get("timestamp", ""), reverse=True)
     return signals
+
+
+# ── Routes: Health (external monitors ping this) ───────────────────────────────
+
+@app.get("/health")
+async def health_check() -> dict:
+    """
+    Lightweight liveness + readiness probe for external monitors (UptimeRobot, etc.).
+    Returns 200 when all critical dependencies are up, 503 otherwise.
+    Checks: PostgreSQL reachable, Redis reachable, Kite token present (live/semi-auto).
+    """
+    checks: dict[str, str] = {}
+    healthy = True
+
+    # PostgreSQL
+    try:
+        async with get_db_session() as session:
+            await session.execute(text("SELECT 1"))
+        checks["postgres"] = "ok"
+    except Exception as e:
+        checks["postgres"] = f"error: {e}"
+        healthy = False
+
+    # Redis
+    try:
+        redis = get_redis()
+        await redis.ping()
+        checks["redis"] = "ok"
+    except Exception as e:
+        checks["redis"] = f"error: {e}"
+        healthy = False
+
+    # Kite token (only relevant in live/semi-auto)
+    if settings.uses_real_broker:
+        try:
+            redis = get_redis()
+            token = await redis.get("kite:access_token")
+            checks["kite_token"] = "present" if token else "missing"
+            if not token:
+                healthy = False
+        except Exception as e:
+            checks["kite_token"] = f"error: {e}"
+            healthy = False
+    else:
+        checks["kite_token"] = "n/a (dev/paper mode)"
+
+    status_code = 200 if healthy else 503
+    response    = {"status": "healthy" if healthy else "degraded", "checks": checks}
+
+    from fastapi.responses import JSONResponse
+    return JSONResponse(content=response, status_code=status_code)
 
 
 # ── Routes: Bot Status ────────────────────────────────────────────────────────

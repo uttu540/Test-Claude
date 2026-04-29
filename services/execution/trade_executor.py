@@ -22,8 +22,8 @@ from datetime import datetime
 import structlog
 
 from config.settings import settings
-from database.connection import get_db_session
-from database.models import Trade
+from database.connection import get_db_session, get_redis
+from database.models import SignalRejectionLog, Trade
 from services.ai_strategy.claude_client import get_claude_client
 from services.ai_strategy.schemas import AIDecision
 from services.execution.broker_router import get_broker
@@ -66,6 +66,7 @@ class TradeExecutor:
 
         if not decision.approved:
             log.info("executor.risk_blocked", symbol=signal.trading_symbol, reason=decision.reason)
+            await self._record_rejection(signal, stage="RISK", reason=decision.reason)
             return None
 
         # ── 2. Claude AI evaluation ───────────────────────────────────────────
@@ -78,6 +79,11 @@ class TradeExecutor:
                 action     = ai_decision.action.value,
                 confidence = ai_decision.confidence,
                 reasoning  = ai_decision.reasoning[:120],
+            )
+            await self._record_rejection(
+                signal,
+                stage  = "AI",
+                reason = f"{ai_decision.action.value}: {ai_decision.reasoning[:200]}",
             )
             return None
 
@@ -106,10 +112,16 @@ class TradeExecutor:
             approved = await request_approval(req)
             if not approved:
                 log.info("executor.approval_rejected", symbol=signal.trading_symbol, trade_id=str(trade_id))
+                await self._record_rejection(signal, stage="APPROVAL", reason="rejected_or_timed_out")
                 return None
 
-        # ── 4. Entry order ────────────────────────────────────────────────────
-        broker    = get_broker()
+        # ── 4. Record trade in DB first ───────────────────────────────────────
+        # Must happen BEFORE place_order so the FK constraint on orders.parent_trade_id
+        # is satisfied when _record_order runs inside place_order / place_stop_loss.
+        broker = get_broker()
+        trade  = await self._record_trade(trade_id, signal, direction, decision, ai_decision, broker.BROKER)
+
+        # ── 5. Entry order ────────────────────────────────────────────────────
         broker_id = await broker.place_order(
             symbol           = signal.trading_symbol,
             exchange         = EXCHANGE,
@@ -124,9 +136,6 @@ class TradeExecutor:
         if not broker_id:
             log.error("executor.entry_failed", symbol=signal.trading_symbol)
             return None
-
-        # ── 5. Record trade in DB ─────────────────────────────────────────────
-        trade = await self._record_trade(trade_id, signal, direction, decision, ai_decision, broker.BROKER)
 
         # ── 6. Stop-loss order ────────────────────────────────────────────────
         await broker.place_stop_loss(
@@ -153,22 +162,17 @@ class TradeExecutor:
         )
 
         # ── 8. Telegram notification ──────────────────────────────────────────
-        rr      = abs(decision.target - signal.price_at_signal) / abs(signal.price_at_signal - decision.stop_loss)
-        ai_note = f"\n🤖 AI: {ai_decision.confidence:.0%} | {ai_decision.reasoning[:80]}" if ai_decision.reasoning else ""
-        await get_notifier().signal_alert(
+        await get_notifier().trade_entry(
             symbol     = signal.trading_symbol,
-            signal     = signal.signal_type.value,
-            direction  = signal.direction.value,
-            confidence = signal.confidence,
-            timeframe  = signal.timeframe,
+            direction  = direction,
             price      = signal.price_at_signal,
-            notes=(
-                f"📥 Entry: ₹{signal.price_at_signal:.2f}\n"
-                f"🛡 Stop: ₹{decision.stop_loss:.2f}\n"
-                f"🎯 Target: ₹{decision.target:.2f}\n"
-                f"📦 Qty: {decision.position_size} | Risk: ₹{decision.risk_amount:.0f} | RR: {rr:.1f}x"
-                f"{ai_note}"
-            ),
+            quantity   = decision.position_size,
+            stop_loss  = decision.stop_loss,
+            target_1   = decision.target,
+            target_2   = None,
+            strategy   = signal.signal_type.value,
+            confidence = ai_decision.confidence,
+            broker     = broker.BROKER,
         )
 
         log.info(
@@ -188,6 +192,34 @@ class TradeExecutor:
 
     # ── DB ────────────────────────────────────────────────────────────────────
 
+    async def _record_rejection(
+        self,
+        signal: Signal,
+        stage:  str,
+        reason: str,
+    ) -> None:
+        """Persist a rejected signal to signal_rejection_log for strategy analysis."""
+        try:
+            redis  = get_redis()
+            regime = await redis.get("market:regime") or "UNKNOWN"
+            async with get_db_session() as session:
+                row = SignalRejectionLog(
+                    trading_symbol   = signal.trading_symbol,
+                    signal_type      = signal.signal_type.value,
+                    direction        = signal.direction.value,
+                    confidence       = signal.confidence,
+                    price_at_signal  = signal.price_at_signal,
+                    indicators       = signal.indicators,
+                    timeframe        = signal.timeframe,
+                    rejection_stage  = stage,
+                    rejection_reason = reason,
+                    market_regime    = regime,
+                )
+                session.add(row)
+                await session.commit()
+        except Exception as e:
+            log.warning("executor.rejection_log_failed", stage=stage, symbol=signal.trading_symbol, error=str(e))
+
     async def _record_trade(
         self,
         trade_id:    uuid.UUID,
@@ -204,6 +236,12 @@ class TradeExecutor:
             else 0
         )
 
+        redis  = get_redis()
+        regime = await redis.get("market:regime") or "UNKNOWN"
+
+        # Derive mode from timeframe: daily signals are swing, everything else intraday
+        mode_label = "SWING" if signal.timeframe in ("1day", "1week") else "INTRADAY"
+
         trade = Trade(
             id                  = trade_id,
             trading_symbol      = signal.trading_symbol,
@@ -211,7 +249,7 @@ class TradeExecutor:
             instrument_type     = "EQ",
             direction           = direction,
             strategy_name       = signal.signal_type.value,
-            strategy_mode       = "INTRADAY",
+            strategy_mode       = mode_label,
             broker              = broker_name,
             mode                = settings.app_env.value,
             entry_price         = signal.price_at_signal,
@@ -224,11 +262,12 @@ class TradeExecutor:
             signals_at_entry    = signal.to_dict(),
             ai_confidence       = ai_decision.confidence,
             ai_reasoning        = ai_decision.reasoning,
+            market_regime       = regime,
             status              = "OPEN",
         )
 
         try:
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 session.add(trade)
                 await session.commit()
                 await session.refresh(trade)

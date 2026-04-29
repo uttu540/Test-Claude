@@ -265,6 +265,15 @@ def _parse_args() -> argparse.Namespace:
             "  intraday: Setup=1H bias → Trigger=15min entry → EOD exit."
         ),
     )
+    parser.add_argument(
+        "--sector-filter", action="store_true",
+        help=(
+            "Enable sector ROC gate (Phase 1).\n"
+            "  SHORT blocked when sector 20-day ROC > +1%%.\n"
+            "  LONG confidence reduced 15%% when sector 20-day ROC < -3%%.\n"
+            "Run with and without this flag to compare WR impact."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -295,12 +304,14 @@ async def main() -> None:
         "swing":    "Setup=Daily → Trigger=1H → hold up to 5 days",
     }.get(args.trading_mode, args.trading_mode)
 
+    sector_label = "[green]ON[/green]" if args.sector_filter else "[dim]OFF[/dim]"
     console.print(
         f"\n[bold]Backtest[/bold]  "
         f"{len(symbols)} symbols  |  "
         f"{start_date} → {end_date}  |  "
         f"Mode: [cyan]{args.trading_mode.upper()}[/cyan] ({mode_desc})  |  "
         f"Regime filter: {'OFF' if args.no_regime_filter else 'ON'}  |  "
+        f"Sector filter: {sector_label}  |  "
         f"Min confidence: {args.min_confidence}  |  "
         f"Min signals: {args.min_confirming_signals}\n"
     )
@@ -318,6 +329,7 @@ async def main() -> None:
         min_confirming_signals  = args.min_confirming_signals,
         trading_mode            = args.trading_mode,
         symbol_segments         = symbol_segments,
+        enable_sector_filter    = args.sector_filter,
     )
 
     result  = await engine.run()

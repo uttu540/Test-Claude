@@ -31,7 +31,12 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from config.settings import settings
 from database.connection import get_db_session, get_redis
 from database.models import AIDecisionLog
-from services.ai_strategy.prompts import SYSTEM_PROMPT, build_signal_prompt
+from services.ai_strategy.prompts import (
+    MARKET_BRIEFING_SYSTEM,
+    SYSTEM_PROMPT,
+    build_market_briefing_prompt,
+    build_signal_prompt,
+)
 from services.ai_strategy.schemas import (
     AIDecision,
     NewsContext,
@@ -273,7 +278,7 @@ class ClaudeStrategyClient:
         Best-effort — never raises.
         """
         try:
-            async for session in get_db_session():
+            async with get_db_session() as session:
                 entry = AIDecisionLog(
                     id             = uuid.uuid4(),
                     decision_type  = "STRATEGY_EVAL",
@@ -304,6 +309,63 @@ class ClaudeStrategyClient:
                     raise
         except Exception as e:
             log.error("claude_client.log_error", error=str(e))
+
+    # ── Market briefing ───────────────────────────────────────────────────────
+
+    async def get_market_briefing(
+        self,
+        nifty_change_pct: float,
+        vix: float | None,
+        regime: str,
+        news_headlines: list[str],
+        advance_decline: str = "N/A",
+        fii_activity: str = "N/A",
+        top_movers: list[str] | None = None,
+    ) -> tuple[str, bool]:
+        """
+        Call Claude for a pre-market briefing.
+        Returns a tuple of (plain-text summary, macro_shock flag).
+        Falls back to a canned string on any error — never raises.
+        """
+        if not self._client:
+            return f"Market opens. Regime: {regime}. VIX: {vix or 'N/A'}.", False
+
+        user_prompt = build_market_briefing_prompt(
+            nifty_change_pct = nifty_change_pct,
+            vix              = vix,
+            regime           = regime,
+            news_headlines   = news_headlines,
+            advance_decline  = advance_decline,
+            fii_activity     = fii_activity,
+            top_movers       = top_movers or [],
+        )
+
+        try:
+            response = await self._client.messages.create(
+                model      = settings.claude_model,
+                max_tokens = 512,
+                system     = MARKET_BRIEFING_SYSTEM,
+                messages   = [{"role": "user", "content": user_prompt}],
+            )
+            raw = response.content[0].text.strip()
+            log.info(
+                "claude_client.briefing_done",
+                tokens_in  = response.usage.input_tokens,
+                tokens_out = response.usage.output_tokens,
+            )
+            # Parse JSON response
+            try:
+                parsed = json.loads(raw)
+                briefing = parsed.get("briefing", raw)
+                macro_shock = bool(parsed.get("macro_shock", False))
+            except (json.JSONDecodeError, AttributeError):
+                briefing = raw
+                macro_shock = False
+            log.info("claude_client.briefing_parsed", macro_shock=macro_shock)
+            return briefing, macro_shock
+        except Exception as e:
+            log.error("claude_client.briefing_error", error=str(e))
+            return f"Market opens. Regime: {regime}. VIX: {vix or 'N/A'}.", False
 
 
 # ─── Singleton ────────────────────────────────────────────────────────────────

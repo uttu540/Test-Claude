@@ -52,3 +52,4 @@ pytz==2024.1
 python-dateutil==2.9.0
 tenacity==8.3.0           # retry logic for API calls
 rich==13.7.1              # pretty terminal output
+vaderSentiment==3.3.2     # rule-based sentiment for news headlines (no model downloads)

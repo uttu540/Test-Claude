@@ -87,15 +87,15 @@ class TelegramNotifier:
         msg = (
             f"📊 *TRADE ENTRY*\n"
             f"──────────────────\n"
-            f"*{direction} {symbol}* @ ₹{price:.2f}\n"
+            f"*{self._md(direction)} {self._md(symbol)}* @ ₹{price:.2f}\n"
             f"Qty: {quantity} shares\n"
             f"Stop Loss:  ₹{stop_loss:.2f}  (-{abs(price - stop_loss):.2f})\n"
             f"Target 1:   ₹{target_1:.2f}  (+{abs(target_1 - price):.2f})\n"
             + t2_line +
             f"\nR:R Ratio:  {rr:.1f}x\n"
-            f"Strategy:   {strategy}\n"
+            f"Strategy:   {self._md(strategy)}\n"
             f"AI Conf:    {confidence:.0%}\n"
-            f"Broker:     {broker}\n"
+            f"Broker:     {self._md(broker)}\n"
             f"Time:       {datetime.now().strftime('%H:%M:%S IST')}"
         )
         await self._send(msg, parse_mode="Markdown")
@@ -111,7 +111,7 @@ class TelegramNotifier:
         emoji = "✅" if abs(slippage) < 0.05 else "⚠️"
         msg = (
             f"{emoji} *ORDER FILLED*\n"
-            f"{direction} {symbol} × {quantity} @ ₹{price:.2f}\n"
+            f"{self._md(direction)} {self._md(symbol)} × {quantity} @ ₹{price:.2f}\n"
             f"Slippage: ₹{slippage:+.2f}"
         )
         await self._send(msg, parse_mode="Markdown")
@@ -179,8 +179,8 @@ class TelegramNotifier:
             f"Target:   ₹{req.target:.2f}  (+{abs(req.target - req.entry_price):.2f})\n"
             f"Qty: {req.quantity}  |  Risk: ₹{req.risk_inr:.0f}  |  R:R {req.rr_ratio:.1f}x\n"
             f"──────────────────────────\n"
-            f"Strategy: {req.strategy}  |  Signal: {req.signal_conf}%\n"
-            f"AI ({req.ai_conf:.0%}): _{req.ai_reasoning[:120]}_\n"
+            f"Strategy: {self._md(req.strategy)}  |  Signal: {req.signal_conf}%\n"
+            f"AI ({req.ai_conf:.0%}): _{self._md(req.ai_reasoning[:120])}_\n"
             f"──────────────────────────\n"
             f"⏱ Expires in {settings.approval_timeout_secs}s"
         )
@@ -352,6 +352,15 @@ class TelegramNotifier:
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _md(text: str) -> str:
+        """Escape special chars for Telegram Markdown mode (v1).
+        Telegram Markdown v1 only interprets: * _ ` [
+        Anything else that happens to appear mid-word (e.g. BREAKOUT_HIGH)
+        must have its underscore escaped.
+        """
+        return str(text).replace("_", "\\_").replace("*", "\\*").replace("`", "\\`").replace("[", "\\[")
+
     async def _send(self, text: str, parse_mode: str | None = None) -> None:
         if not self._enabled or not self._bot:
             log.debug("telegram.skip", message=text[:80])
@@ -436,7 +445,7 @@ async def _cmd_pnl(update: object, context: object) -> None:
         from sqlalchemy import text
         from database.connection import get_db_session
         today = _date.today()
-        async for session in get_db_session():
+        async with get_db_session() as session:
             result = await session.execute(
                 text("""
                     SELECT
@@ -479,7 +488,7 @@ async def _cmd_positions(update: object, context: object) -> None:
     try:
         from sqlalchemy import text
         from database.connection import get_db_session
-        async for session in get_db_session():
+        async with get_db_session() as session:
             result = await session.execute(
                 text("""
                     SELECT trading_symbol, direction, entry_price,
@@ -531,9 +540,29 @@ async def start_telegram_polling() -> object | None:
     # Inline button callbacks — semi-auto trade approvals
     app.add_handler(CallbackQueryHandler(_handle_approval_callback))
 
-    await app.initialize()
+    # Retry until internet is available — startup may run before network is up
+    import asyncio as _asyncio
+    from telegram.error import NetworkError as _TGNetworkError
+    _attempt = 0
+    _delays = [5, 10, 15, 30, 60]   # seconds between retries
+    while True:
+        try:
+            await app.initialize()
+            break
+        except (_TGNetworkError, Exception) as _e:
+            if "ConnectError" not in str(type(_e).__name__) and not isinstance(_e, _TGNetworkError):
+                raise
+            _delay = _delays[min(_attempt, len(_delays) - 1)]
+            log.warning("telegram.no_internet_retry",
+                        attempt=_attempt + 1, retry_in=_delay, error=str(_e)[:80])
+            await _asyncio.sleep(_delay)
+            _attempt += 1
+
     await app.start()
-    await app.updater.start_polling(allowed_updates=["message", "callback_query"])
+    await app.updater.start_polling(
+        allowed_updates=["message", "callback_query"],
+        drop_pending_updates=True,   # Discard messages queued while bot was offline
+    )
     log.info("telegram.polling_started",
              commands=["/status", "/pnl", "/positions", "/help"],
              semi_auto=settings.is_semi_auto)

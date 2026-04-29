@@ -120,25 +120,41 @@ Respond with JSON only."""
 
 # ─── Market Briefing Prompt ───────────────────────────────────────────────────
 
-MARKET_BRIEFING_SYSTEM = """You are a concise market analyst for an Indian equity trader.
-Summarise market conditions in 3-4 sentences. Focus on: overall trend, key risks today, and sectors to watch.
-Return plain text only — no markdown, no headers."""
+MARKET_BRIEFING_SYSTEM = """You are a concise market analyst for an Indian equity trading bot.
+Analyse market conditions and respond with a JSON object with exactly two fields:
+  "briefing": a 3-4 sentence plain text summary (no markdown) covering trend, key risks, sectors to watch
+  "macro_shock": true if there is a major macro event that warrants HIGH_VOLATILITY mode
+                 (war, terrorist attack, central bank emergency action, market circuit breaker, pandemic news)
+                 false otherwise
+
+Respond ONLY with valid JSON. Example:
+{"briefing": "Markets open cautiously...", "macro_shock": false}"""
 
 
 def build_market_briefing_prompt(
     nifty_change_pct: float,
     vix: float | None,
-    advance_decline: str,
-    fii_activity: str,
-    top_movers: list[str],
+    regime: str,
+    news_headlines: list[str],
+    advance_decline: str = "N/A",
+    fii_activity: str = "N/A",
+    top_movers: list[str] | None = None,
 ) -> str:
-    vix_str = f"{vix:.1f}" if vix else "N/A"
-    movers_str = ", ".join(top_movers[:5]) if top_movers else "N/A"
+    vix_str    = f"{vix:.1f}" if vix else "N/A"
+    movers_str = ", ".join((top_movers or [])[:5]) or "N/A"
+
+    if news_headlines:
+        news_block = "\n".join(f"  - {h}" for h in news_headlines[:8])
+    else:
+        news_block = "  No recent market news."
+
     return (
-        f"Nifty 50 change: {nifty_change_pct:+.2f}%\n"
+        f"Nifty 50 change (pre-open/SGX): {nifty_change_pct:+.2f}%\n"
         f"India VIX: {vix_str}\n"
+        f"Market Regime (algo): {regime}\n"
         f"Advance/Decline: {advance_decline}\n"
         f"FII Activity: {fii_activity}\n"
-        f"Top movers: {movers_str}\n\n"
+        f"Top movers today: {movers_str}\n\n"
+        f"Recent news headlines:\n{news_block}\n\n"
         f"Give a brief market briefing for the trading session ahead."
     )

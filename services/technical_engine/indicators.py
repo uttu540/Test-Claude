@@ -79,6 +79,9 @@ def compute_all(
     Columns follow the naming convention:  indicator_param  (e.g. ema_9, rsi_14)
     """
     df = df.copy()
+    # Strip timezone from index so pandas-ta doesn't mix aware/naive datetimes
+    if hasattr(df.index, "tz") and df.index.tz is not None:
+        df.index = df.index.tz_convert("Asia/Kolkata").tz_localize(None)
     df = _trend(df, cfg)
     df = _momentum(df, cfg)
     df = _volatility(df, cfg)

@@ -161,7 +161,16 @@ class ZerodhaOrderManager(BrokerInterface):
             return None
 
         except TokenException:
-            log.error("order.token_expired", symbol=symbol)
+            log.warning("order.token_expired", symbol=symbol, action="attempting_reauth")
+            reauthed = await self._reauth_and_retry(
+                symbol=symbol, exchange=exchange,
+                transaction_type=transaction_type, quantity=quantity,
+                order_type=order_type, product=product, price=price,
+                trigger_price=trigger_price, tag=tag, validity=validity,
+                trade_id=trade_id,
+            )
+            if reauthed is not None:
+                return reauthed
             raise RuntimeError("Kite access token expired. Re-authentication required.")
 
         except NetworkException as e:
@@ -176,6 +185,51 @@ class ZerodhaOrderManager(BrokerInterface):
     def _place_with_retry(self, kite: KiteConnect, params: dict) -> str:
         """Place order with automatic retry on transient network errors."""
         return kite.place_order(variety=kite.VARIETY_REGULAR, **params)
+
+    async def _reauth_and_retry(self, **order_kwargs) -> str | None:
+        """
+        Called when a TokenException fires mid-session.
+        Attempts one fresh re-authentication then replaces the order once.
+        Returns broker_order_id on success, None if re-auth or retry fails.
+        """
+        try:
+            from services.execution.zerodha.authenticator import ZerodhaAuthenticator
+            from services.notifications.telegram_bot import get_notifier
+
+            log.warning("order.reauth_start")
+            auth = ZerodhaAuthenticator()
+            await auth.authenticate()
+
+            # Force fresh token on next _get_kite() call
+            self._kite = None
+            kite = await self._get_kite()
+
+            params: dict = {
+                "tradingsymbol":    order_kwargs["symbol"],
+                "exchange":         order_kwargs["exchange"],
+                "transaction_type": order_kwargs["transaction_type"],
+                "quantity":         order_kwargs["quantity"],
+                "order_type":       order_kwargs["order_type"],
+                "product":          order_kwargs["product"],
+                "validity":         order_kwargs.get("validity", "DAY"),
+                "tag":              order_kwargs.get("tag") or "TRADING_BOT",
+            }
+            if order_kwargs["order_type"] in ("LIMIT", "SL"):
+                params["price"] = order_kwargs["price"]
+            if order_kwargs["order_type"] in ("SL", "SL-M"):
+                params["trigger_price"] = order_kwargs["trigger_price"]
+
+            broker_order_id = self._place_with_retry(kite, params)
+            log.info("order.reauth_retry_success", symbol=order_kwargs["symbol"], broker_id=broker_order_id)
+            await get_notifier().system_error(
+                "OrderManager",
+                f"Token expired mid-session for {order_kwargs['symbol']} — re-authed and retried successfully.",
+            )
+            return broker_order_id
+
+        except Exception as e:
+            log.error("order.reauth_retry_failed", error=str(e))
+            return None
 
     # ── BrokerInterface: order management ─────────────────────────────────────
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import redis.asyncio as aioredis
 import structlog
+from contextlib import asynccontextmanager
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -61,12 +62,13 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
-async def get_db_session() -> AsyncSession:
+@asynccontextmanager
+async def get_db_session():
     """
     Dependency / context manager for a database session.
 
     Usage:
-        async with await get_db_session() as session:
+        async with get_db_session() as session:
             result = await session.execute(...)
     """
     factory = get_session_factory()
@@ -105,7 +107,7 @@ def get_redis() -> aioredis.Redis:
             settings.redis_url,
             encoding="utf-8",
             decode_responses=True,
-            max_connections=100,
+            max_connections=200,
         )
     return _redis_pool
 

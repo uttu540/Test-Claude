@@ -6,7 +6,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 ## [Unreleased]
-_Next up: Paper trading validation run (#33) — 2-week gate before live_
+_Next up: Paper trading validation run (#33) — 2-week live gate before semi-auto_
+
+### Added
+- **`services/momentum_engine/`** — long-only engine for TRENDING_UP markets
+  - `signals.py` — `MomentumDetector`: Darvas breakout, 52-week high, EMA ribbon, volume thrust, bull momentum signals; `score_momentum_confluence()` scoring
+  - `backtest.py` — `MomentumBacktestEngine`: daily TF only, entry on TRENDING_UP regime, 1.5×/7× ATR (1:4.7 R:R), trailing stop milestones at 1:2/1:3/1:6/1:10, 20-day max hold
+  - `run.py` — CLI entrypoint (`python -m services.momentum_engine.run`)
+- **`run_combined.py`** — runs both momentum + swing engines on same timeline concurrently; prints side-by-side comparison table + monthly P&L breakdown; saves combined JSON
+- **`results/combined_2024.json`** — 2024 full year: momentum +₹1,22,129, swing -₹898, combined +₹1,21,231
+- **`results/combined_2026_q1.json`** — 2026 Q1 (trending down): momentum 0 trades, swing 23 trades (20 shorts, 50% WR, +₹4,766, Sharpe 7.40)
+
+### Added (Ops / Infra — #34 #35 #36 #37 #38)
+- **`api/main.py`** — `/health` endpoint (#38): liveness + readiness probe (200/503); checks PostgreSQL (`SELECT 1`), Redis (`PING`), Kite access token in Redis (live/semi-auto only); safe for UptimeRobot / ECS health checks
+- **`main.py`** — `job_db_backup()` (#37): daily `pg_dump -F c` at 16:45 IST; saves to `backups/trading_bot_{timestamp}.dump`; alerts Telegram on failure; skips silently in dev/paper if `pg_dump` absent
+- **`supervisord.conf`** (#35): production process supervisor; manages `bot`, `api`, `frontend` as a `[group:trading]`; auto-restart with configurable retries; logs to `logs/`; graceful SIGTERM shutdown; `supervisorctl` socket for live control
+- **`logs/.gitkeep`** — tracked stub so `logs/` directory exists on fresh clone (contents ignored by `.gitignore`)
+
+### Changed (Ops / Infra)
+- **`config/settings.py`** (#34): `allowed_origins` env var (default `http://localhost:5173,http://localhost:3000`); `cors_origins` computed property (parses comma-separated string)
+- **`api/main.py`** (#34): CORS middleware now uses `settings.cors_origins` — set `ALLOWED_ORIGINS=https://trading.yourdomain.com` in `.env` for production
+- **`services/execution/zerodha/order_manager.py`** (#36): `TokenException` mid-session now triggers automatic re-auth via `ZerodhaAuthenticator().authenticate()` then retries the failed order once before raising; `_reauth_and_retry()` helper added
+- **`main.py`** (#36): `job_daily_auth()` retries up to 2× on failure using `DateTrigger` (15 min apart); module-level `_scheduler` variable exposes APScheduler instance to retry jobs
+- **`.gitignore`** — `!logs/.gitkeep` negation added so gitkeep is tracked despite `logs/` being ignored
+
+### Changed (Signal Engine)
+- **`services/ai_strategy/prompts.py`** — `build_market_briefing_prompt()` now accepts `regime` and `news_headlines` params; includes last 12h news in Claude's context
+- **`services/ai_strategy/claude_client.py`** — added `get_market_briefing()` method: calls Claude with `MARKET_BRIEFING_SYSTEM` prompt, returns 3-4 sentence plain-text briefing, falls back to canned string on API failure
+- **`main.py`** — `job_market_open_briefing()` replaced canned message with real Claude research: fetches Nifty change %, VIX, regime from Redis + last 12h news headlines, asks Claude for briefing, sends result via Telegram
+
+### Backtest Results — Dual Engine (same timeline)
+
+| Period | Momentum | Swing | Combined |
+|---|---|---|---|
+| 2024 full year (bull + ranging) | +₹1,22,129 (9 trades, 44% WR) | -₹898 (68 trades) | +₹1,21,231 |
+| 2026 Q1 (trending down) | ₹0 (0 trades — correctly sat out) | +₹4,766 (23 trades, 20 shorts, 48% WR) | +₹4,766 |
+
+**Key validation:** Momentum engine correctly fires only in TRENDING_UP (3/87 days in 2026 Q1 → zero trades). Swing engine shorts dominate TRENDING_DOWN phases. Engines are genuinely complementary.
 
 ---
 

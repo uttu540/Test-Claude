@@ -90,6 +90,18 @@ class ZerodhaAuthenticator:
             try:
                 page = await browser.new_page()
 
+                # Listen for all network requests to capture request_token.
+                # Kite redirects to redirect_url (127.0.0.1) after auth — browser errors,
+                # but the request event fires before the error, giving us the token URL.
+                _captured_token: list[str] = []
+
+                def _on_request(request):
+                    token = self._extract_request_token(request.url)
+                    if token:
+                        _captured_token.append(token)
+
+                page.on("request", _on_request)
+
                 # Go to Kite login page
                 await page.goto(login_url, timeout=30_000)
                 await page.wait_for_load_state("networkidle", timeout=15_000)
@@ -120,25 +132,30 @@ class ZerodhaAuthenticator:
                     # Fallback: fill whatever input is visible
                     await page.fill('input[type="number"]', totp_code, timeout=10_000)
 
-                await page.wait_for_timeout(3000)
+                # Wait for TOTP to auto-submit and redirect to redirect_url with token.
+                # Redirect URL = 127.0.0.1 (Kite dev console) → browser errors, but
+                # the request event fires first and _on_request captures the token.
+                await page.wait_for_timeout(4000)
 
-                # Zerodha may land on /connect/authorize — click the Authorise button if present
+                # Fallback: if authorize page still showing, click the button
                 if "connect/authorize" in page.url:
                     try:
-                        await page.click('button[type="submit"]', timeout=8_000)
-                        await page.wait_for_load_state("networkidle", timeout=15_000)
-                        await page.wait_for_timeout(2000)
-                    except Exception:
-                        pass  # Button may not be present — continue anyway
+                        authorize_btn = page.locator(
+                            'button:has-text("Authorize"), button:has-text("Authorise"), button:has-text("I Allow"), button:has-text("Allow")'
+                        ).first
+                        if await authorize_btn.count() > 0:
+                            try:
+                                async with page.expect_navigation(timeout=10_000):
+                                    await authorize_btn.click(timeout=10_000)
+                            except Exception:
+                                pass
+                            await page.wait_for_timeout(2000)
+                    except Exception as _e:
+                        log.warning("zerodha_auth.authorize_click_failed", error=str(_e))
 
-                # Wait for redirect to our redirect URL containing request_token
+                request_token = _captured_token[0] if _captured_token else None
                 current_url = page.url
-                request_token = self._extract_request_token(current_url)
-
                 if not request_token:
-                    # Sometimes takes a moment
-                    await page.wait_for_timeout(2000)
-                    current_url   = page.url
                     request_token = self._extract_request_token(current_url)
 
             except Exception as e:
@@ -190,7 +207,7 @@ class ZerodhaAuthenticator:
         Fetch all NSE instrument tokens from Kite and cache in Redis.
         This maps trading_symbol → instrument_token (needed for WebSocket subscriptions).
         """
-        from services.data_ingestion.nifty50_instruments import NIFTY50, INDEX_INSTRUMENTS
+        from services.data_ingestion.nifty500_instruments import INDEX_INSTRUMENTS, get_live_universe
 
         self._kite.set_access_token(access_token)
         instruments = self._kite.instruments("NSE")
@@ -198,25 +215,26 @@ class ZerodhaAuthenticator:
         # Build symbol → token map
         token_map: dict[str, int] = {i["tradingsymbol"]: i["instrument_token"] for i in instruments}
 
-        # Filter to Nifty 50
-        nifty50_symbols = [sym for sym, _, _ in NIFTY50]
-        nifty50_tokens  = [token_map[sym] for sym in nifty50_symbols if sym in token_map]
+        # Use full NSE EQ universe (1700–2200 stocks); falls back to Nifty500 if fetch fails
+        universe_symbols = get_live_universe()
+        universe_tokens  = [token_map[sym] for sym in universe_symbols if sym in token_map]
 
         # Add index tokens
         index_tokens = [token for _, _, token in INDEX_INSTRUMENTS]
-        all_tokens   = list(set(nifty50_tokens + index_tokens))
+        all_tokens   = list(set(universe_tokens + index_tokens))
 
         redis = get_redis()
         await redis.setex(REDIS_TOKEN_MAP_KEY,      TOKEN_TTL_SECONDS, json.dumps(token_map))
         await redis.setex(REDIS_INSTRUMENTS_KEY,    TOKEN_TTL_SECONDS, json.dumps(all_tokens))
 
-        missing = [sym for sym in nifty50_symbols if sym not in token_map]
+        missing = [sym for sym in universe_symbols if sym not in token_map]
         if missing:
-            log.warning("zerodha_auth.missing_tokens", symbols=missing)
+            log.warning("zerodha_auth.missing_tokens", count=len(missing), symbols=missing[:20])
 
         log.info(
             "zerodha_auth.instruments_cached",
-            nifty50=len(nifty50_tokens),
+            universe=len(universe_symbols),
+            subscribed=len(universe_tokens),
             total=len(all_tokens),
         )
 

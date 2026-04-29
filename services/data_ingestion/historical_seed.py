@@ -21,7 +21,7 @@ from sqlalchemy import text
 
 from config.settings import settings
 from database.connection import get_db_session
-from services.data_ingestion.nifty50_instruments import NIFTY50
+from services.data_ingestion.nifty500_instruments import NIFTY500
 
 log = structlog.get_logger(__name__)
 
@@ -70,12 +70,21 @@ class HistoricalSeeder:
         self._use_kite = use_kite and bool(settings.kite_api_key)
 
     async def create_hypertable(self) -> None:
-        """Create the TimescaleDB ohlcv hypertable if it doesn't exist."""
+        """Create the ohlcv table. Uses TimescaleDB hypertable if available, plain table otherwise."""
         statements = [s.strip() for s in OHLCV_TABLE_DDL.split(";") if s.strip()]
-        async with await get_db_session().__anext__() as session:
+        async with get_db_session() as session:
             for stmt in statements:
-                await session.execute(text(stmt))
-            await session.commit()
+                try:
+                    await session.execute(text(stmt))
+                    await session.commit()
+                except Exception as e:
+                    await session.rollback()
+                    if "create_hypertable" in stmt or "add_retention_policy" in stmt:
+                        log.warning("historical_seed.timescale_unavailable",
+                                    msg="TimescaleDB not installed — using plain Postgres table",
+                                    error=str(e))
+                    else:
+                        raise
         log.info("historical_seed.hypertable", status="ready")
 
     async def seed_all(
@@ -92,7 +101,10 @@ class HistoricalSeeder:
         if timeframes is None:
             timeframes = ["1day"]   # Start with daily; intraday added after API key
 
-        symbols = [sym for sym, _, _ in NIFTY50]
+        # Use full Kite instrument universe when available, else fall back to Nifty 500
+        symbols = await self._get_universe()
+        index_symbols = [("NIFTY 50", "^NSEI")]   # (trading_symbol, yfinance_ticker)
+
         log.info("historical_seed.start", symbols=len(symbols), from_date=start_date, timeframes=timeframes)
 
         for i, symbol in enumerate(symbols):
@@ -103,7 +115,19 @@ class HistoricalSeeder:
                 log.error("historical_seed.symbol_error", symbol=symbol, error=str(e))
             await asyncio.sleep(0.5)   # Rate limit yfinance
 
-        log.info("historical_seed.complete", symbols=len(symbols))
+        # Seed indices with their special yfinance tickers
+        for trading_symbol, yf_ticker in index_symbols:
+            try:
+                df = self._fetch_yfinance_raw(yf_ticker, start_date, "1day")
+                if df is not None and not df.empty:
+                    await self._upsert_candles(trading_symbol, "1day", df)
+                    log.info("historical_seed.index_seeded", symbol=trading_symbol, rows=len(df))
+                else:
+                    log.warning("historical_seed.index_no_data", symbol=trading_symbol, ticker=yf_ticker)
+            except Exception as e:
+                log.error("historical_seed.index_error", symbol=trading_symbol, error=str(e))
+
+        log.info("historical_seed.complete", symbols=len(symbols) + len(index_symbols))
 
     async def _seed_symbol(
         self,
@@ -112,16 +136,36 @@ class HistoricalSeeder:
         timeframes: list[str],
     ) -> None:
         for tf in timeframes:
-            if self._use_kite:
-                df = await self._fetch_kite(symbol, start_date, tf)
-            else:
-                df = self._fetch_yfinance(symbol, start_date, tf)
+            # Always use yfinance for daily historical seeding — Kite historical API
+            # has a daily request quota that gets exhausted when bulk-seeding 2000+ symbols.
+            # Kite is reserved for live intraday data only.
+            df = self._fetch_yfinance(symbol, start_date, tf)
 
             if df is None or df.empty:
                 log.warning("historical_seed.no_data", symbol=symbol, timeframe=tf)
                 return
 
             await self._upsert_candles(symbol, tf, df)
+
+    # ── Universe ──────────────────────────────────────────────────────────────
+
+    async def _get_universe(self) -> list[str]:
+        """
+        Return NSE EQ trading universe (~2160 stocks).
+        Uses get_live_universe() which is already filtered to equity-only.
+        Falls back to Nifty 500 if unavailable.
+        """
+        try:
+            from services.data_ingestion.nifty500_instruments import get_live_universe
+            symbols = get_live_universe()
+            if symbols:
+                log.info("historical_seed.universe", source="live_universe", count=len(symbols))
+                return symbols
+        except Exception as e:
+            log.warning("historical_seed.universe_fallback", error=str(e))
+        symbols = [sym for sym, _, _ in NIFTY500]
+        log.info("historical_seed.universe", source="nifty500_fallback", count=len(symbols))
+        return symbols
 
     # ── yfinance (free fallback) ──────────────────────────────────────────────
 
@@ -144,6 +188,7 @@ class HistoricalSeeder:
                 start=start_date.strftime("%Y-%m-%d"),
                 interval=interval,
                 auto_adjust=True,
+                timeout=10,
             )
             if df.empty:
                 return None
@@ -154,6 +199,29 @@ class HistoricalSeeder:
             return df
         except Exception as e:
             log.error("yfinance.fetch_error", symbol=symbol, error=str(e))
+            return None
+
+    def _fetch_yfinance_raw(
+        self, yf_ticker: str, start_date: date, timeframe: str
+    ) -> pd.DataFrame | None:
+        """Fetch OHLCV using an exact yfinance ticker (no .NS suffix added)."""
+        interval = self._tf_to_yfinance(timeframe)
+        if interval is None:
+            return None
+        try:
+            ticker = yf.Ticker(yf_ticker)
+            df = ticker.history(
+                start=start_date.strftime("%Y-%m-%d"),
+                interval=interval,
+                auto_adjust=True,
+            )
+            if df.empty:
+                return None
+            df.index = pd.to_datetime(df.index, utc=True)
+            df = df.rename(columns=str.lower)[["open", "high", "low", "close", "volume"]]
+            return df.dropna()
+        except Exception as e:
+            log.error("yfinance.raw_fetch_error", ticker=yf_ticker, error=str(e))
             return None
 
     @staticmethod
@@ -258,7 +326,7 @@ class HistoricalSeeder:
                 volume = EXCLUDED.volume
         """)
 
-        async with await get_db_session().__anext__() as session:
+        async with get_db_session() as session:
             await session.execute(upsert_sql, rows)
             await session.commit()
 

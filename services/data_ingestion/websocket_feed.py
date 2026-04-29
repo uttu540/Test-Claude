@@ -26,10 +26,11 @@ from kiteconnect import KiteTicker
 
 from config.settings import settings
 from database.connection import get_redis
-from services.data_ingestion.nifty50_instruments import (
+from services.data_ingestion.nifty500_instruments import (
     INDEX_INSTRUMENTS,
-    NIFTY50,
-    get_nifty50_symbols,
+    NIFTY500,
+    get_live_universe,
+    get_nifty500_symbols,
 )
 
 log = structlog.get_logger(__name__)
@@ -148,8 +149,10 @@ class ZerodhaFeed:
         self._on_tick = on_tick
         self._ticker: KiteTicker | None = None
         self._running = False
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
         redis = get_redis()
         access_token = await redis.get("kite:access_token")
 
@@ -205,15 +208,42 @@ class ZerodhaFeed:
 
     def _on_close(self, ws, code, reason) -> None:
         log.warning("zerodha_feed.closed", code=code, reason=reason)
+        # 403 = token expired — schedule full restart with fresh token from Redis
+        if code == 1006 and reason and "403" in str(reason):
+            self._schedule_token_refresh()
 
     def _on_error(self, ws, code, reason) -> None:
         log.error("zerodha_feed.error", code=code, reason=reason)
+        if code == 1006 and reason and "403" in str(reason):
+            self._schedule_token_refresh()
 
     def _on_reconnect(self, ws, attempts) -> None:
         log.info("zerodha_feed.reconnect", attempt=attempts)
 
     def _on_noreconnect(self, ws) -> None:
         log.error("zerodha_feed.no_reconnect", status="max_retries_exceeded")
+        self._schedule_token_refresh()
+
+    def _schedule_token_refresh(self) -> None:
+        """Schedule a feed restart with fresh token — called from ticker thread."""
+        import asyncio
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self._restart_with_fresh_token())
+            )
+        else:
+            log.error("zerodha_feed.schedule_refresh_error", error="no loop ref — restart bot manually")
+
+    async def _restart_with_fresh_token(self) -> None:
+        """Stop current ticker, re-read token from Redis, reconnect."""
+        log.info("zerodha_feed.token_refresh", status="restarting")
+        try:
+            if self._ticker:
+                self._ticker.close()
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+        await self.start()
 
     @staticmethod
     def _normalise_tick(raw: dict) -> Tick | None:
@@ -245,56 +275,98 @@ class ZerodhaFeed:
 
 class MockFeed:
     """
-    Generates realistic synthetic ticks for development.
+    Generates realistic synthetic ticks for development/paper trading.
     No Kite API key required.
-    Uses a random walk with mean reversion to simulate price movement.
+
+    Seed prices fetched live from yfinance at startup in a single batch
+    call — every symbol gets a real current price, not a hardcoded guess.
+    Uses a mean-reverting random walk from that real price thereafter.
     """
 
-    # Seed prices for Nifty 50 (approximate April 2025 values)
-    SEED_PRICES: dict[str, float] = {
-        "RELIANCE": 1280.0, "HDFCBANK": 1750.0, "ICICIBANK": 1320.0,
-        "INFY": 1580.0, "TCS": 3400.0, "HINDUNILVR": 2400.0,
-        "SBIN": 790.0, "BHARTIARTL": 1820.0, "ITC": 425.0,
-        "KOTAKBANK": 2050.0, "LT": 3300.0, "AXISBANK": 1120.0,
-        "HCLTECH": 1540.0, "WIPRO": 480.0, "SUNPHARMA": 1720.0,
-        "MARUTI": 11500.0, "BAJFINANCE": 8900.0, "TITAN": 3200.0,
-        "NTPC": 355.0, "ONGC": 275.0, "POWERGRID": 310.0,
-        "TECHM": 1320.0, "ASIANPAINT": 2200.0, "NESTLEIND": 2350.0,
-        "TATASTEEL": 155.0, "JSWSTEEL": 920.0, "HINDALCO": 660.0,
-        "TATAMOTORS": 720.0, "M&M": 2900.0, "BAJAJ-AUTO": 8800.0,
-        "HEROMOTOCO": 4300.0, "EICHERMOT": 4700.0, "DRREDDY": 1280.0,
-        "CIPLA": 1490.0, "DIVISLAB": 5200.0, "APOLLOHOSP": 6900.0,
-        "GRASIM": 2750.0, "ULTRACEMCO": 11800.0, "TATACONSUM": 930.0,
-        "BRITANNIA": 5100.0, "COALINDIA": 395.0, "BPCL": 310.0,
-        "HDFCLIFE": 630.0, "SBILIFE": 1620.0, "SHRIRAMFIN": 600.0,
-        "BAJAJFINSV": 1970.0, "INDUSINDBK": 1000.0, "ADANIPORTS": 1200.0,
-        "ADANIENT": 2350.0, "ETERNAL": 205.0,
-    }
-
-    def __init__(self, on_tick: Callable[[Tick], None]):
+    def __init__(self, on_tick: Callable[[Tick], None], symbols: list[str] | None = None):
         self._on_tick = on_tick
-        self._prices = dict(self.SEED_PRICES)
-        self._volumes: dict[str, int] = {s: 0 for s in self._prices}
+        from services.data_ingestion.nifty500_instruments import get_live_universe
+        self._universe: list[str] = symbols or get_live_universe()
+        # Populated in start() after yfinance fetch
+        self._seed_prices: dict[str, float] = {}
+        self._prices:      dict[str, float] = {}
+        self._volumes:     dict[str, int]   = {}
         self._running = False
 
     async def start(self) -> None:
+        self._seed_prices = await asyncio.get_event_loop().run_in_executor(
+            None, self._fetch_prices_yfinance
+        )
+        self._prices  = dict(self._seed_prices)
+        self._volumes = {s: 0 for s in self._prices}
         self._running = True
         log.info("mock_feed.start", mode="DEVELOPMENT", symbols=len(self._prices))
         asyncio.create_task(self._tick_loop())
 
+    def _fetch_prices_yfinance(self) -> dict[str, float]:
+        """
+        Batch-fetch latest close prices for all N500 symbols from yfinance.
+        Single network call using yf.download() — finishes in ~10s.
+        Falls back to 100.0 only if yfinance returns NaN for a symbol.
+        """
+        import yfinance as yf
+        import pandas as pd
+
+        tickers = [f"{sym}.NS" for sym in self._universe]
+        log.info("mock_feed.fetching_prices", count=len(tickers))
+
+        try:
+            # auto_adjust=True gives adjusted close; group_by="ticker" for multi-symbol
+            raw = yf.download(
+                tickers,
+                period="5d",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                threads=False,   # Avoid "can't start new thread" with 2000+ symbols
+            )
+            # raw["Close"] is a DataFrame: rows=dates, cols="{sym}.NS"
+            close = raw["Close"]
+            if isinstance(close, pd.Series):
+                # Only one symbol returned as Series
+                close = close.to_frame(name=tickers[0])
+
+            latest = close.ffill().iloc[-1]   # last non-NaN close per symbol
+        except Exception as e:
+            log.error("mock_feed.yfinance_batch_error", error=str(e))
+            return {sym: 100.0 for sym in self._universe}
+
+        result: dict[str, float] = {}
+        missing = 0
+        for sym in self._universe:
+            col = f"{sym}.NS"
+            val = latest.get(col)
+            if val is not None and not pd.isna(val) and float(val) > 0:
+                result[sym] = round(float(val), 2)
+            else:
+                result[sym] = 100.0   # genuine fallback only for truly unknown tickers
+                missing += 1
+
+        log.info(
+            "mock_feed.prices_fetched",
+            fetched=len(result) - missing,
+            fallback=missing,
+            total=len(result),
+        )
+        return result
+
     async def _tick_loop(self) -> None:
-        token = 1000  # Fake token counter
-        symbol_tokens = {sym: token + i for i, sym in enumerate(self._prices)}
+        symbol_tokens = {sym: 1000 + i for i, sym in enumerate(self._prices)}
 
         while self._running:
-            for sym, price in list(self._prices.items()):
-                # Random walk: ±0.05% per tick with mean reversion
-                seed_price = self.SEED_PRICES[sym]
-                drift = (seed_price - price) * 0.0001   # mean reversion
-                noise = random.gauss(drift, price * 0.0005)
-                new_price = max(price + noise, price * 0.9)  # prevent extreme drops
+            for i, (sym, price) in enumerate(list(self._prices.items())):
+                seed_price = self._seed_prices[sym]
+                # Mean-reverting random walk: drift pulls price back toward seed
+                drift     = (seed_price - price) * 0.0001
+                noise     = random.gauss(drift, price * 0.0005)
+                new_price = max(price + noise, price * 0.9)
 
-                self._prices[sym] = round(new_price, 2)
+                self._prices[sym]  = round(new_price, 2)
                 self._volumes[sym] += random.randint(100, 2000)
 
                 tick = Tick(
@@ -304,13 +376,18 @@ class MockFeed:
                     volume           = self._volumes[sym],
                     buy_quantity     = random.randint(1000, 50000),
                     sell_quantity    = random.randint(1000, 50000),
-                    open             = self.SEED_PRICES[sym],
-                    high             = max(self.SEED_PRICES[sym], new_price),
-                    low              = min(self.SEED_PRICES[sym], new_price),
-                    close            = self.SEED_PRICES[sym],
+                    open             = seed_price,
+                    high             = max(seed_price, new_price),
+                    low              = min(seed_price, new_price),
+                    close            = seed_price,
                     change           = round((new_price - seed_price) / seed_price * 100, 2),
                 )
                 self._on_tick(tick)
+
+                # Yield to event loop every 100 symbols so Telegram polling,
+                # Redis writes, and other coroutines get CPU time.
+                if i % 100 == 0:
+                    await asyncio.sleep(0)
 
             await asyncio.sleep(1)   # emit ticks every second
 
@@ -323,35 +400,35 @@ class MockFeed:
 
 class TickRedisWriter:
     """
-    Writes every tick to Redis for real-time consumption by other services.
+    Writes ticks to Redis using a pipeline — one round-trip per batch.
     Key: market:tick:{symbol}  TTL: 60s
     Also maintains a sorted set of latest prices for fast bulk reads.
     """
 
-    async def write(self, tick: Tick) -> None:
+    async def write_batch(self, ticks: list[Tick]) -> None:
+        if not ticks:
+            return
         try:
             redis = get_redis()
-            data = json.dumps({
-                "lp":  tick.last_price,
-                "vol": tick.volume,
-                "chg": tick.change,
-                "ts":  tick.timestamp.isoformat(),
-                "o":   tick.open,
-                "h":   tick.high,
-                "l":   tick.low,
-                "c":   tick.close,
-                "bq":  tick.buy_quantity,
-                "sq":  tick.sell_quantity,
-            })
-            await redis.setex(f"market:tick:{tick.trading_symbol}", 60, data)
-            await redis.zadd("market:prices", {tick.trading_symbol: tick.last_price})
+            async with redis.pipeline(transaction=False) as pipe:
+                for tick in ticks:
+                    data = json.dumps({
+                        "lp":  tick.last_price,
+                        "vol": tick.volume,
+                        "chg": tick.change,
+                        "ts":  tick.timestamp.isoformat(),
+                        "o":   tick.open,
+                        "h":   tick.high,
+                        "l":   tick.low,
+                        "c":   tick.close,
+                        "bq":  tick.buy_quantity,
+                        "sq":  tick.sell_quantity,
+                    })
+                    pipe.setex(f"market:tick:{tick.trading_symbol}", 60, data)
+                    pipe.zadd("market:prices", {tick.trading_symbol: tick.last_price})
+                await pipe.execute()
         except Exception as e:
-            log.warning(
-                "redis_writer.write_failed",
-                symbol=tick.trading_symbol,
-                ts=tick.timestamp.isoformat(),
-                error=str(e),
-            )
+            log.warning("redis_writer.batch_failed", count=len(ticks), error=str(e))
 
 
 # ─── Main Feed Manager ────────────────────────────────────────────────────────
@@ -361,45 +438,78 @@ class FeedManager:
     Orchestrates the feed, candle aggregator, and Redis writer.
     In LIVE/PAPER mode: uses ZerodhaFeed.
     In DEVELOPMENT mode: uses MockFeed.
+
+    Ticks are buffered per event-loop cycle and flushed as a single pipeline
+    write — avoids spawning one Redis connection per tick symbol.
     """
 
     def __init__(self):
         self._redis_writer = TickRedisWriter()
         self._candle_aggregator = CandleAggregator(self._on_candle_complete)
         self._candle_callbacks: list[Callable[[OHLCVCandle], None]] = []
+        self._tick_batch: list[Tick] = []
+        self._flush_scheduled: bool = False
+        self._total_ticks: int = 0
+        self._loop: asyncio.AbstractEventLoop | None = None
 
-        if settings.is_dev:
-            self._feed = MockFeed(self._on_tick)
-        else:
+        if settings.use_real_feed:
             self._feed = ZerodhaFeed(self._on_tick)
+        else:
+            self._feed = MockFeed(self._on_tick)
 
     def add_candle_listener(self, callback: Callable[[OHLCVCandle], None]) -> None:
         """Register a callback to receive completed OHLCV candles."""
         self._candle_callbacks.append(callback)
 
     def _on_tick(self, tick: Tick) -> None:
-        """Called for every incoming tick."""
-        # Run async write without blocking the tick loop.
-        # The write() method handles its own exceptions internally,
-        # but we also attach a done-callback to catch any unexpected errors.
-        task = asyncio.create_task(self._redis_writer.write(tick))
-        task.add_done_callback(self._on_redis_write_done)
+        """Buffer tick; schedule a single batch flush at end of this event-loop turn."""
+        self._tick_batch.append(tick)
         self._candle_aggregator.process_tick(tick)
+        self._total_ticks += 1
 
-    @staticmethod
-    def _on_redis_write_done(task: asyncio.Task) -> None:
-        if not task.cancelled() and task.exception() is not None:
-            log.warning("feed_manager.redis_task_error", error=str(task.exception()))
+        # Print every 500 ticks (~10s at 50 symbols/sec) so we know the feed is alive
+        if self._total_ticks % 500 == 0:
+            from datetime import datetime
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] feed.ticks_processed total={self._total_ticks}", flush=True)
+
+        if not self._flush_scheduled:
+            self._flush_scheduled = True
+            try:
+                loop = asyncio.get_event_loop()
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(self._flush_ticks())
+                )
+            except RuntimeError:
+                # Called from non-asyncio thread (KiteTicker) — use running loop ref
+                if self._loop:
+                    self._loop.call_soon_threadsafe(
+                        lambda: asyncio.ensure_future(self._flush_ticks())
+                    )
+
+    async def _flush_ticks(self) -> None:
+        """Drain the tick buffer and write to Redis in one pipeline call."""
+        # yield once so all synchronous _on_tick calls in this loop turn complete
+        await asyncio.sleep(0)
+        batch, self._tick_batch = self._tick_batch, []
+        self._flush_scheduled = False
+        await self._redis_writer.write_batch(batch)
 
     def _on_candle_complete(self, candle: OHLCVCandle) -> None:
-        """Called when a candle period closes."""
-        for cb in self._candle_callbacks:
-            try:
-                cb(candle)
-            except Exception as e:
-                log.warning("feed_manager.candle_callback_error", error=str(e))
+        """Called when a candle period closes — may be in KiteTicker's thread."""
+        if self._loop and self._loop.is_running():
+            # Cross thread boundary safely — callbacks may call asyncio.create_task
+            for cb in self._candle_callbacks:
+                _cb = cb  # capture for lambda
+                self._loop.call_soon_threadsafe(_cb, candle)
+        else:
+            for cb in self._candle_callbacks:
+                try:
+                    cb(candle)
+                except Exception as e:
+                    log.warning("feed_manager.candle_callback_error", error=str(e))
 
     async def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
         await self._feed.start()
         log.info("feed_manager.started", env=settings.app_env.value)
 
