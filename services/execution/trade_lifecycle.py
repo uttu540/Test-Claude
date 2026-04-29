@@ -696,7 +696,7 @@ class TradeLifecycleManager:
                 )
                 return [dict(row._mapping) for row in result.fetchall()]
         except Exception as e:
-            log.error("lifecycle.load_trades_failed", error=str(e))
+            log.error("lifecycle.load_trades_failed", error=str(e), exc_info=True)
         return []
 
     def _update_price_extremes(self, trade_key: str, entry_price: float, current_price: float) -> None:

@@ -46,10 +46,30 @@ from services.technical_engine.signal_generator import Signal
 # ─── Logging Setup ────────────────────────────────────────────────────────────
 
 import logging
-logging.basicConfig(
-    format="%(message)s",
-    level=logging.INFO,
+import logging.handlers
+from pathlib import Path
+
+# Ensure logs directory exists
+Path("logs").mkdir(exist_ok=True)
+
+_log_file = Path("logs") / f"bot_{datetime.now().strftime('%Y-%m-%d')}.log"
+
+# File handler — plain text, no ANSI colours, rotates at 20 MB, keeps 7 days
+_file_handler = logging.handlers.RotatingFileHandler(
+    _log_file, maxBytes=20 * 1024 * 1024, backupCount=7, encoding="utf-8"
 )
+_file_handler.setFormatter(logging.Formatter(
+    "%(asctime)s %(levelname)-8s %(name)s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+))
+
+# Console handler — coloured structlog output (existing behaviour)
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.setFormatter(logging.Formatter("%(message)s"))
+
+logging.basicConfig(level=logging.INFO, handlers=[_console_handler, _file_handler])
+# Ensure APScheduler job errors propagate to our handlers (not silently dropped)
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 
 structlog.configure(
     processors=[
@@ -682,6 +702,7 @@ async def job_orb_scan() -> list:
     """
     from config.market_hours import is_trading_day
     if not is_trading_day():
+        log.info("scheduler.orb_scan_skip", reason="NSE holiday or weekend")
         return []
 
     from datetime import date as _date
@@ -752,21 +773,33 @@ async def job_square_off_intraday() -> None:
     """3:12 PM IST — Square off all intraday positions and close them in DB."""
     from config.market_hours import is_trading_day
     if not is_trading_day():
+        log.info("scheduler.square_off_skip", reason="NSE holiday or weekend")
         return
     log.warning("scheduler.square_off_intraday", time="15:12")
-    if settings.uses_real_broker:
-        from services.execution.broker_router import get_broker
-        await get_broker().square_off_all_intraday()
-    # Close all remaining OPEN trades in DB at current market price
-    closed = await get_lifecycle_manager().close_all_open_trades(reason="TIME_EXIT")
-    log.info("scheduler.square_off_db_closed", count=closed)
+    try:
+        if settings.uses_real_broker:
+            from services.execution.broker_router import get_broker
+            try:
+                await get_broker().square_off_all_intraday()
+            except Exception as e:
+                log.error("scheduler.square_off_broker_error", error=str(e))
+        # Close all remaining OPEN trades in DB at current market price
+        closed = await get_lifecycle_manager().close_all_open_trades(reason="TIME_EXIT")
+        log.info("scheduler.square_off_db_closed", count=closed)
+    except Exception as e:
+        log.error("scheduler.square_off_failed", error=str(e), exc_info=True)
 
 
 async def job_flush_eod_candles() -> None:
     """3:31 PM IST — Flush any open (in-progress) candles so last bar of day is not lost."""
-    if _feed_manager is not None:
-        _feed_manager.flush_open_candles()
-        log.info("scheduler.eod_candle_flush", status="done")
+    try:
+        if _feed_manager is not None:
+            _feed_manager.flush_open_candles()
+            log.info("scheduler.eod_candle_flush", status="done")
+        else:
+            log.warning("scheduler.eod_candle_flush_skip", reason="feed_manager not initialised")
+    except Exception as e:
+        log.error("scheduler.eod_candle_flush_failed", error=str(e), exc_info=True)
 
 
 async def job_eod_summary() -> None:
