@@ -193,6 +193,7 @@ class TradeExecutor:
         )
 
         # ── 8. Telegram notification ──────────────────────────────────────────
+        _trade_type = "SWING" if signal.timeframe in ("1day", "1week") else "INTRADAY"
         await get_notifier().trade_entry(
             symbol     = signal.trading_symbol,
             direction  = direction,
@@ -204,6 +205,7 @@ class TradeExecutor:
             strategy   = signal.signal_type.value,
             confidence = ai_decision.confidence,
             broker     = broker.BROKER,
+            trade_type = _trade_type,
         )
 
         log.info(

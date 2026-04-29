@@ -769,6 +769,78 @@ async def job_orb_scan() -> list:
     return signals
 
 
+async def job_market_open_ping() -> None:
+    """
+    9:15 AM IST — Send opening tick snapshot to Telegram.
+    Shows Nifty 50 and Sensex opening price vs previous close (up/down + %).
+    Uses yfinance for prev-close and Redis tick for current price; falls back
+    to yfinance if Redis tick not available yet (feed may still be connecting).
+    """
+    from config.market_hours import is_trading_day
+    if not is_trading_day():
+        return
+    try:
+        import json as _json
+        import asyncio as _asyncio
+
+        redis = get_redis()
+
+        async def _fetch_index(symbol: str, yf_ticker: str) -> tuple[float | None, float | None]:
+            """Return (current_price, prev_close) for the given index."""
+            lp, prev_close = None, None
+
+            # Try Redis tick first (live feed)
+            tick_raw = await redis.get(f"market:tick:{symbol}")
+            if tick_raw:
+                try:
+                    d = _json.loads(tick_raw)
+                    lp         = float(d.get("lp") or 0) or None
+                    prev_close = float(d.get("c")  or 0) or None
+                except Exception:
+                    pass
+
+            # Fall back to yfinance if Redis unavailable
+            if lp is None or prev_close is None:
+                try:
+                    import yfinance as yf
+                    hist = await _asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: yf.download(yf_ticker, period="2d", interval="1d",
+                                            progress=False, auto_adjust=True),
+                    )
+                    if hist is not None and len(hist) >= 2:
+                        prev_close = float(hist["Close"].iloc[-2])
+                        lp         = float(hist["Close"].iloc[-1])
+                except Exception:
+                    pass
+
+            return lp, prev_close
+
+        nifty_lp, nifty_prev   = await _fetch_index("NIFTY 50",  "^NSEI")
+        sensex_lp, sensex_prev = await _fetch_index("SENSEX",    "^BSESN")
+
+        def _fmt(name: str, lp: float | None, prev: float | None) -> str:
+            if lp is None or prev is None or prev == 0:
+                return f"*{name}*: data unavailable"
+            chg     = lp - prev
+            pct     = chg / prev * 100
+            arrow   = "▲" if chg >= 0 else "▼"
+            emoji   = "🟢" if chg >= 0 else "🔴"
+            return f"{emoji} *{name}*: {lp:,.0f}  {arrow} {abs(chg):,.0f} ({abs(pct):.2f}%)"
+
+        lines = [
+            f"🔔 *Market Open — {datetime.now().strftime('%d %b %Y')}*",
+            "──────────────────",
+            _fmt("NIFTY 50", nifty_lp, nifty_prev),
+            _fmt("SENSEX",   sensex_lp, sensex_prev),
+        ]
+        notifier = get_notifier()
+        await notifier._send("\n".join(lines), parse_mode="Markdown")
+        log.info("scheduler.market_open_ping_sent")
+    except Exception as e:
+        log.error("scheduler.market_open_ping_failed", error=str(e), exc_info=True)
+
+
 async def job_square_off_intraday() -> None:
     """3:12 PM IST — Square off all intraday positions and close them in DB."""
     from config.market_hours import is_trading_day
@@ -1358,6 +1430,7 @@ async def main() -> None:
     # Weekdays only (Mon=0 … Fri=4)
     scheduler.add_job(job_daily_auth,          CronTrigger(day_of_week="0-4", hour=8,  minute=30, timezone="Asia/Kolkata"))
     scheduler.add_job(job_market_open_briefing, CronTrigger(day_of_week="0-4", hour=9, minute=10, timezone="Asia/Kolkata"))
+    scheduler.add_job(job_market_open_ping,     CronTrigger(day_of_week="0-4", hour=9, minute=15, timezone="Asia/Kolkata"))
     scheduler.add_job(job_orb_scan,             CronTrigger(day_of_week="0-4", hour=10, minute=0, timezone="Asia/Kolkata"))
     scheduler.add_job(job_square_off_intraday,  CronTrigger(day_of_week="0-4", hour=15, minute=12, timezone="Asia/Kolkata"))
     scheduler.add_job(job_flush_eod_candles,    CronTrigger(day_of_week="0-4", hour=15, minute=31, timezone="Asia/Kolkata"))

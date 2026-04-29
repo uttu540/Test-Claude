@@ -91,13 +91,16 @@ class TelegramNotifier:
         strategy:   str,
         confidence: float,
         broker:     str = "ZERODHA",
+        trade_type: str = "INTRADAY",   # "INTRADAY" or "SWING"
     ) -> None:
         rr = (target_1 - price) / (price - stop_loss) if price != stop_loss else 0.0
         t2_line = f"Target 2:   ₹{target_2:.2f}\n" if target_2 else "Target 2:   —\n"
+        type_emoji = "📅" if trade_type == "SWING" else "⚡"
         msg = (
             f"📊 *TRADE ENTRY*\n"
             f"──────────────────\n"
             f"*{self._md(direction)} {self._md(symbol)}* @ ₹{price:.2f}\n"
+            f"{type_emoji} Type:       *{trade_type}*\n"
             f"Qty: {quantity} shares\n"
             f"Stop Loss:  ₹{stop_loss:.2f}  (-{abs(price - stop_loss):.2f})\n"
             f"Target 1:   ₹{target_1:.2f}  (+{abs(target_1 - price):.2f})\n"
@@ -422,19 +425,40 @@ async def _cmd_status(update: object, context: object) -> None:
         return
     if not _is_authorized(str(update.effective_user.id)):
         return
+
+    regime = "UNKNOWN"
+    total_pnl = 0.0
+    open_positions = 0
     try:
-        from database.connection import get_redis
+        from database.connection import get_redis, get_db_session
+        from sqlalchemy import text
         redis  = get_redis()
         regime = await redis.get("market:regime") or "UNKNOWN"
+        async with get_db_session() as session:
+            pnl_result = await session.execute(
+                text("SELECT COALESCE(SUM(net_pnl), 0) FROM trades WHERE status = 'CLOSED'")
+            )
+            total_pnl = float(pnl_result.scalar() or 0)
+            pos_result = await session.execute(
+                text("SELECT COUNT(*) FROM trades WHERE status = 'OPEN'")
+            )
+            open_positions = int(pos_result.scalar() or 0)
     except Exception:
-        regime = "UNKNOWN"
+        pass
 
+    effective_capital = settings.total_capital + total_pnl
+    pnl_sign  = "+" if total_pnl >= 0 else ""
+    pnl_emoji = "💚" if total_pnl >= 0 else "🔴"
     mode = settings.app_env.value.upper()
     await update.message.reply_text(
         f"🤖 *TradeBot Status*\n"
         f"──────────────────\n"
         f"Mode:             `{mode}`\n"
-        f"Capital:          ₹{settings.total_capital:,.0f}\n"
+        f"Starting Capital: ₹{settings.total_capital:,.0f}\n"
+        f"{pnl_emoji} All-time P&L:  {pnl_sign}₹{total_pnl:,.2f}\n"
+        f"Effective Capital:₹{effective_capital:,.0f}\n"
+        f"Open Positions:   {open_positions}\n"
+        f"──────────────────\n"
         f"Regime:           {regime}\n"
         f"Max risk/trade:   ₹{settings.max_risk_per_trade_inr:,.0f}\n"
         f"Daily loss limit: ₹{settings.daily_loss_limit_inr:,.0f}\n"

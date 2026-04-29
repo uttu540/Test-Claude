@@ -195,12 +195,14 @@ class MarketRegimeDetector:
     async def publish(self, regime: Regime, detail: dict | None = None) -> None:
         """Write regime + optional indicator detail to Redis."""
         redis = get_redis()
-        await redis.setex("market:regime", 1_200, regime)   # 20 min TTL
+        # 24h TTL — regime is locked after 10:15 AM and must not expire mid-session.
+        # 20 min TTL caused UNKNOWN regime for the rest of the day after the lock.
+        await redis.setex("market:regime", 86_400, regime)
 
         if detail:
             await redis.setex(
                 "market:regime:detail",
-                1_200,
+                86_400,
                 json.dumps({**detail, "regime": regime, "ts": datetime.now().isoformat()}),
             )
 
