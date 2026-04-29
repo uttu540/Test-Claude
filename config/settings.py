@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     max_risk_per_trade_pct: float = 2.0       # Risk max 2% = ₹2,000 per trade
     daily_loss_limit_pct: float = 2.0         # Halt if day loss > 2% = ₹2,000
     max_open_positions: int = 8
-    max_position_size_pct: float = 10.0       # Max 10% in a single position
+    max_position_size_pct: float = 15.0       # Max 15% in a single position
 
     # ── Database ──────────────────────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://trading:trading_secret@localhost:5432/trading_bot"

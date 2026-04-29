@@ -54,10 +54,11 @@ class BacktestMetrics:
     win_rate:      float   # 0.0–1.0
     avg_rr:        float   # avg actual risk:reward
     # Breakdown dicts
-    by_signal:    dict[str, dict]
-    by_regime:    dict[str, dict]
-    by_direction: dict[str, dict]
-    by_exit:      dict[str, int]
+    by_signal:      dict[str, dict]
+    by_regime:      dict[str, dict]
+    by_direction:   dict[str, dict]
+    by_exit:        dict[str, int]
+    by_confluence:  dict[str, dict]   # score bucket → {trades, wins, win_rate, net_pnl}
 
 
 class BacktestReporter:
@@ -128,6 +129,7 @@ class BacktestReporter:
             by_regime     = self._breakdown(trades, "regime"),
             by_direction  = self._breakdown(trades, "direction"),
             by_exit       = self._count_by(trades, "exit_reason"),
+            by_confluence = self._confluence_breakdown(trades),
         )
 
     # ── Printing ──────────────────────────────────────────────────────────────
@@ -187,6 +189,13 @@ class BacktestReporter:
             t = self._breakdown_table(metrics.by_direction, "Direction")
             console.print(t)
 
+        # ── Confluence score breakdown ────────────────────────────────────────
+        if metrics.by_confluence:
+            console.print()
+            console.rule("[dim]By Confluence Score[/dim]")
+            t = self._breakdown_table(metrics.by_confluence, "Score")
+            console.print(t)
+
         # ── Exit reasons ──────────────────────────────────────────────────────
         if metrics.by_exit:
             console.print()
@@ -214,6 +223,25 @@ class BacktestReporter:
         log.info("backtest.saved", path=path)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _confluence_breakdown(self, trades: list[SimulatedTrade]) -> dict[str, dict]:
+        """Group trades by confluence score bucket (6, 7, 8, 9, 10)."""
+        groups: dict[str, list[SimulatedTrade]] = {}
+        for t in trades:
+            key = f"score_{t.confluence_score}"
+            groups.setdefault(key, []).append(t)
+        result = {}
+        for key, group in sorted(groups.items()):
+            pnls = [t.pnl for t in group]
+            wins = [t for t in group if t.pnl > 0]
+            result[key] = {
+                "trades":   len(group),
+                "wins":     len(wins),
+                "win_rate": round(len(wins) / len(group), 4),
+                "net_pnl":  round(sum(pnls), 2),
+                "avg_pnl":  round(float(np.mean(pnls)), 2),
+            }
+        return result
 
     def _breakdown(self, trades: list[SimulatedTrade], attr: str) -> dict[str, dict]:
         groups: dict[str, list[SimulatedTrade]] = {}
@@ -270,5 +298,5 @@ class BacktestReporter:
             winning=0, losing=0, net_pnl=0, gross_pnl=0, avg_pnl=0,
             best_trade=0, worst_trade=0, profit_factor=0,
             max_drawdown=0, sharpe_ratio=0, win_rate=0, avg_rr=0,
-            by_signal={}, by_regime={}, by_direction={}, by_exit={},
+            by_signal={}, by_regime={}, by_direction={}, by_exit={}, by_confluence={},
         )

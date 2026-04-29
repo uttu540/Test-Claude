@@ -1,0 +1,113 @@
+{
+  "start_date": "2026-01-11",
+  "end_date": "2026-04-11",
+  "symbols": 50,
+  "total_trades": 724,
+  "winning": 350,
+  "losing": 374,
+  "net_pnl": 14231.12,
+  "gross_pnl": 14231.12,
+  "avg_pnl": 19.66,
+  "best_trade": 543.0,
+  "worst_trade": -368.8,
+  "profit_factor": 1.55,
+  "max_drawdown": -812.66,
+  "sharpe_ratio": 2.74,
+  "win_rate": 0.4834,
+  "avg_rr": 1.16,
+  "by_signal": {
+    "BB_EXPANSION": {
+      "trades": 21,
+      "wins": 12,
+      "win_rate": 0.5714,
+      "net_pnl": 167.49,
+      "avg_pnl": 7.98
+    },
+    "BREAKOUT_HIGH": {
+      "trades": 90,
+      "wins": 47,
+      "win_rate": 0.5222,
+      "net_pnl": 1230.86,
+      "avg_pnl": 13.68
+    },
+    "BREAKOUT_LOW": {
+      "trades": 345,
+      "wins": 146,
+      "win_rate": 0.4232,
+      "net_pnl": 4758.92,
+      "avg_pnl": 13.79
+    },
+    "EMA_CROSSOVER_DOWN": {
+      "trades": 45,
+      "wins": 29,
+      "win_rate": 0.6444,
+      "net_pnl": 1743.02,
+      "avg_pnl": 38.73
+    },
+    "EMA_CROSSOVER_UP": {
+      "trades": 17,
+      "wins": 9,
+      "win_rate": 0.5294,
+      "net_pnl": 768.77,
+      "avg_pnl": 45.22
+    },
+    "HIGH_RVOL": {
+      "trades": 169,
+      "wins": 84,
+      "win_rate": 0.497,
+      "net_pnl": 4361.84,
+      "avg_pnl": 25.81
+    },
+    "MACD_CROSS_DOWN": {
+      "trades": 20,
+      "wins": 13,
+      "win_rate": 0.65,
+      "net_pnl": 712.75,
+      "avg_pnl": 35.64
+    },
+    "MACD_CROSS_UP": {
+      "trades": 17,
+      "wins": 10,
+      "win_rate": 0.5882,
+      "net_pnl": 487.47,
+      "avg_pnl": 28.67
+    }
+  },
+  "by_regime": {
+    "TRENDING_DOWN": {
+      "trades": 536,
+      "wins": 253,
+      "win_rate": 0.472,
+      "net_pnl": 11086.86,
+      "avg_pnl": 20.68
+    },
+    "TRENDING_UP": {
+      "trades": 188,
+      "wins": 97,
+      "win_rate": 0.516,
+      "net_pnl": 3144.26,
+      "avg_pnl": 16.72
+    }
+  },
+  "by_direction": {
+    "LONG": {
+      "trades": 188,
+      "wins": 97,
+      "win_rate": 0.516,
+      "net_pnl": 3144.26,
+      "avg_pnl": 16.72
+    },
+    "SHORT": {
+      "trades": 536,
+      "wins": 253,
+      "win_rate": 0.472,
+      "net_pnl": 11086.86,
+      "avg_pnl": 20.68
+    }
+  },
+  "by_exit": {
+    "STOP": 303,
+    "TARGET": 156,
+    "MAX_HOLD": 265
+  }
+}

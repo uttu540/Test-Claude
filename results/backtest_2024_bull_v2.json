@@ -1,0 +1,85 @@
+{
+  "start_date": "2024-01-01",
+  "end_date": "2024-12-31",
+  "symbols": 50,
+  "total_trades": 152,
+  "winning": 58,
+  "losing": 94,
+  "net_pnl": -9149.27,
+  "gross_pnl": -9149.27,
+  "avg_pnl": -60.19,
+  "best_trade": 1435.04,
+  "worst_trade": -1602.52,
+  "profit_factor": 0.77,
+  "max_drawdown": -15239.57,
+  "sharpe_ratio": -1.68,
+  "win_rate": 0.3816,
+  "avg_rr": 0.88,
+  "by_signal": {
+    "BREAKOUT_HIGH": {
+      "trades": 88,
+      "wins": 33,
+      "win_rate": 0.375,
+      "net_pnl": -4278.15,
+      "avg_pnl": -48.62
+    },
+    "BREAKOUT_LOW": {
+      "trades": 59,
+      "wins": 24,
+      "win_rate": 0.4068,
+      "net_pnl": -3578.38,
+      "avg_pnl": -60.65
+    },
+    "EMA_CROSSOVER_UP": {
+      "trades": 3,
+      "wins": 0,
+      "win_rate": 0.0,
+      "net_pnl": -1644.83,
+      "avg_pnl": -548.28
+    },
+    "HIGH_RVOL": {
+      "trades": 2,
+      "wins": 1,
+      "win_rate": 0.5,
+      "net_pnl": 352.09,
+      "avg_pnl": 176.05
+    }
+  },
+  "by_regime": {
+    "TRENDING_DOWN": {
+      "trades": 59,
+      "wins": 24,
+      "win_rate": 0.4068,
+      "net_pnl": -3578.38,
+      "avg_pnl": -60.65
+    },
+    "TRENDING_UP": {
+      "trades": 93,
+      "wins": 34,
+      "win_rate": 0.3656,
+      "net_pnl": -5570.89,
+      "avg_pnl": -59.9
+    }
+  },
+  "by_direction": {
+    "LONG": {
+      "trades": 93,
+      "wins": 34,
+      "win_rate": 0.3656,
+      "net_pnl": -5570.89,
+      "avg_pnl": -59.9
+    },
+    "SHORT": {
+      "trades": 59,
+      "wins": 24,
+      "win_rate": 0.4068,
+      "net_pnl": -3578.38,
+      "avg_pnl": -60.65
+    }
+  },
+  "by_exit": {
+    "MAX_HOLD": 69,
+    "STOP": 67,
+    "TARGET": 16
+  }
+}

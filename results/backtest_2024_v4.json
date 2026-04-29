@@ -1,0 +1,22 @@
+{
+  "start_date": "2024-01-01",
+  "end_date": "2024-12-31",
+  "symbols": 50,
+  "total_trades": 0,
+  "winning": 0,
+  "losing": 0,
+  "net_pnl": 0,
+  "gross_pnl": 0,
+  "avg_pnl": 0,
+  "best_trade": 0,
+  "worst_trade": 0,
+  "profit_factor": 0,
+  "max_drawdown": 0,
+  "sharpe_ratio": 0,
+  "win_rate": 0,
+  "avg_rr": 0,
+  "by_signal": {},
+  "by_regime": {},
+  "by_direction": {},
+  "by_exit": {}
+}
