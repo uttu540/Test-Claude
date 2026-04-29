@@ -3,7 +3,7 @@ import {
   AreaChart, Area, XAxis, YAxis, Tooltip,
   ResponsiveContainer, ReferenceLine, CartesianGrid,
 } from 'recharts'
-import { fetchPnLToday, fetchPositions, fetchRecentSignals } from '../api'
+import { fetchPnLToday, fetchPositions, fetchRecentSignals, fetchBotStatus } from '../api'
 import { useWebSocket } from '../ws'
 import StatCard from '../components/StatCard'
 import PnLBar from '../components/PnLBar'
@@ -16,19 +16,37 @@ function RegimeBadge({ regime, loading }) {
   if (loading) return <div className="skeleton h-7 w-28 rounded-full" />
 
   const configs = {
-    TRENDING: { bg: 'bg-blue-trade/10', text: 'text-blue-trade', border: 'border-blue-trade/30', icon: '⟳' },
-    RANGING:  { bg: 'bg-yellow-trade/10', text: 'text-yellow-trade', border: 'border-yellow-trade/30', icon: '⟷' },
-    UNKNOWN:  { bg: 'bg-text-muted/10', text: 'text-text-muted', border: 'border-border', icon: '?' },
+    TRENDING_UP:   { bg: 'bg-green-trade/10',  text: 'text-green-trade',  border: 'border-green-trade/30',  label: 'TRENDING ↑' },
+    TRENDING_DOWN: { bg: 'bg-red-trade/10',    text: 'text-red-trade',    border: 'border-red-trade/30',    label: 'TRENDING ↓' },
+    RANGING:       { bg: 'bg-yellow-trade/10', text: 'text-yellow-trade', border: 'border-yellow-trade/30', label: 'RANGING'    },
+    HIGH_VOLATILITY: { bg: 'bg-orange-500/10', text: 'text-orange-400',   border: 'border-orange-500/30',   label: 'HIGH VOL'   },
+    UNKNOWN:       { bg: 'bg-text-muted/10',   text: 'text-text-muted',   border: 'border-border',          label: 'UNKNOWN'    },
   }
   const c = configs[regime] || configs.UNKNOWN
 
   return (
     <div className="flex items-center gap-2">
-      <span className="text-xs text-text-muted">Market Regime</span>
-      <span className={`badge ${c.bg} ${c.text} border ${c.border} text-xs`}>
-        {regime || 'UNKNOWN'}
+      <span className="text-xs text-text-muted">Regime</span>
+      <span className={`badge ${c.bg} ${c.text} border ${c.border} text-xs font-medium`}>
+        {c.label}
       </span>
     </div>
+  )
+}
+
+function ModeBadge({ mode, loading }) {
+  if (loading) return <div className="skeleton h-7 w-16 rounded-full" />
+  const configs = {
+    LIVE:      { bg: 'bg-green-trade/10', text: 'text-green-trade',  border: 'border-green-trade/30'  },
+    PAPER:     { bg: 'bg-blue-trade/10',  text: 'text-blue-trade',   border: 'border-blue-trade/30'   },
+    SEMI_AUTO: { bg: 'bg-yellow-trade/10',text: 'text-yellow-trade', border: 'border-yellow-trade/30' },
+    DEV:       { bg: 'bg-text-muted/10',  text: 'text-text-muted',   border: 'border-border'          },
+  }
+  const c = configs[mode] || configs.DEV
+  return (
+    <span className={`badge ${c.bg} ${c.text} border ${c.border} text-xs font-mono`}>
+      {mode || 'DEV'}
+    </span>
   )
 }
 
@@ -133,10 +151,12 @@ export default function Dashboard() {
   const [pnlData, setPnlData]         = useState(null)
   const [positions, setPositions]     = useState([])
   const [signals, setSignals]         = useState([])
+  const [botStatus, setBotStatus]     = useState(null)
 
   const [pnlLoading, setPnlLoading]           = useState(true)
   const [posLoading, setPosLoading]           = useState(true)
   const [sigLoading, setSigLoading]           = useState(true)
+  const [statusLoading, setStatusLoading]     = useState(true)
 
   const [pnlError, setPnlError]               = useState(null)
   const [posError, setPosError]               = useState(null)
@@ -147,6 +167,7 @@ export default function Dashboard() {
     setPnlLoading(true)
     setPosLoading(true)
     setSigLoading(true)
+    setStatusLoading(true)
 
     fetchPnLToday()
       .then(setPnlData)
@@ -162,6 +183,11 @@ export default function Dashboard() {
       .then(setSignals)
       .catch((e) => setSigError(e.message))
       .finally(() => setSigLoading(false))
+
+    fetchBotStatus()
+      .then(setBotStatus)
+      .catch(() => {})
+      .finally(() => setStatusLoading(false))
   }, [])
 
   useEffect(() => { loadAll() }, [loadAll])
@@ -202,11 +228,12 @@ export default function Dashboard() {
   return (
     <div className="p-5 space-y-4 animate-fade-in max-w-screen-2xl mx-auto">
 
-      {/* ── Top bar: regime + refresh ── */}
+      {/* ── Top bar: regime + mode + refresh ── */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <h1 className="page-title">Dashboard</h1>
           <RegimeBadge regime={regime} loading={pnlLoading} />
+          <ModeBadge mode={botStatus?.mode} loading={statusLoading} />
         </div>
         <button
           onClick={loadAll}

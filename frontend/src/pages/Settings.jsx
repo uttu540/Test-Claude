@@ -75,15 +75,30 @@ function NumberInput({ value, onChange, min, max, step, type }) {
 // ─── Signal pill list ─────────────────────────────────────────────────────────
 
 const ALL_SIGNAL_TYPES = [
+  // Breakout
   'BREAKOUT_HIGH', 'BREAKOUT_LOW',
+  // Trend
   'EMA_CROSSOVER_UP', 'EMA_CROSSOVER_DOWN',
-  'MACD_CROSS_UP', 'MACD_CROSS_DOWN',
+  'ABOVE_200_EMA', 'BELOW_200_EMA',
+  // Momentum
   'RSI_OVERSOLD', 'RSI_OVERBOUGHT',
+  'MACD_CROSS_UP', 'MACD_CROSS_DOWN',
+  // Volume / Volatility
   'HIGH_RVOL',
   'BB_SQUEEZE', 'BB_EXPANSION',
-  'ABOVE_200_EMA', 'BELOW_200_EMA',
+  // Indian market
   'ORB_BREAKOUT',
   'VWAP_RECLAIM',
+  // Candlestick patterns
+  'HAMMER', 'SHOOTING_STAR',
+  'ENGULFING_BULL', 'ENGULFING_BEAR',
+  'MORNING_STAR', 'EVENING_STAR',
+  // Chart patterns
+  'DOUBLE_BOTTOM', 'DOUBLE_TOP',
+  'BULL_FLAG', 'BEAR_FLAG',
+  'DARVAS_BREAKOUT', 'NR7_SETUP',
+  // Momentum engine (TRENDING_UP only)
+  'BREAKOUT_52W', 'VOLUME_THRUST', 'EMA_RIBBON', 'BULL_MOMENTUM',
 ]
 
 function SignalPills({ value, onChange }) {

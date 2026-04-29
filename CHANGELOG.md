@@ -8,6 +8,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 _Next up: Paper trading validation run (#33) — 2-week live gate before semi-auto_
 
+### Fixed (Frontend)
+- **`frontend/src/pages/Dashboard.jsx`** — `RegimeBadge` now handles all five regime values the backend emits: `TRENDING_UP` (green ↑), `TRENDING_DOWN` (red ↓), `RANGING` (yellow), `HIGH_VOLATILITY` (orange), `UNKNOWN` (muted). Previously only `TRENDING`, `RANGING`, `UNKNOWN` were mapped — any other value silently fell through to UNKNOWN styling.
+- **`frontend/src/pages/Dashboard.jsx`** — Added `ModeBadge` component and `fetchBotStatus()` call to show the bot's operating mode (DEV / PAPER / SEMI_AUTO / LIVE) in the dashboard header. The API endpoint `/api/bot/status` existed but was never called from the UI.
+- **`frontend/src/pages/Settings.jsx`** — `ALL_SIGNAL_TYPES` now includes all 29 signal types the backend can generate. Previously missing: `HAMMER`, `SHOOTING_STAR`, `ENGULFING_BULL`, `ENGULFING_BEAR`, `MORNING_STAR`, `EVENING_STAR`, `DOUBLE_BOTTOM`, `DOUBLE_TOP`, `BULL_FLAG`, `BEAR_FLAG`, `DARVAS_BREAKOUT`, `NR7_SETUP`, `BREAKOUT_52W`, `VOLUME_THRUST`, `EMA_RIBBON`, `BULL_MOMENTUM`.
+
 ### Added
 - **`services/momentum_engine/`** — long-only engine for TRENDING_UP markets
   - `signals.py` — `MomentumDetector`: Darvas breakout, 52-week high, EMA ribbon, volume thrust, bull momentum signals; `score_momentum_confluence()` scoring
