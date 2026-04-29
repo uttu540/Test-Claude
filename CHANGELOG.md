@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 _Next up: Paper trading validation run (#33) — 2-week live gate before semi-auto_
 
+---
+
+## [0.5.0] — 2026-04-29 — Frontend Refresh
+
 ### Changed (Frontend — Dashboard Redesign)
 - **`frontend/src/pages/Dashboard.jsx`** — Full visual redesign with retro-fintech aesthetic. Layout reordered for clearer information hierarchy:
   1. **Masthead header** — `Playfair Display` wordmark, left-bordered mode/regime tags, live IST clock, inline refresh; replaces cluttered badge row
