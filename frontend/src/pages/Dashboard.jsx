@@ -5,62 +5,109 @@ import {
 } from 'recharts'
 import { fetchPnLToday, fetchPositions, fetchRecentSignals, fetchBotStatus } from '../api'
 import { useWebSocket } from '../ws'
-import StatCard from '../components/StatCard'
-import PnLBar from '../components/PnLBar'
 import SignalsTable from '../components/SignalsTable'
 import PositionsTable from '../components/PositionsTable'
 
-// ─── Regime badge ─────────────────────────────────────────────────────────────
+// ─── Retro Fintech palette ────────────────────────────────────────────────────
 
-function RegimeBadge({ regime, loading }) {
-  if (loading) return <div className="skeleton h-7 w-28 rounded-full" />
-
-  const configs = {
-    TRENDING_UP:   { bg: 'bg-green-trade/10',  text: 'text-green-trade',  border: 'border-green-trade/30',  label: 'TRENDING ↑' },
-    TRENDING_DOWN: { bg: 'bg-red-trade/10',    text: 'text-red-trade',    border: 'border-red-trade/30',    label: 'TRENDING ↓' },
-    RANGING:       { bg: 'bg-yellow-trade/10', text: 'text-yellow-trade', border: 'border-yellow-trade/30', label: 'RANGING'    },
-    HIGH_VOLATILITY: { bg: 'bg-orange-500/10', text: 'text-orange-400',   border: 'border-orange-500/30',   label: 'HIGH VOL'   },
-    UNKNOWN:       { bg: 'bg-text-muted/10',   text: 'text-text-muted',   border: 'border-border',          label: 'UNKNOWN'    },
-  }
-  const c = configs[regime] || configs.UNKNOWN
-
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs text-text-muted">Regime</span>
-      <span className={`badge ${c.bg} ${c.text} border ${c.border} text-xs font-medium`}>
-        {c.label}
-      </span>
-    </div>
-  )
+const C = {
+  bg:          '#0d0b07',
+  card:        '#141009',
+  cardHover:   '#1c160d',
+  border:      '#2c2314',
+  borderFaint: '#1e180e',
+  amber:       '#c9952a',
+  amberDim:    '#7a5818',
+  amberGlow:   'rgba(201,149,42,0.18)',
+  text:        '#e4cfa0',
+  textSub:     '#8a7448',
+  textMuted:   '#4e4228',
+  green:       '#78b050',
+  greenDim:    '#3d5a28',
+  red:         '#c05858',
+  redDim:      '#5a2828',
+  orange:      '#d07830',
 }
 
-function ModeBadge({ mode, loading }) {
-  if (loading) return <div className="skeleton h-7 w-16 rounded-full" />
-  const configs = {
-    LIVE:      { bg: 'bg-green-trade/10', text: 'text-green-trade',  border: 'border-green-trade/30'  },
-    PAPER:     { bg: 'bg-blue-trade/10',  text: 'text-blue-trade',   border: 'border-blue-trade/30'   },
-    SEMI_AUTO: { bg: 'bg-yellow-trade/10',text: 'text-yellow-trade', border: 'border-yellow-trade/30' },
-    DEV:       { bg: 'bg-text-muted/10',  text: 'text-text-muted',   border: 'border-border'          },
+const REGIME = {
+  TRENDING_UP:     { label: 'TRENDING ↑', color: C.green  },
+  TRENDING_DOWN:   { label: 'TRENDING ↓', color: C.red    },
+  RANGING:         { label: 'RANGING',    color: C.amber  },
+  HIGH_VOLATILITY: { label: 'HIGH VOL',   color: C.orange },
+  UNKNOWN:         { label: 'UNKNOWN',    color: C.textMuted },
+}
+
+const MODE = {
+  LIVE:      { label: 'LIVE',  color: C.green  },
+  PAPER:     { label: 'PAPER', color: C.amber  },
+  SEMI_AUTO: { label: 'SEMI',  color: C.orange },
+  DEV:       { label: 'DEV',   color: C.textSub },
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function inr(n, dec = 2) {
+  return Math.abs(n).toLocaleString('en-IN', {
+    minimumFractionDigits: dec,
+    maximumFractionDigits: dec,
+  })
+}
+
+function nowIST() {
+  return new Date().toLocaleTimeString('en-IN', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false,
+  })
+}
+
+// ─── Shared style shorthands ──────────────────────────────────────────────────
+
+const MONO = { fontFamily: "'JetBrains Mono', monospace" }
+const SERIF = { fontFamily: "'Playfair Display', Georgia, serif" }
+const SANS = { fontFamily: "'Inter', system-ui, sans-serif" }
+const LABEL = { ...SANS, fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', fontWeight: 600, color: C.textSub }
+
+// ─── Live clock ───────────────────────────────────────────────────────────────
+
+function LiveClock() {
+  const [t, setT] = useState(nowIST)
+  useEffect(() => {
+    const id = setInterval(() => setT(nowIST()), 15000)
+    return () => clearInterval(id)
+  }, [])
+  return <span style={{ ...MONO, fontSize: 11, color: C.textSub, letterSpacing: '0.08em' }}>{t} IST</span>
+}
+
+// ─── Inline indicator tag ─────────────────────────────────────────────────────
+
+function Tag({ label, color, loading }) {
+  if (loading) {
+    return <span style={{ display: 'inline-block', width: 72, height: 14, background: C.cardHover, borderRadius: 1 }} />
   }
-  const c = configs[mode] || configs.DEV
   return (
-    <span className={`badge ${c.bg} ${c.text} border ${c.border} text-xs font-mono`}>
-      {mode || 'DEV'}
+    <span style={{
+      ...MONO, fontSize: 11, fontWeight: 600, letterSpacing: '0.1em',
+      color, borderLeft: `2px solid ${color}`, paddingLeft: 8,
+    }}>
+      {label}
     </span>
   )
 }
 
-// ─── Custom sparkline tooltip ─────────────────────────────────────────────────
+// ─── Sparkline tooltip ────────────────────────────────────────────────────────
 
-function SparklineTooltip({ active, payload, label }) {
+function RetroTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null
-  const val = payload[0].value
-  const isPos = val >= 0
+  const v = payload[0].value
+  const pos = v >= 0
   return (
-    <div className="card px-2.5 py-1.5 text-xs font-mono">
-      <div className="text-text-muted mb-0.5">{label}</div>
-      <div className={isPos ? 'text-green-trade' : 'text-red-trade'}>
-        {isPos ? '+' : ''}₹{Math.abs(val).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+    <div style={{
+      background: C.card, border: `1px solid ${C.border}`,
+      borderLeft: `3px solid ${pos ? C.green : C.red}`,
+      padding: '8px 14px', ...MONO, fontSize: 11,
+    }}>
+      <div style={{ color: C.textSub, marginBottom: 4 }}>{label}</div>
+      <div style={{ color: pos ? C.green : C.red, fontWeight: 600 }}>
+        {pos ? '+' : '−'}₹{inr(Math.abs(v))}
       </div>
     </div>
   )
@@ -68,79 +115,125 @@ function SparklineTooltip({ active, payload, label }) {
 
 // ─── P&L Sparkline ───────────────────────────────────────────────────────────
 
-function PnLSparkline({ data = [], loading }) {
+function PnLSparkline({ data, loading, isPos }) {
+  const stroke = isPos ? C.green : C.red
+  const fillId = isPos ? 'db-green' : 'db-red'
+
   if (loading) {
     return (
-      <div className="card p-4 h-[180px] flex items-center justify-center">
-        <div className="skeleton w-full h-full rounded" />
+      <div style={{ background: C.card, border: `1px solid ${C.border}`, padding: 20, height: 200 }}>
+        <div style={{ background: C.cardHover, height: '100%', borderRadius: 1 }} />
       </div>
     )
   }
-
-  if (!data || data.length < 2) {
-    return (
-      <div className="card p-4 h-[180px] flex flex-col items-center justify-center gap-2 text-text-muted">
-        <svg className="w-8 h-8 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
-        </svg>
-        <span className="text-sm">No chart data yet</span>
-      </div>
-    )
-  }
-
-  const lastVal = data[data.length - 1]?.pnl ?? 0
-  const isPos = lastVal >= 0
-  const strokeColor = isPos ? '#22c55e' : '#ef4444'
-  const fillColor   = isPos ? 'url(#greenGradient)' : 'url(#redGradient)'
 
   return (
-    <div className="card p-4">
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-xs text-text-muted uppercase tracking-widest font-medium">Intraday P&L</span>
-        <span className={`font-mono text-sm font-semibold ${isPos ? 'text-green-trade' : 'text-red-trade'}`}>
-          {isPos ? '+' : ''}₹{Math.abs(lastVal).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-        </span>
-      </div>
-      <ResponsiveContainer width="100%" height={120}>
-        <AreaChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
-          <defs>
-            <linearGradient id="greenGradient" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#22c55e" stopOpacity={0.25} />
-              <stop offset="100%" stopColor="#22c55e" stopOpacity={0.02} />
-            </linearGradient>
-            <linearGradient id="redGradient" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#ef4444" stopOpacity={0.25} />
-              <stop offset="100%" stopColor="#ef4444" stopOpacity={0.02} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid stroke="#1f1f1f" strokeDasharray="3 3" vertical={false} />
-          <XAxis
-            dataKey="time"
-            tick={{ fontSize: 10, fill: '#475569', fontFamily: 'JetBrains Mono' }}
-            axisLine={false}
-            tickLine={false}
-            interval="preserveStartEnd"
-          />
-          <YAxis
-            tick={{ fontSize: 10, fill: '#475569', fontFamily: 'JetBrains Mono' }}
-            axisLine={false}
-            tickLine={false}
-            tickFormatter={(v) => `₹${v.toLocaleString('en-IN')}`}
-            width={60}
-          />
-          <Tooltip content={<SparklineTooltip />} />
-          <ReferenceLine y={0} stroke="#2a2a2a" strokeDasharray="4 4" />
-          <Area
-            type="monotone"
-            dataKey="pnl"
-            stroke={strokeColor}
-            strokeWidth={2}
-            fill={fillColor}
-            dot={false}
-            activeDot={{ r: 3, fill: strokeColor, stroke: '#0f0f0f', strokeWidth: 2 }}
-          />
-        </AreaChart>
-      </ResponsiveContainer>
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, padding: '16px 12px 8px 0' }}>
+      {!data || data.length < 2 ? (
+        <div style={{
+          height: 160, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          ...MONO, fontSize: 12, color: C.textMuted, letterSpacing: '0.06em',
+        }}>
+          — awaiting intraday data —
+        </div>
+      ) : (
+        <ResponsiveContainer width="100%" height={160}>
+          <AreaChart data={data} margin={{ top: 6, right: 16, bottom: 0, left: 4 }}>
+            <defs>
+              <linearGradient id="db-green" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={C.green} stopOpacity={0.2} />
+                <stop offset="100%" stopColor={C.green} stopOpacity={0.01} />
+              </linearGradient>
+              <linearGradient id="db-red" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={C.red} stopOpacity={0.2} />
+                <stop offset="100%" stopColor={C.red} stopOpacity={0.01} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid stroke={C.borderFaint} strokeDasharray="2 5" vertical={false} />
+            <XAxis dataKey="time" tick={{ ...MONO, fontSize: 9, fill: C.textMuted }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
+            <YAxis tick={{ ...MONO, fontSize: 9, fill: C.textMuted }} axisLine={false} tickLine={false} tickFormatter={v => `₹${(v / 1000).toFixed(0)}k`} width={42} />
+            <Tooltip content={<RetroTooltip />} />
+            <ReferenceLine y={0} stroke={C.border} strokeDasharray="3 5" />
+            <Area type="monotone" dataKey="pnl" stroke={stroke} strokeWidth={1.5} fill={`url(#${fillId})`} dot={false} activeDot={{ r: 3, fill: stroke, stroke: C.card, strokeWidth: 2 }} />
+          </AreaChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  )
+}
+
+// ─── Stat card ────────────────────────────────────────────────────────────────
+
+function StatCard({ label, value, sub, topColor, loading }) {
+  return (
+    <div style={{
+      background: C.card, border: `1px solid ${C.border}`,
+      borderTop: `2px solid ${topColor || C.amberDim}`,
+      padding: '18px 20px',
+    }}>
+      {loading ? (
+        <>
+          <div style={{ background: C.cardHover, height: 9, width: '55%', marginBottom: 10, borderRadius: 1 }} />
+          <div style={{ background: C.cardHover, height: 24, width: '70%', borderRadius: 1 }} />
+        </>
+      ) : (
+        <>
+          <div style={{ ...LABEL, marginBottom: 10 }}>{label}</div>
+          <div style={{ ...MONO, fontSize: 24, fontWeight: 600, color: topColor || C.text, lineHeight: 1 }}>
+            {value}
+          </div>
+          {sub && <div style={{ ...SANS, fontSize: 11, color: C.textMuted, marginTop: 6 }}>{sub}</div>}
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── Loss gauge ───────────────────────────────────────────────────────────────
+
+function LossGauge({ used, limit, loading }) {
+  const pct = limit > 0 ? Math.min((used / limit) * 100, 100) : 0
+  const barColor = pct >= 80 ? C.red : pct >= 50 ? C.orange : C.amber
+
+  return (
+    <div style={{
+      background: C.card, border: `1px solid ${C.border}`,
+      borderTop: `2px solid ${C.amberDim}`,
+      padding: '18px 20px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+    }}>
+      <div style={{ ...LABEL, marginBottom: 16 }}>Daily Risk Consumed</div>
+      {loading ? (
+        <div style={{ background: C.cardHover, height: 60, borderRadius: 1 }} />
+      ) : (
+        <>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 14 }}>
+            <span style={{ ...MONO, fontSize: 26, fontWeight: 600, color: barColor }}>{pct.toFixed(1)}%</span>
+            <span style={{ ...MONO, fontSize: 11, color: C.textMuted }}>₹{inr(used, 0)} / ₹{inr(limit, 0)}</span>
+          </div>
+          <div style={{ height: 3, background: C.cardHover, position: 'relative', overflow: 'hidden' }}>
+            {[25, 50, 75].map(t => (
+              <div key={t} style={{ position: 'absolute', left: `${t}%`, top: 0, bottom: 0, width: 1, background: C.border, zIndex: 1 }} />
+            ))}
+            <div style={{ height: '100%', width: `${pct}%`, background: barColor, transition: 'width 0.5s ease' }} />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 5 }}>
+            {['0', '25%', '50%', '75%', '100%'].map(t => (
+              <span key={t} style={{ ...MONO, fontSize: 9, color: C.textMuted }}>{t}</span>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── Section divider ──────────────────────────────────────────────────────────
+
+function Divider({ title }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 14, margin: '28px 0 14px' }}>
+      <span style={{ ...SERIF, fontSize: 13, color: C.textSub, letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>{title}</span>
+      <div style={{ flex: 1, height: 1, background: C.borderFaint }} />
     </div>
   )
 }
@@ -148,183 +241,162 @@ function PnLSparkline({ data = [], loading }) {
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const [pnlData, setPnlData]         = useState(null)
-  const [positions, setPositions]     = useState([])
-  const [signals, setSignals]         = useState([])
-  const [botStatus, setBotStatus]     = useState(null)
+  const [pnlData, setPnlData]       = useState(null)
+  const [positions, setPositions]   = useState([])
+  const [signals, setSignals]       = useState([])
+  const [botStatus, setBotStatus]   = useState(null)
 
-  const [pnlLoading, setPnlLoading]           = useState(true)
-  const [posLoading, setPosLoading]           = useState(true)
-  const [sigLoading, setSigLoading]           = useState(true)
-  const [statusLoading, setStatusLoading]     = useState(true)
+  const [pnlLoading, setPnlLoading]       = useState(true)
+  const [posLoading, setPosLoading]       = useState(true)
+  const [sigLoading, setSigLoading]       = useState(true)
+  const [statusLoading, setStatusLoading] = useState(true)
 
-  const [pnlError, setPnlError]               = useState(null)
-  const [posError, setPosError]               = useState(null)
-  const [sigError, setSigError]               = useState(null)
+  const [posError, setPosError] = useState(null)
+  const [sigError, setSigError] = useState(null)
 
-  // Initial fetch
   const loadAll = useCallback(async () => {
-    setPnlLoading(true)
-    setPosLoading(true)
-    setSigLoading(true)
-    setStatusLoading(true)
-
-    fetchPnLToday()
-      .then(setPnlData)
-      .catch((e) => setPnlError(e.message))
-      .finally(() => setPnlLoading(false))
-
-    fetchPositions()
-      .then(setPositions)
-      .catch((e) => setPosError(e.message))
-      .finally(() => setPosLoading(false))
-
-    fetchRecentSignals()
-      .then(setSignals)
-      .catch((e) => setSigError(e.message))
-      .finally(() => setSigLoading(false))
-
-    fetchBotStatus()
-      .then(setBotStatus)
-      .catch(() => {})
-      .finally(() => setStatusLoading(false))
+    setPnlLoading(true); setPosLoading(true); setSigLoading(true); setStatusLoading(true)
+    fetchPnLToday().then(setPnlData).catch(() => {}).finally(() => setPnlLoading(false))
+    fetchPositions().then(setPositions).catch(e => setPosError(e.message)).finally(() => setPosLoading(false))
+    fetchRecentSignals().then(setSignals).catch(e => setSigError(e.message)).finally(() => setSigLoading(false))
+    fetchBotStatus().then(setBotStatus).catch(() => {}).finally(() => setStatusLoading(false))
   }, [])
 
   useEffect(() => { loadAll() }, [loadAll])
 
-  // WebSocket live updates
   const handleWsMessage = useCallback((msg) => {
     if (!msg?.type) return
-    switch (msg.type) {
-      case 'positions_update':
-        setPositions(msg.data ?? [])
-        break
-      case 'signal':
-        setSignals((prev) => [msg.data, ...prev].slice(0, 20))
-        break
-      case 'pnl_update':
-        setPnlData((prev) => prev ? { ...prev, ...msg.data } : msg.data)
-        break
-      default:
-        break
-    }
+    if (msg.type === 'positions_update') setPositions(msg.data ?? [])
+    if (msg.type === 'signal') setSignals(prev => [msg.data, ...prev].slice(0, 20))
+    if (msg.type === 'pnl_update') setPnlData(prev => prev ? { ...prev, ...msg.data } : msg.data)
   }, [])
+  useWebSocket(handleWsMessage)
 
-  useWebSocket(handleWsMessage) // wsStatus not needed on this page
+  const netPnl    = pnlData?.net_pnl ?? 0
+  const winRate   = pnlData?.win_rate ?? 0
+  const tradesQty = pnlData?.trades_today ?? 0
+  const lossUsed  = pnlData?.daily_loss_used ?? 0
+  const lossLimit = pnlData?.daily_loss_limit ?? 2000
+  const regime    = pnlData?.market_regime ?? 'UNKNOWN'
+  const pnlSeries = pnlData?.pnl_series ?? []
+  const isPos     = netPnl >= 0
 
-  // Formatted stats
-  const netPnl     = pnlData?.net_pnl ?? 0
-  const winRate    = pnlData?.win_rate ?? 0
-  const openCount  = positions.length
-  const tradesQty  = pnlData?.trades_today ?? 0
-  const lossUsed   = pnlData?.daily_loss_used ?? 0
-  const lossLimit  = pnlData?.daily_loss_limit ?? 2000
-  const regime     = pnlData?.market_regime ?? 'UNKNOWN'
-  const pnlSeries  = pnlData?.pnl_series ?? []
-
-  const pnlTrend   = netPnl > 0 ? 'up' : netPnl < 0 ? 'down' : 'neutral'
-  const pnlSign    = netPnl >= 0 ? '+' : ''
+  const regimeCfg = REGIME[regime] || REGIME.UNKNOWN
+  const modeCfg   = MODE[botStatus?.mode] || MODE.DEV
+  const pnlColor  = isPos ? C.green : C.red
 
   return (
-    <div className="p-5 space-y-4 animate-fade-in max-w-screen-2xl mx-auto">
+    <div style={{ background: C.bg, minHeight: '100vh', color: C.text }}>
 
-      {/* ── Top bar: regime + mode + refresh ── */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h1 className="page-title">Dashboard</h1>
-          <RegimeBadge regime={regime} loading={pnlLoading} />
-          <ModeBadge mode={botStatus?.mode} loading={statusLoading} />
+      {/* ── Masthead ──────────────────────────────────────────────────────── */}
+      <div style={{
+        borderBottom: `1px solid ${C.border}`,
+        display: 'flex', alignItems: 'stretch', height: 50, padding: '0 28px',
+      }}>
+        {/* Wordmark */}
+        <div style={{
+          display: 'flex', alignItems: 'center', paddingRight: 24,
+          borderRight: `1px solid ${C.border}`,
+        }}>
+          <span style={{ ...SERIF, fontSize: 14, fontWeight: 700, color: C.amber, letterSpacing: '0.05em' }}>
+            TRADEBOT
+          </span>
         </div>
-        <button
-          onClick={loadAll}
-          className="btn bg-bg-card border border-border text-text-muted hover:text-text-primary text-xs"
-        >
-          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-          </svg>
-          Refresh
-        </button>
+
+        {/* Status tags */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 20, paddingLeft: 24, flex: 1 }}>
+          <Tag label={modeCfg.label} color={modeCfg.color} loading={statusLoading} />
+          <Tag label={regimeCfg.label} color={regimeCfg.color} loading={pnlLoading} />
+        </div>
+
+        {/* Clock + refresh */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <LiveClock />
+          <button
+            onClick={loadAll}
+            style={{
+              background: 'none', border: `1px solid ${C.border}`, cursor: 'pointer',
+              ...SANS, fontSize: 10, letterSpacing: '0.1em', color: C.textSub,
+              padding: '4px 14px', transition: 'border-color 0.15s, color 0.15s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = C.amber; e.currentTarget.style.color = C.amber }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.textSub }}
+          >
+            REFRESH
+          </button>
+        </div>
       </div>
 
-      {/* ── Stat cards ── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatCard
-          label="Today's Net P&L"
-          value={`${pnlSign}₹${Math.abs(netPnl).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`}
-          trend={pnlTrend}
-          loading={pnlLoading}
-          sub={pnlError}
-          accent={pnlTrend === 'up' ? 'border-l-green-trade' : pnlTrend === 'down' ? 'border-l-red-trade' : 'border-l-border'}
-          icon={
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          }
-        />
-        <StatCard
-          label="Win Rate"
-          value={`${winRate.toFixed(1)}%`}
-          trend={winRate >= 50 ? 'up' : 'down'}
-          loading={pnlLoading}
-          sub={`${tradesQty} trades today`}
-          icon={
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 18.75h-9m9 0a3 3 0 013 3h-15a3 3 0 013-3m9 0v-3.375c0-.621-.503-1.125-1.125-1.125h-.871M7.5 18.75v-3.375c0-.621.504-1.125 1.125-1.125h.872m5.007 0H9.497m5.007 0a7.454 7.454 0 01-.982-3.172M9.497 14.25a7.454 7.454 0 00.981-3.172M5.25 4.236c-.982.143-1.954.317-2.916.52A6.003 6.003 0 007.73 9.728M5.25 4.236V4.5c0 2.108.966 3.99 2.48 5.228M5.25 4.236V2.721C7.456 2.41 9.71 2.25 12 2.25c2.291 0 4.545.16 6.75.47v1.516M7.73 9.728a6.726 6.726 0 002.748 1.35m8.272-6.842V4.5c0 2.108-.966 3.99-2.48 5.228m2.48-5.492a46.32 46.32 0 012.916.52 6.003 6.003 0 01-5.395 4.972m0 0a6.726 6.726 0 01-2.749 1.35m0 0a6.772 6.772 0 01-3.044 0" />
-            </svg>
-          }
-        />
-        <StatCard
-          label="Open Positions"
-          value={openCount}
-          trend="neutral"
-          loading={posLoading}
-          sub={posError || 'Live positions'}
-          icon={
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 10V7" />
-            </svg>
-          }
-        />
-        <StatCard
-          label="Trades Today"
-          value={tradesQty}
-          trend="neutral"
-          loading={pnlLoading}
-          sub="Completed executions"
-          icon={
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 7.5L7.5 3m0 0L12 7.5M7.5 3v13.5m13.5 0L16.5 21m0 0L12 16.5m4.5 4.5V7.5" />
-            </svg>
-          }
-        />
-      </div>
+      {/* ── Body ──────────────────────────────────────────────────────────── */}
+      <div style={{ padding: '32px 28px 56px', maxWidth: 1440, margin: '0 auto' }}>
 
-      {/* ── Sparkline + loss bar ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-3">
-        <div className="lg:col-span-3">
-          <PnLSparkline data={pnlSeries} loading={pnlLoading} />
+        {/* ── Hero P&L ── */}
+        <div style={{ marginBottom: 28 }}>
+          <div style={{ ...LABEL, marginBottom: 10 }}>Today's Net P&L</div>
+          {pnlLoading ? (
+            <div style={{ background: C.cardHover, height: 60, width: 300, borderRadius: 1 }} />
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 20 }}>
+              <span style={{
+                ...SERIF, fontSize: 56, fontWeight: 700, color: pnlColor, lineHeight: 1,
+                textShadow: `0 0 48px ${isPos ? 'rgba(120,176,80,0.22)' : 'rgba(192,88,88,0.22)'}`,
+              }}>
+                {isPos ? '+' : '−'}₹{inr(Math.abs(netPnl))}
+              </span>
+              <span style={{ ...MONO, fontSize: 12, color: pnlColor, opacity: 0.65 }}>
+                {tradesQty} trades · {winRate.toFixed(1)}% W/R
+              </span>
+            </div>
+          )}
+          <div style={{ height: 1, marginTop: 24, background: `linear-gradient(to right, ${C.border}, transparent)` }} />
         </div>
-        <div className="lg:col-span-2">
-          <PnLBar
-            used={lossUsed}
-            limit={lossLimit}
+
+        {/* ── Sparkline + Loss gauge ── */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 14, marginBottom: 14 }}>
+          <PnLSparkline data={pnlSeries} loading={pnlLoading} isPos={isPos} />
+          <LossGauge used={lossUsed} limit={lossLimit} loading={pnlLoading} />
+        </div>
+
+        {/* ── Stat cards ── */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 4 }}>
+          <StatCard
+            label="Win Rate"
+            value={`${winRate.toFixed(1)}%`}
+            sub={`${tradesQty} trades today`}
+            topColor={winRate >= 50 ? C.green : C.red}
             loading={pnlLoading}
           />
+          <StatCard
+            label="Open Positions"
+            value={positions.length}
+            sub="live"
+            topColor={C.amber}
+            loading={posLoading}
+          />
+          <StatCard
+            label="Trades Today"
+            value={tradesQty}
+            sub="completed"
+            topColor={C.amberDim}
+            loading={pnlLoading}
+          />
+          <StatCard
+            label="Capital"
+            value={botStatus?.capital ? `₹${(botStatus.capital / 1000).toFixed(0)}k` : '—'}
+            sub={`loss limit ₹${(lossLimit / 1000).toFixed(0)}k / day`}
+            topColor={C.textSub}
+            loading={statusLoading}
+          />
         </div>
+
+        {/* ── Signals ── */}
+        <Divider title="Signals" />
+        <SignalsTable signals={signals} loading={sigLoading} error={sigError} />
+
+        {/* ── Positions ── */}
+        <Divider title="Positions" />
+        <PositionsTable positions={positions} loading={posLoading} error={posError} />
       </div>
-
-      {/* ── Tables ── */}
-      <SignalsTable
-        signals={signals}
-        loading={sigLoading}
-        error={sigError}
-      />
-
-      <PositionsTable
-        positions={positions}
-        loading={posLoading}
-        error={posError}
-      />
     </div>
   )
 }
