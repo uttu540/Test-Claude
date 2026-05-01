@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     daily_loss_limit_pct: float = 2.0         # Halt if day loss > 2% = ₹2,000
     max_open_positions: int = 8
     max_position_size_pct: float = 15.0       # Max 15% in a single position
+    max_aggregate_notional_pct: float = 95.0  # Total open notional cap as % of capital (prevents >100% deployment)
 
     # ── Database ──────────────────────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://trading:trading_secret@localhost:5432/trading_bot"

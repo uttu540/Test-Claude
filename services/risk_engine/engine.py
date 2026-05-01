@@ -76,14 +76,28 @@ class RiskEngine:
                 reason=f"Max open positions reached ({open_count}/{settings.max_open_positions})",
             )
 
-        # ── 3. No duplicate position in symbol ────────────────────────────────
+        # ── 3. Aggregate notional cap ─────────────────────────────────────────
+        # Prevents total open position value from exceeding ~95% of capital.
+        # Without this: 8 positions × 15% = 120% capital deployed on margin.
+        open_notional = await self._get_open_notional()
+        max_notional  = settings.total_capital * (settings.max_aggregate_notional_pct / 100)
+        if open_notional >= max_notional:
+            return RiskDecision(
+                approved=False,
+                reason=(
+                    f"Aggregate open notional ₹{open_notional:,.0f} at/above cap "
+                    f"₹{max_notional:,.0f} ({settings.max_aggregate_notional_pct:.0f}% of capital)"
+                ),
+            )
+
+        # ── 3a. No duplicate position in symbol ───────────────────────────────
         if await self._has_open_position(symbol):
             return RiskDecision(
                 approved=False,
                 reason=f"Already have an open position in {symbol}",
             )
 
-        # ── 3b. Max 1 trade per symbol per calendar day ───────────────────────
+        # ── 3b. Max 1 trade per symbol per calendar day ──────────────────────
         if await self._has_traded_today(symbol):
             return RiskDecision(
                 approved=False,
@@ -235,6 +249,22 @@ class RiskEngine:
             # Fail-safe: assume open position exists so we don't enter a duplicate.
             log.error("risk.db_error.open_position", symbol=symbol, error=str(e))
             return True
+
+    async def _get_open_notional(self) -> float:
+        """
+        Return sum of (entry_price × entry_quantity) for all OPEN trades.
+        Used to enforce the aggregate notional cap — prevents deploying >95% of capital.
+        Fails open (returns max float) so we never exceed the cap on DB error.
+        """
+        try:
+            async with get_db_session() as session:
+                result = await session.execute(
+                    text("SELECT COALESCE(SUM(entry_price * entry_quantity), 0) FROM trades WHERE status = 'OPEN'")
+                )
+                return float(result.scalar() or 0)
+        except Exception as e:
+            log.error("risk.db_error.open_notional", error=str(e))
+            return float("inf")  # Fail-safe: block new trades if we can't read notional
 
     async def _has_traded_today(self, symbol: str) -> bool:
         today = date.today()
