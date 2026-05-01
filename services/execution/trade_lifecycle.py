@@ -278,10 +278,17 @@ class TradeLifecycleManager:
 
         open_trades = await self._load_open_trades()
         for trade in open_trades:
-            # Update price extremes from Redis tick (poll-time snapshot for MAE/MFE)
             price = await self._get_current_price(trade["trading_symbol"])
             if price:
-                self._update_price_extremes(str(trade["id"]), float(trade["entry_price"]), price)
+                trade_key = str(trade["id"])
+                self._update_price_extremes(trade_key, float(trade["entry_price"]), price)
+                # Update milestone trailing stop — same logic as tick path.
+                # If stop level advances, modify the live SL-M order on the exchange.
+                old_trail = self._trailing_stops.get(trade_key)
+                self._update_trailing_stop(trade_key, trade, price)
+                new_trail = self._trailing_stops.get(trade_key)
+                if new_trail and new_trail != old_trail:
+                    await self._modify_sl_order(trade, new_trail)
             await self._check_broker_orders(trade, kite_map)
 
     async def _check_broker_orders(self, trade: dict, kite_map: dict) -> None:
@@ -378,6 +385,68 @@ class TradeLifecycleManager:
                         await om.cancel_order(row.broker_order_id)
         except Exception as e:
             log.warning("lifecycle.cancel_sibling_failed", trade_id=trade_id, error=str(e))
+
+    async def _modify_sl_order(self, trade: dict, new_stop: float) -> None:
+        """
+        Modify the live SL-M order on the exchange when a trailing stop milestone fires.
+
+        Finds the active (non-complete, non-cancelled) SL-M order for this trade
+        in our orders table, then calls broker.modify_order() with the new trigger price.
+        Logs clearly so we can audit every stop modification.
+        """
+        trade_id = str(trade["id"])
+        symbol   = trade["trading_symbol"]
+        try:
+            # Find the live SL-M broker order id
+            async with get_db_session() as session:
+                result = await session.execute(
+                    text("""
+                        SELECT broker_order_id FROM orders
+                        WHERE parent_trade_id = :tid
+                          AND order_type = 'SL-M'
+                          AND status NOT IN ('COMPLETE', 'CANCELLED', 'REJECTED')
+                        ORDER BY placed_at DESC LIMIT 1
+                    """),
+                    {"tid": trade_id},
+                )
+                row = result.fetchone()
+
+            if not row or not row.broker_order_id:
+                log.warning(
+                    "lifecycle.modify_sl.no_order",
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    note="SL-M order not found — trailing stop not modified on exchange",
+                )
+                return
+
+            broker_order_id = row.broker_order_id
+
+            from services.execution.broker_router import get_broker
+            broker = get_broker()
+            await broker.modify_order(
+                broker_order_id = broker_order_id,
+                trigger_price   = round(new_stop, 2),
+            )
+
+            log.info(
+                "lifecycle.trailing_stop_modified",
+                symbol          = symbol,
+                trade_id        = trade_id,
+                broker_order_id = broker_order_id,
+                new_stop        = round(new_stop, 2),
+            )
+
+        except Exception as e:
+            # Non-fatal — trailing stop failed to modify on exchange.
+            # Trade is still monitored in-process; worst case we close at old stop.
+            log.error(
+                "lifecycle.modify_sl.failed",
+                trade_id=trade_id,
+                symbol=symbol,
+                new_stop=round(new_stop, 2),
+                error=str(e),
+            )
 
     # ── Core: close a trade ───────────────────────────────────────────────────
 

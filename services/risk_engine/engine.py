@@ -157,17 +157,57 @@ class RiskEngine:
     # ── DB helpers ────────────────────────────────────────────────────────────
 
     async def _get_todays_pnl(self) -> float:
+        """
+        Return today's total P&L including unrealized losses from open positions.
+
+        Realized:   SUM(net_pnl) from CLOSED trades entered today.
+        Unrealized: (ltp - entry_price) * qty for each OPEN trade from Redis tick.
+                    No tick → treat as 0 (conservative for longs entering today).
+
+        The original query only counted CLOSED trades — 5 open positions each
+        down ₹3k showed ₹0, allowing more trades well past the real daily loss.
+        """
         today = date.today()
         try:
             async with get_db_session() as session:
-                result = await session.execute(
+                closed_result = await session.execute(
                     text("SELECT COALESCE(SUM(net_pnl), 0) FROM trades WHERE DATE(entry_time) = :today AND status = 'CLOSED'"),
                     {"today": today},
                 )
-                return float(result.scalar() or 0)
+                realized = float(closed_result.scalar() or 0)
+
+                open_result = await session.execute(
+                    text("SELECT trading_symbol, entry_price, entry_quantity, direction FROM trades WHERE status = 'OPEN' AND DATE(entry_time) = :today"),
+                    {"today": today},
+                )
+                open_rows = open_result.fetchall()
+
+            if not open_rows:
+                return realized
+
+            redis = get_redis()
+            unrealized = 0.0
+            for row in open_rows:
+                try:
+                    import json as _json
+                    raw = await redis.get(f"market:tick:{row.trading_symbol}")
+                    if raw:
+                        lp = float(_json.loads(raw).get("lp", 0) or 0)
+                        if lp > 0:
+                            sign = 1 if row.direction == "LONG" else -1
+                            unrealized += sign * (lp - float(row.entry_price)) * int(row.entry_quantity)
+                except Exception:
+                    pass
+
+            total = realized + unrealized
+            if unrealized != 0:
+                log.debug("risk.pnl_with_unrealized",
+                          realized=round(realized, 2),
+                          unrealized=round(unrealized, 2),
+                          total=round(total, 2))
+            return total
+
         except Exception as e:
-            # Fail-safe: treat DB error as if daily limit is hit — never allow trades when
-            # we can't verify the loss limit. Returning 0 would silently bypass the check.
             log.error("risk.db_error.daily_pnl", error=str(e))
             return -float("inf")
 
