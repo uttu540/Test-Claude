@@ -128,6 +128,35 @@ class RiskEngine:
 
         risk_per_share = abs(entry_price - stop_loss)
 
+        # ── 4b. Price-relative stop floor / cap (ATR path only) ──────────────
+        # explicit_stop is structure-based (OR low, swing low) — caller owns it; skip.
+        # ATR-derived stops:
+        #   Floor: stop must risk ≥ 0.3% of price — prevents near-zero risk on flat ATR
+        #          producing absurdly large qty that blows up notional.
+        #   Cap:   stop can risk ≤ 5% of price — prevents ₹20k stop on a ₹400 stock,
+        #          which would shrink qty to 1 and make brokerage eat the whole R.
+        if explicit_stop is None:
+            price_floor_pct = 0.003   # 0.3 %
+            price_cap_pct   = 0.05    # 5.0 %
+            min_risk = entry_price * price_floor_pct
+            max_risk = entry_price * price_cap_pct
+            if risk_per_share < min_risk:
+                return RiskDecision(
+                    approved=False,
+                    reason=(
+                        f"ATR stop too tight: risk/share ₹{risk_per_share:.2f} < floor "
+                        f"₹{min_risk:.2f} (0.3% of ₹{entry_price:.0f}) — ATR unusually small"
+                    ),
+                )
+            if risk_per_share > max_risk:
+                return RiskDecision(
+                    approved=False,
+                    reason=(
+                        f"ATR stop too wide: risk/share ₹{risk_per_share:.2f} > cap "
+                        f"₹{max_risk:.2f} (5% of ₹{entry_price:.0f}) — stock too volatile"
+                    ),
+                )
+
         # ── 5. Position sizing ────────────────────────────────────────────────
         qty = int(settings.max_risk_per_trade_inr / risk_per_share)
         if qty <= 0:
