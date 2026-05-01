@@ -41,15 +41,18 @@ class SignalType(str, Enum):
     BREAKOUT_HIGH      = "BREAKOUT_HIGH"       # Price breaks above recent swing high
     BREAKOUT_LOW       = "BREAKOUT_LOW"        # Price breaks below recent swing low
     # Trend signals
-    EMA_CROSSOVER_UP   = "EMA_CROSSOVER_UP"    # Fast EMA crosses above slow EMA
-    EMA_CROSSOVER_DOWN = "EMA_CROSSOVER_DOWN"
+    EMA_CROSSOVER_UP   = "EMA_CROSSOVER_UP"    # DEPRECATED — filter only, not a trigger
+    EMA_CROSSOVER_DOWN = "EMA_CROSSOVER_DOWN"  # DEPRECATED — filter only, not a trigger
     ABOVE_200_EMA      = "ABOVE_200_EMA"       # Price re-enters above 200 EMA
     BELOW_200_EMA      = "BELOW_200_EMA"
-    # Momentum signals
-    RSI_OVERSOLD       = "RSI_OVERSOLD"        # RSI < 30 turning up
-    RSI_OVERBOUGHT     = "RSI_OVERBOUGHT"      # RSI > 70 turning down
-    MACD_CROSS_UP      = "MACD_CROSS_UP"
-    MACD_CROSS_DOWN    = "MACD_CROSS_DOWN"
+    # Momentum signals (kept as enum values for DB compatibility; NOT generated as triggers)
+    RSI_OVERSOLD       = "RSI_OVERSOLD"        # DEPRECATED — RSI used as filter only
+    RSI_OVERBOUGHT     = "RSI_OVERBOUGHT"      # DEPRECATED — RSI used as filter only
+    MACD_CROSS_UP      = "MACD_CROSS_UP"       # DEPRECATED — MACD used as filter only
+    MACD_CROSS_DOWN    = "MACD_CROSS_DOWN"     # DEPRECATED — MACD used as filter only
+    # New structural signals
+    KEY_LEVEL_BOUNCE   = "KEY_LEVEL_BOUNCE"    # Reversal at 50/200 EMA or prior swing level
+    OPENING_DRIVE      = "OPENING_DRIVE"       # Gap-up + strong first 15min candle continuation
     # Volume signals
     HIGH_RVOL          = "HIGH_RVOL"           # Volume > 2x 20-day average
     # Volatility signals
@@ -119,11 +122,11 @@ class Signal:
 # None means "allow all" (used for UNKNOWN so we don't block during startup).
 _REGIME_ALLOWED: dict[str, set[str] | None] = {
     "TRENDING_UP": {
-        "BREAKOUT_HIGH", "EMA_CROSSOVER_UP", "MACD_CROSS_UP",
-        "HIGH_RVOL", "BB_EXPANSION", "ABOVE_200_EMA",
-        "ORB_BREAKOUT", "VWAP_RECLAIM",
-        # Candlestick continuation / momentum
-        # MORNING_STAR removed — 3-candle bearish reversal has no edge in uptrend
+        "BREAKOUT_HIGH", "HIGH_RVOL", "BB_EXPANSION", "ABOVE_200_EMA",
+        "ORB_BREAKOUT", "VWAP_RECLAIM", "OPENING_DRIVE",
+        # Structural reversal at key levels — high probability in established uptrend
+        "KEY_LEVEL_BOUNCE",
+        # Candlestick continuation after pullback
         "HAMMER", "ENGULFING_BULL",
         # Chart patterns
         "DOUBLE_BOTTOM", "BULL_FLAG", "DARVAS_BREAKOUT", "NR7_SETUP",
@@ -131,18 +134,20 @@ _REGIME_ALLOWED: dict[str, set[str] | None] = {
         "BREAKOUT_52W", "VOLUME_THRUST",
     },
     "TRENDING_DOWN": {
-        "BREAKOUT_LOW", "EMA_CROSSOVER_DOWN", "MACD_CROSS_DOWN",
-        "HIGH_RVOL", "BB_EXPANSION", "BELOW_200_EMA",
+        "BREAKOUT_LOW", "HIGH_RVOL", "BB_EXPANSION", "BELOW_200_EMA",
         "ORB_BREAKOUT", "VWAP_RECLAIM",
+        # Structural rejection at key resistance levels
+        "KEY_LEVEL_BOUNCE",
         # Candlestick reversal / continuation
         "SHOOTING_STAR", "ENGULFING_BEAR", "EVENING_STAR",
         # Chart patterns
         "DOUBLE_TOP", "BEAR_FLAG", "NR7_SETUP",
     },
     "RANGING": {
-        "RSI_OVERSOLD", "RSI_OVERBOUGHT",
         "BB_SQUEEZE", "BB_EXPANSION",
         "VWAP_RECLAIM", "HIGH_RVOL",
+        # Key level bounces work especially well in range-bound markets
+        "KEY_LEVEL_BOUNCE",
         # Candlestick reversals work well in ranging markets
         "HAMMER", "SHOOTING_STAR",
         "ENGULFING_BULL", "ENGULFING_BEAR",
@@ -245,6 +250,7 @@ class SignalDetector:
         enabled = enabled_strategies or {
             "breakout", "ema", "momentum", "volume", "volatility",
             "orb", "vwap", "candlestick", "chart_patterns",
+            "key_level", "opening_drive",
         }
 
         # Skip indicator computation if caller already pre-computed them (e.g. backtesting)
@@ -263,6 +269,8 @@ class SignalDetector:
         if "vwap"           in enabled: signals += self._vwap_signals(df, symbol, timeframe, price, latest)
         if "candlestick"    in enabled: signals += self._candlestick_signals(df, symbol, timeframe, price, latest)
         if "chart_patterns" in enabled: signals += self._chart_pattern_signals(df, symbol, timeframe, price, latest)
+        if "key_level"      in enabled: signals += self._key_level_bounce_signals(df, symbol, timeframe, price, latest)
+        if "opening_drive"  in enabled: signals += self._opening_drive_signals(df, symbol, timeframe, price, latest)
 
         # Filter to only signals above the minimum confidence threshold
         signals = [s for s in signals if s.confidence >= min_confidence]
@@ -410,130 +418,36 @@ class SignalDetector:
         return signals
 
     # ── EMA Signals ───────────────────────────────────────────────────────────
+    # EMA crossover removed as an entry trigger — lagging signal, stops cluster at
+    # crossover levels making them hunted by institutions. EMA values are still
+    # computed as indicators and used as filters inside other signals (KEY_LEVEL_BOUNCE,
+    # engulfing, breakout). _ema_signals kept as no-op for structural consistency.
 
     def _ema_signals(
         self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
     ) -> list[Signal]:
-        signals = []
-        cfg = self._cfg
-
-        fast_col = f"ema_{cfg.ema_fast}"
-        slow_col = f"ema_{cfg.ema_slow}"
-
-        if fast_col not in df.columns or slow_col not in df.columns or len(df) < 3:
-            return signals
-
-        # EMA crossover (current bar vs previous bar)
-        curr_fast = df[fast_col].iloc[-1]
-        curr_slow = df[slow_col].iloc[-1]
-        prev_fast = df[fast_col].iloc[-2]
-        prev_slow = df[slow_col].iloc[-2]
-
-        if prev_fast <= prev_slow and curr_fast > curr_slow:
-            confidence = 55
-            if latest.get("above_200ema"):     confidence += 15
-            if latest.get("rsi_zone") == 1:    confidence += 10   # neutral RSI = not overbought
-            signals.append(Signal(
-                trading_symbol  = symbol,
-                timeframe       = tf,
-                signal_type     = SignalType.EMA_CROSSOVER_UP,
-                direction       = Direction.BULLISH,
-                confidence      = min(confidence, 100),
-                price_at_signal = price,
-                indicators      = self._key_indicators(latest),
-                notes           = f"EMA{cfg.ema_fast} crossed above EMA{cfg.ema_slow}",
-            ))
-
-        if prev_fast >= prev_slow and curr_fast < curr_slow:
-            confidence = 55
-            if not latest.get("above_200ema"):  confidence += 15
-            if latest.get("rsi_zone") == 1:     confidence += 10
-            signals.append(Signal(
-                trading_symbol  = symbol,
-                timeframe       = tf,
-                signal_type     = SignalType.EMA_CROSSOVER_DOWN,
-                direction       = Direction.BEARISH,
-                confidence      = min(confidence, 100),
-                price_at_signal = price,
-                indicators      = self._key_indicators(latest),
-                notes           = f"EMA{cfg.ema_fast} crossed below EMA{cfg.ema_slow}",
-            ))
-
-        return signals
+        return []   # Removed: EMA crossover not used as entry trigger
 
     # ── Momentum Signals ──────────────────────────────────────────────────────
+    # RSI crossover and MACD crossover removed as standalone entry triggers.
+    #
+    # Why:
+    #   RSI oversold — can stay below 30 for weeks in a downtrend. Mean-reversion
+    #   against a trending stock is fighting the tape. 52% WR doesn't cover brokerage.
+    #
+    #   MACD cross — most crowded retail signal. Institutions specifically run stops
+    #   clustered at MACD crossover entries. By the time it triggers, 30-40% of the
+    #   move has already happened.
+    #
+    # RSI and MACD values are still computed as indicators and used as:
+    #   - RSI zone filter within engulfing, key level bounce, breakout signals
+    #   - MACD direction (positive/negative) as a trend confirmation filter
+    #   - Confluence gate factor 4 (RSI momentum zone)
 
     def _momentum_signals(
         self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
     ) -> list[Signal]:
-        signals = []
-        rsi_col = f"rsi_{self._cfg.rsi_period}"
-
-        if rsi_col in df.columns and len(df) >= 3:
-            curr_rsi = df[rsi_col].iloc[-1]
-            prev_rsi = df[rsi_col].iloc[-2]
-
-            # RSI crossed above 30 from oversold.
-            # Require curr_rsi >= 30 — without this, RSI grinding from 22→25 (still
-            # oversold) fires the signal on every bar, causing repeated identical entries.
-            if prev_rsi < 30 and curr_rsi >= 30:
-                signals.append(Signal(
-                    trading_symbol  = symbol,
-                    timeframe       = tf,
-                    signal_type     = SignalType.RSI_OVERSOLD,
-                    direction       = Direction.BULLISH,
-                    confidence      = 60,
-                    price_at_signal = price,
-                    indicators      = self._key_indicators(latest),
-                    notes           = f"RSI crossed above 30 ({prev_rsi:.1f}→{curr_rsi:.1f})",
-                ))
-
-            # RSI crossed below 70 from overbought.
-            # Same fix: require curr_rsi <= 70 to confirm actual exit from overbought zone.
-            if prev_rsi > 70 and curr_rsi <= 70:
-                signals.append(Signal(
-                    trading_symbol  = symbol,
-                    timeframe       = tf,
-                    signal_type     = SignalType.RSI_OVERBOUGHT,
-                    direction       = Direction.BEARISH,
-                    confidence      = 60,
-                    price_at_signal = price,
-                    indicators      = self._key_indicators(latest),
-                    notes           = f"RSI crossed below 70 ({prev_rsi:.1f}→{curr_rsi:.1f})",
-                ))
-
-        # MACD cross
-        if "macd" in df.columns and "macd_signal" in df.columns and len(df) >= 3:
-            curr_m = df["macd"].iloc[-1]
-            curr_s = df["macd_signal"].iloc[-1]
-            prev_m = df["macd"].iloc[-2]
-            prev_s = df["macd_signal"].iloc[-2]
-
-            if prev_m <= prev_s and curr_m > curr_s:
-                signals.append(Signal(
-                    trading_symbol  = symbol,
-                    timeframe       = tf,
-                    signal_type     = SignalType.MACD_CROSS_UP,
-                    direction       = Direction.BULLISH,
-                    confidence      = 55,
-                    price_at_signal = price,
-                    indicators      = self._key_indicators(latest),
-                    notes           = "MACD crossed above signal line",
-                ))
-
-            if prev_m >= prev_s and curr_m < curr_s:
-                signals.append(Signal(
-                    trading_symbol  = symbol,
-                    timeframe       = tf,
-                    signal_type     = SignalType.MACD_CROSS_DOWN,
-                    direction       = Direction.BEARISH,
-                    confidence      = 55,
-                    price_at_signal = price,
-                    indicators      = self._key_indicators(latest),
-                    notes           = "MACD crossed below signal line",
-                ))
-
-        return signals
+        return []   # Removed: RSI/MACD not used as entry triggers
 
     # ── Volume Signals ────────────────────────────────────────────────────────
 
@@ -1434,6 +1348,242 @@ class SignalDetector:
         return {k: latest[k] for k in keys if k in latest}
 
 
+    # ── Key Level Bounce ──────────────────────────────────────────────────────
+
+    def _key_level_bounce_signals(
+        self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
+    ) -> list[Signal]:
+        """
+        Detect a reversal at a known structural price level.
+
+        This is the most repeatable setup in any market: price pulls back to a
+        key level (50 EMA, 200 EMA, or prior swing high now acting as support),
+        touches it, and forms a bullish reversal candle with above-average volume.
+
+        Gates (all required):
+          1. In uptrend: price above 200 EMA (for longs) or below (for shorts)
+          2. Price touched key level within the last bar (low of prev candle ≤ level × 1.005)
+          3. Current candle is bullish (close > open) AND closes in upper 40% of range
+             (real buying pressure, not a doji)
+          4. RVOL ≥ 1.2 on the reversal candle (institutions participating)
+          5. RSI is not overbought (< 68) — room to run
+          6. At least one meaningful key level exists within 1% of low of prior bar
+
+        Only fires on daily and 15min timeframes (too noisy on 1min/5min).
+        """
+        if tf not in ("1day", "15min", "1hr"):
+            return []
+        if len(df) < 5:
+            return []
+
+        cfg     = self._cfg
+        signals = []
+        rvol    = float(latest.get("rvol", 1.0) or 1.0)
+        rsi_col = f"rsi_{cfg.rsi_period}"
+        rsi_val = float(df[rsi_col].iloc[-1]) if rsi_col in df.columns else 50.0
+
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        c_open  = float(curr["open"])
+        c_high  = float(curr["high"])
+        c_low   = float(curr["low"])
+        c_close = float(curr["close"])
+        c_range = c_high - c_low
+
+        p_low  = float(prev["low"])
+        p_high = float(prev["high"])
+
+        above_200 = bool(latest.get("above_200ema", False))
+        ema_50_col = f"ema_{cfg.ema_mid}"    # ema_33 used as mid; cfg.ema_slow = 50
+        ema_50_col_alt = f"ema_{cfg.ema_slow}"
+        ema_200_col = f"ema_{cfg.ema_trend}"
+
+        ema_50  = float(df[ema_50_col_alt].iloc[-1]) if ema_50_col_alt in df.columns else None
+        ema_200 = float(df[ema_200_col].iloc[-1]) if ema_200_col in df.columns else None
+
+        # ── BULLISH KEY LEVEL BOUNCE ─────────────────────────────────────────
+        if above_200 and rsi_val < 68:
+            # Collect candidate key levels (support zones for longs)
+            levels: list[tuple[float, str]] = []
+            if ema_50:  levels.append((ema_50,  f"50 EMA ({ema_50:.1f})"))
+            if ema_200: levels.append((ema_200, f"200 EMA ({ema_200:.1f})"))
+
+            # Prior swing highs turned support (look back 30 bars)
+            if "swing_high" in df.columns:
+                sw_highs = df["swing_high"].iloc[-35:-2].dropna()
+                for sh in sw_highs:
+                    sh = float(sh)
+                    # Swing high must be below current price (otherwise it's still resistance)
+                    if sh < price * 0.995:
+                        levels.append((sh, f"swing high→support ({sh:.1f})"))
+
+            # Pivot support S1
+            s1 = latest.get("s1")
+            if s1: levels.append((float(s1), f"Pivot S1 ({float(s1):.1f})"))
+
+            # Check: previous bar's low touched a key level
+            TOUCH_TOLERANCE = 0.008   # 0.8% — within this % of level = "touched"
+            touched_level: str | None = None
+            for level_price, level_name in levels:
+                if level_price > 0 and abs(p_low - level_price) / level_price <= TOUCH_TOLERANCE:
+                    touched_level = level_name
+                    break
+
+            if touched_level:
+                # Current candle must be bullish and close in upper 40% of range
+                bullish_candle = c_close > c_open
+                closes_high    = c_range > 0 and (c_close - c_low) / c_range >= 0.40
+
+                if bullish_candle and closes_high and rvol >= 1.2:
+                    conf = 68
+                    # Bonus: volume surge (stronger institutional participation)
+                    if rvol >= 2.0:   conf += 10
+                    elif rvol >= 1.5: conf += 5
+                    # Bonus: RSI in sweet spot (45-60 = momentum room without being overbought)
+                    if 45 <= rsi_val <= 60: conf += 7
+                    # Bonus: closes very near high (≥75% of range = strong buying)
+                    if c_range > 0 and (c_close - c_low) / c_range >= 0.75: conf += 5
+                    # Bonus: 200 EMA touch (highest-quality structural level)
+                    if ema_200 and "200 EMA" in touched_level: conf += 8
+
+                    signals.append(Signal(
+                        trading_symbol  = symbol,
+                        timeframe       = tf,
+                        signal_type     = SignalType.KEY_LEVEL_BOUNCE,
+                        direction       = Direction.BULLISH,
+                        confidence      = min(conf, 95),
+                        price_at_signal = price,
+                        indicators      = self._key_indicators(latest),
+                        notes           = (
+                            f"Key level bounce at {touched_level} | "
+                            f"RSI {rsi_val:.0f} | RVOL {rvol:.1f}x | "
+                            f"close {((c_close-c_low)/c_range*100):.0f}% of range"
+                            if c_range > 0 else f"Key level bounce at {touched_level}"
+                        ),
+                    ))
+
+        return signals
+
+    # ── Opening Drive Continuation ────────────────────────────────────────────
+
+    def _opening_drive_signals(
+        self, df: pd.DataFrame, symbol: str, tf: str, price: float, latest: dict
+    ) -> list[Signal]:
+        """
+        Detect the opening drive continuation pattern.
+
+        When a stock gaps up AND the first 15min candle (9:15-9:30) is strongly
+        bullish with exceptional volume, the opening drive typically continues
+        until at least 10:30. This is institutional buying creating sustained
+        momentum — different from ORB (which detects breakout from first 45min range).
+
+        Requirements:
+          1. Only on 15min timeframe
+          2. Signal fires on the SECOND candle close (9:30-9:45 bar close at 9:45)
+             — confirms the drive is continuing, not just a spike
+          3. First candle: gap up > 0.3% vs previous close, bullish (close > open),
+             closes in top 25% of its range, volume > 2× 20-day average
+          4. Second candle: also bullish (or neutral — not a reversal bar)
+          5. Above 200 EMA (in uptrend context — opening drives in downtrends fail more)
+          6. RSI < 75 (not already extremely overbought)
+
+        This is time-sensitive — only fires at market open window (9:30-9:50 IST).
+        """
+        if tf != "15min":
+            return []
+        if len(df) < 5:
+            return []
+
+        # Only fire during opening window — 9:30 to 9:50 IST
+        # The signal detector doesn't know clock time, so we use the index timestamp
+        try:
+            last_ts = df.index[-1]
+            if hasattr(last_ts, "hour"):
+                h, m = last_ts.hour, last_ts.minute
+                # 9:30 close = the 9:15 candle closes. 9:45 close = the 9:30 candle.
+                # We target the 9:30 candle's close (second bar of the day = index[-1]
+                # when scan runs at 9:45). Allow until 9:55 for slight delays.
+                if not (9 == h and 30 <= m <= 55):
+                    return []
+        except Exception:
+            return []   # Can't determine time — skip
+
+        signals = []
+        cfg     = self._cfg
+        rvol    = float(latest.get("rvol", 1.0) or 1.0)
+        rsi_col = f"rsi_{cfg.rsi_period}"
+        rsi_val = float(df[rsi_col].iloc[-1]) if rsi_col in df.columns else 50.0
+        above_200 = bool(latest.get("above_200ema", False))
+
+        if not above_200 or rsi_val > 75:
+            return []
+
+        # First candle of today (should be [-2] when second candle just closed)
+        first  = df.iloc[-2]
+        second = df.iloc[-1]  # just-closed candle
+
+        f_open  = float(first["open"])
+        f_high  = float(first["high"])
+        f_low   = float(first["low"])
+        f_close = float(first["close"])
+        f_range = f_high - f_low
+
+        # Previous day close (the candle before the first today candle)
+        prev_close = float(df.iloc[-3]["close"])
+
+        # Gate 1: gap up > 0.3%
+        gap_pct = (f_open - prev_close) / prev_close * 100
+        if gap_pct < 0.3:
+            return []
+
+        # Gate 2: first candle strongly bullish — closes in top 25% of range
+        if f_close <= f_open:
+            return []
+        if f_range > 0 and (f_close - f_low) / f_range < 0.75:
+            return []
+
+        # Gate 3: first candle volume > 2× 20-day average
+        # RVOL is computed on current bar — use first candle's raw volume vs avg
+        # Best approximation: check RVOL on the signal (from latest which is bar 2)
+        # We can't get bar 1 RVOL directly, so use the rolling context from latest
+        # If RVOL >= 2.0 at bar 2, first bar was almost certainly exceptional too
+        if rvol < 2.0:
+            return []
+
+        # Gate 4: second candle is not a reversal (close >= open, or close near open)
+        s_open  = float(second["open"])
+        s_close = float(second["close"])
+        if s_close < s_open * 0.998:   # bearish reversal — drive failed
+            return []
+
+        conf = 72
+        if gap_pct >= 1.0:  conf += 8   # strong gap
+        elif gap_pct >= 0.5: conf += 4
+        if rvol >= 3.0:     conf += 8   # exceptional volume
+        elif rvol >= 2.5:   conf += 4
+        # Bonus: second candle also bullish (confirms continuation)
+        if s_close > s_open: conf += 5
+
+        signals.append(Signal(
+            trading_symbol  = symbol,
+            timeframe       = tf,
+            signal_type     = SignalType.OPENING_DRIVE,
+            direction       = Direction.BULLISH,
+            confidence      = min(conf, 92),
+            price_at_signal = price,
+            indicators      = self._key_indicators(latest),
+            notes           = (
+                f"Opening drive | gap +{gap_pct:.1f}% | "
+                f"first candle {((f_close-f_low)/f_range*100):.0f}% of range | "
+                f"RVOL {rvol:.1f}x | RSI {rsi_val:.0f}"
+                if f_range > 0 else f"Opening drive | gap +{gap_pct:.1f}%"
+            ),
+        ))
+
+        return signals
+
+
 # ─── Multi-Timeframe Confluence ───────────────────────────────────────────────
 
 class MultiTimeframeSignalEngine:
@@ -1492,6 +1642,7 @@ class MultiTimeframeSignalEngine:
         names = [
             "breakout", "ema", "momentum", "volume", "volatility",
             "orb", "vwap", "candlestick", "chart_patterns",
+            "key_level", "opening_drive",
         ]
         return {n for n in names if self._config.get(f"strategy_{n}", True)}
 

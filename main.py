@@ -383,13 +383,14 @@ async def _run_signals(symbol: str) -> None:
         # MIN_CONFLUENCE_SCORE = 8: score_8 → 50% WR; score_9 over-filters.
         _MIN_CONFLUENCE = 8
         _HQ_SIGNALS = {
-            "BREAKOUT_HIGH", "BREAKOUT_LOW",
-            "DOUBLE_BOTTOM",  "DOUBLE_TOP",
+            "BREAKOUT_HIGH",   "BREAKOUT_LOW",
+            "DOUBLE_BOTTOM",   "DOUBLE_TOP",
             "DARVAS_BREAKOUT",
-            "ENGULFING_BULL", "ENGULFING_BEAR",
-            "EVENING_STAR",   "MORNING_STAR",
-            "BULL_FLAG",      "BEAR_FLAG",
-            "EMA_CROSSOVER_UP", "EMA_CROSSOVER_DOWN",
+            "ENGULFING_BULL",  "ENGULFING_BEAR",
+            "EVENING_STAR",    "MORNING_STAR",
+            "BULL_FLAG",       "BEAR_FLAG",
+            "KEY_LEVEL_BOUNCE",               # structural reversal — high quality
+            "OPENING_DRIVE",                  # gap + strong first candle — clean setup
         }
         _ind  = top.indicators if hasattr(top, "indicators") and top.indicators else {}
         _bull = top.direction.value == "BULLISH"
@@ -492,6 +493,40 @@ async def _run_signals(symbol: str) -> None:
             score     = _confluence_total,
             breakdown = _confluence_breakdown,
         )
+
+        # ── Time-of-day filter (intraday signals only) ────────────────────────
+        # Swing signals (1day, 1week) are evaluated once on daily candle close
+        # — time-of-day doesn't apply. Intraday signals are time-sensitive.
+        #
+        # Rules (IST):
+        #   After 14:30 — no new intraday entries. EOD unwinding distorts moves.
+        #   11:30 – 13:00 — lunch chop zone. Confidence docked 15 points.
+        #                   Signal can still fire if it clears threshold after penalty.
+        if top.timeframe not in ("1day", "1week"):
+            from zoneinfo import ZoneInfo as _ZI
+            _now_ist = datetime.now(_ZI("Asia/Kolkata"))
+            _h, _m = _now_ist.hour, _now_ist.minute
+            _mins = _h * 60 + _m
+
+            if _mins >= 14 * 60 + 30:   # after 2:30 PM
+                log.info(
+                    "signal.time_blocked",
+                    symbol=symbol, signal=top.signal_type.value,
+                    reason="No new intraday entries after 14:30 IST",
+                    time=f"{_h:02d}:{_m:02d}",
+                )
+                return
+
+            if 11 * 60 + 30 <= _mins < 13 * 60:   # 11:30 AM – 1:00 PM lunch chop
+                _penalty = 15
+                top.confidence = max(0, top.confidence - _penalty)
+                log.info(
+                    "signal.lunch_chop_penalty",
+                    symbol=symbol, signal=top.signal_type.value,
+                    confidence_after=top.confidence,
+                    penalty=_penalty,
+                    reason="Lunch chop window 11:30–13:00 IST",
+                )
 
         # Execute if above confidence threshold → RiskEngine → Claude → broker
         confidence_threshold = cfg.get("confidence_threshold", 75)

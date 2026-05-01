@@ -85,6 +85,33 @@ class TradeExecutor:
             await self._record_rejection(signal, stage="RISK", reason=decision.reason)
             return None
 
+        # ── 1a. Structural R:R gate ───────────────────────────────────────────
+        # The risk engine computes a mathematical 2:1 target using ATR or explicit_stop.
+        # But if that target lands inside a known resistance zone (prior swing high,
+        # pivot R1/R2), the *achievable* R:R is much lower — price will stall there.
+        # Reject if the effective (structure-adjusted) R:R falls below 1.5.
+        rr_ok, rr_reason, adjusted_target = self._check_structural_rr(
+            signal   = signal,
+            decision = decision,
+        )
+        if not rr_ok:
+            log.info("executor.structural_rr_blocked",
+                     symbol=signal.trading_symbol, reason=rr_reason)
+            await self._record_rejection(signal, stage="STRUCTURAL_RR", reason=rr_reason)
+            return None
+        if adjusted_target and adjusted_target != decision.target:
+            log.info("executor.target_adjusted_for_resistance",
+                     symbol=signal.trading_symbol,
+                     original=decision.target, adjusted=adjusted_target)
+            decision = type(decision)(
+                approved       = decision.approved,
+                reason         = decision.reason,
+                position_size  = decision.position_size,
+                risk_amount    = decision.risk_amount,
+                stop_loss      = decision.stop_loss,
+                target         = adjusted_target,
+            )
+
         # ── 1b. Liquidity / circuit-limit check ──────────────────────────────
         liq_ok, liq_reason = await self._check_liquidity(
             symbol    = signal.trading_symbol,
@@ -93,6 +120,13 @@ class TradeExecutor:
         if not liq_ok:
             log.info("executor.liquidity_blocked", symbol=signal.trading_symbol, reason=liq_reason)
             await self._record_rejection(signal, stage="LIQUIDITY", reason=liq_reason)
+            return None
+
+        # ── 1c. Sector cap ────────────────────────────────────────────────────
+        sector_ok, sector_reason = await self._check_sector_cap(signal.trading_symbol)
+        if not sector_ok:
+            log.info("executor.sector_blocked", symbol=signal.trading_symbol, reason=sector_reason)
+            await self._record_rejection(signal, stage="SECTOR_CAP", reason=sector_reason)
             return None
 
         # ── 2. Claude AI evaluation ───────────────────────────────────────────
@@ -260,6 +294,120 @@ class TradeExecutor:
         return trade
 
     # ── Pre-order checks ─────────────────────────────────────────────────────
+
+    def _check_structural_rr(
+        self,
+        signal:   "Signal",
+        decision: "RiskDecision",
+    ) -> tuple[bool, str, float | None]:
+        """
+        Check if the mathematical target lands inside a known resistance zone.
+
+        Uses swing_high, r1, r2 (pivot resistance) from signal.indicators.
+        These are pre-computed by indicators.py and stored in the signal.
+
+        Returns (ok, reason, adjusted_target):
+          - ok=True, adjusted_target=None  → target is clean, no resistance in path
+          - ok=True, adjusted_target=X     → resistance found but effective R:R ≥ 1.5;
+                                             target adjusted to just below resistance
+          - ok=False, reason=...           → resistance chokes R:R below 1.5; reject
+
+        Only applied to BULLISH (long) trades — short-side resistance logic is inverse
+        and currently disabled (short side not in production).
+        Only applied when direction is BULLISH and target > entry.
+        """
+        MIN_RR = 1.5
+
+        entry  = signal.price_at_signal
+        stop   = decision.stop_loss
+        target = decision.target
+        ind    = signal.indicators or {}
+
+        if signal.direction.value != "BULLISH" or target <= entry:
+            return True, "ok", None   # Not applicable
+
+        risk = entry - stop
+        if risk <= 0:
+            return True, "ok", None
+
+        # Collect resistance levels between entry and target
+        resistance_levels: list[float] = []
+
+        swing_high = ind.get("swing_high")
+        if swing_high and entry < float(swing_high) < target:
+            resistance_levels.append(float(swing_high))
+
+        r1 = ind.get("r1")
+        if r1 and entry < float(r1) < target:
+            resistance_levels.append(float(r1))
+
+        r2 = ind.get("r2")
+        if r2 and entry < float(r2) < target:
+            resistance_levels.append(float(r2))
+
+        if not resistance_levels:
+            return True, "ok", None   # Clear path to target
+
+        # Nearest resistance in the path
+        nearest_resistance = min(resistance_levels)
+
+        # Adjust target to just below resistance (give 0.3% buffer to avoid sitting right at it)
+        effective_target = round(nearest_resistance * 0.997, 2)
+
+        effective_rr = (effective_target - entry) / risk
+        if effective_rr < MIN_RR:
+            return False, (
+                f"Resistance at ₹{nearest_resistance:.1f} chokes R:R to {effective_rr:.2f} "
+                f"(min {MIN_RR}) — mathematical target ₹{target:.1f} unreachable"
+            ), None
+
+        # R:R still acceptable with adjusted target
+        return True, "resistance_adjusted", effective_target
+
+    async def _check_sector_cap(self, symbol: str) -> tuple[bool, str]:
+        """
+        Enforce max 2 open positions in any single sector.
+
+        Multiple positions in the same sector = one macro bet with N× notional.
+        When sector rotates, all positions close at SL simultaneously and wipe
+        a week of gains in one session.
+
+        MISC sector (unknown symbols) is exempt — we don't block new listings
+        or stocks not in our static map.
+
+        Fail-open on DB/lookup errors so infrastructure issues don't halt trading.
+        """
+        MAX_SECTOR_POSITIONS = 2
+
+        from config.sector_map import get_sector
+        sector = get_sector(symbol)
+
+        if sector == "MISC":
+            return True, "MISC sector exempt from cap"
+
+        try:
+            from sqlalchemy import text as _text
+            async with get_db_session() as session:
+                result = await session.execute(
+                    _text("SELECT trading_symbol FROM trades WHERE status = 'OPEN'")
+                )
+                open_symbols = [row[0] for row in result.fetchall()]
+
+            sector_count = sum(1 for s in open_symbols if get_sector(s) == sector)
+
+            if sector_count >= MAX_SECTOR_POSITIONS:
+                return False, (
+                    f"Sector cap: already {sector_count} open positions in {sector} "
+                    f"(max {MAX_SECTOR_POSITIONS}) — correlated risk too high"
+                )
+
+            log.debug("executor.sector_ok", symbol=symbol, sector=sector,
+                      open_in_sector=sector_count)
+            return True, "ok"
+
+        except Exception as e:
+            log.warning("executor.sector_cap_error", symbol=symbol, error=str(e))
+            return True, f"check_error: {e}"   # fail-open
 
     async def _check_liquidity(self, symbol: str, direction: str) -> tuple[bool, str]:
         """
