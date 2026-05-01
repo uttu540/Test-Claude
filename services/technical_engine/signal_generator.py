@@ -870,9 +870,18 @@ class SignalDetector:
                 # RSI must show a real pullback (35-58: not overbought, has momentum room)
                 rsi_ok = 35.0 <= rsi_val <= 58.0
 
-                # Pullback depth: price must have dropped ≥ 0.5× ATR from recent high
+                # Pullback depth: measure from recent swing high to the actual swing
+                # low of the correction (not to current close, which is already
+                # recovering — that underestimates how deep the pullback was).
+                # Use the most recent confirmed swing_low in the last 20 bars if
+                # available; fall back to bar low of the 5-bar window.
                 recent_high_5 = df["high"].iloc[-6:-1].max()
-                pullback_depth = recent_high_5 - price
+                if "swing_low" in df.columns:
+                    sl_series = df["swing_low"].iloc[-20:].dropna()
+                    pullback_bottom = float(sl_series.iloc[-1]) if not sl_series.empty else df["low"].iloc[-6:-1].min()
+                else:
+                    pullback_bottom = df["low"].iloc[-6:-1].min()
+                pullback_depth = recent_high_5 - pullback_bottom
                 pullback_ok = atr_val > 0 and pullback_depth >= 0.5 * atr_val
 
                 # Downswing context: ≥3 of last 5 bars bearish (stronger requirement)
@@ -897,6 +906,7 @@ class SignalDetector:
                         notes           = (
                             f"Bullish Engulfing | body ratio {c_body/p_body:.1f}x"
                             f" | RSI {rsi_val:.0f} | pullback {pullback_depth:.2f}"
+                            f" (hi {recent_high_5:.1f}→lo {pullback_bottom:.1f})"
                             f" | bearish_bars {bearish_bar_count}"
                             if p_body > 0
                             else f"Bullish Engulfing | RSI {rsi_val:.0f}"
