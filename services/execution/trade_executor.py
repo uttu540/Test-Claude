@@ -85,6 +85,16 @@ class TradeExecutor:
             await self._record_rejection(signal, stage="RISK", reason=decision.reason)
             return None
 
+        # ── 1b. Liquidity / circuit-limit check ──────────────────────────────
+        liq_ok, liq_reason = await self._check_liquidity(
+            symbol    = signal.trading_symbol,
+            direction = signal.direction.value,
+        )
+        if not liq_ok:
+            log.info("executor.liquidity_blocked", symbol=signal.trading_symbol, reason=liq_reason)
+            await self._record_rejection(signal, stage="LIQUIDITY", reason=liq_reason)
+            return None
+
         # ── 2. Claude AI evaluation ───────────────────────────────────────────
         # ORB_BREAKOUT has its own quality gates (OR range, volume, Nifty gate)
         # and lacks RSI/MACD/ATR% — skip AI to avoid false "data anomaly" rejections.
@@ -248,6 +258,65 @@ class TradeExecutor:
         )
 
         return trade
+
+    # ── Pre-order checks ─────────────────────────────────────────────────────
+
+    async def _check_liquidity(self, symbol: str, direction: str) -> tuple[bool, str]:
+        """
+        Check that the stock is tradeable right now — not at a circuit limit and
+        has reasonable intraday volume. Uses the live Redis tick; no broker API call.
+
+        Rules (applied in all modes):
+          • Day volume ≥ 200,000 shares — below this, MIS square-off near 3:20 can
+            gap badly because there are too few counterparties.
+          • BULLISH: sell_qty (sq) in order book must be > 0.
+            sq == 0 means price is pinned at upper circuit — we cannot buy.
+          • BEARISH: buy_qty (bq) in order book must be > 0.
+            bq == 0 means price is at lower circuit — we cannot sell short.
+
+        Fail-open on missing tick so we don't block trades during brief Redis outages.
+        """
+        MIN_DAY_VOLUME = 200_000
+
+        try:
+            import json as _json
+            redis = get_redis()
+            raw = await redis.get(f"market:tick:{symbol}")
+            if not raw:
+                # No tick in Redis — cannot check; allow trade (fail-open)
+                log.warning("executor.liquidity_no_tick", symbol=symbol,
+                            note="No tick in Redis — skipping liquidity check")
+                return True, "no_tick_data"
+
+            tick = _json.loads(raw)
+            day_volume = int(tick.get("vol", 0) or 0)
+            sell_qty   = int(tick.get("sq",  0) or 0)
+            buy_qty    = int(tick.get("bq",  0) or 0)
+
+            if day_volume < MIN_DAY_VOLUME:
+                return False, (
+                    f"Day volume {day_volume:,} < minimum {MIN_DAY_VOLUME:,} "
+                    f"— thin market, MIS square-off risk"
+                )
+
+            if direction == "BULLISH" and sell_qty == 0:
+                return False, (
+                    f"Sell-side order book empty (sq=0) — {symbol} likely at upper circuit"
+                )
+
+            if direction == "BEARISH" and buy_qty == 0:
+                return False, (
+                    f"Buy-side order book empty (bq=0) — {symbol} likely at lower circuit"
+                )
+
+            log.debug("executor.liquidity_ok", symbol=symbol,
+                      day_vol=day_volume, sell_qty=sell_qty, buy_qty=buy_qty)
+            return True, "ok"
+
+        except Exception as e:
+            # Fail-open — don't block trades on Redis/parse error
+            log.warning("executor.liquidity_check_error", symbol=symbol, error=str(e))
+            return True, f"check_error: {e}"
 
     # ── DB ────────────────────────────────────────────────────────────────────
 
