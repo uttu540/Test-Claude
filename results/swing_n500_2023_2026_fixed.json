@@ -1,0 +1,122 @@
+{
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-31",
+  "symbols": 200,
+  "total_trades": 423,
+  "winning": 105,
+  "losing": 318,
+  "net_pnl": 2121.9,
+  "gross_pnl": 2121.9,
+  "avg_pnl": 5.02,
+  "best_trade": 3562.02,
+  "worst_trade": -475.12,
+  "profit_factor": 1.04,
+  "max_drawdown": -8946.12,
+  "sharpe_ratio": 0.18,
+  "win_rate": 0.2482,
+  "avg_rr": 1.32,
+  "by_signal": {
+    "BREAKOUT_LOW": {
+      "trades": 6,
+      "wins": 3,
+      "win_rate": 0.5,
+      "net_pnl": -24.99,
+      "avg_pnl": -4.16
+    },
+    "DOUBLE_TOP": {
+      "trades": 108,
+      "wins": 16,
+      "win_rate": 0.1481,
+      "net_pnl": -7352.56,
+      "avg_pnl": -68.08
+    },
+    "ENGULFING_BEAR": {
+      "trades": 124,
+      "wins": 41,
+      "win_rate": 0.3306,
+      "net_pnl": 8600.27,
+      "avg_pnl": 69.36
+    },
+    "EVENING_STAR": {
+      "trades": 27,
+      "wins": 13,
+      "win_rate": 0.4815,
+      "net_pnl": 5436.53,
+      "avg_pnl": 201.35
+    },
+    "HAMMER": {
+      "trades": 13,
+      "wins": 5,
+      "win_rate": 0.3846,
+      "net_pnl": 756.11,
+      "avg_pnl": 58.16
+    },
+    "MORNING_STAR": {
+      "trades": 145,
+      "wins": 27,
+      "win_rate": 0.1862,
+      "net_pnl": -5293.46,
+      "avg_pnl": -36.51
+    }
+  },
+  "by_regime": {
+    "TRENDING_DOWN": {
+      "trades": 265,
+      "wins": 73,
+      "win_rate": 0.2755,
+      "net_pnl": 6659.25,
+      "avg_pnl": 25.13
+    },
+    "TRENDING_UP": {
+      "trades": 158,
+      "wins": 32,
+      "win_rate": 0.2025,
+      "net_pnl": -4537.35,
+      "avg_pnl": -28.72
+    }
+  },
+  "by_direction": {
+    "LONG": {
+      "trades": 158,
+      "wins": 32,
+      "win_rate": 0.2025,
+      "net_pnl": -4537.35,
+      "avg_pnl": -28.72
+    },
+    "SHORT": {
+      "trades": 265,
+      "wins": 73,
+      "win_rate": 0.2755,
+      "net_pnl": 6659.25,
+      "avg_pnl": 25.13
+    }
+  },
+  "by_exit": {
+    "TRAIL_STOP": 126,
+    "STOP": 273,
+    "MAX_HOLD": 24
+  },
+  "by_confluence": {
+    "score_10": {
+      "trades": 12,
+      "wins": 2,
+      "win_rate": 0.1667,
+      "net_pnl": -1693.35,
+      "avg_pnl": -141.11
+    },
+    "score_8": {
+      "trades": 264,
+      "wins": 72,
+      "win_rate": 0.2727,
+      "net_pnl": 7012.53,
+      "avg_pnl": 26.56
+    },
+    "score_9": {
+      "trades": 147,
+      "wins": 31,
+      "win_rate": 0.2109,
+      "net_pnl": -3197.28,
+      "avg_pnl": -21.75
+    }
+  }
+}

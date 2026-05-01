@@ -1,0 +1,24 @@
+{
+  "start_date": "2024-07-01",
+  "end_date": "2024-12-31",
+  "total_trades": 1,
+  "win_rate": 0.0,
+  "net_pnl": -9996.58,
+  "trades": [
+    {
+      "symbol": "TATASTEEL",
+      "signal_type": "DARVAS_BREAKOUT",
+      "entry_date": "2024-09-25",
+      "entry_price": 157.82,
+      "exit_price": 152.74,
+      "exit_reason": "STOP",
+      "pnl": -9996.58,
+      "pnl_pct": -3.22,
+      "holding_days": 13,
+      "confluence_score": 8,
+      "rvol": 3.32,
+      "rsi": 64.0038613109314,
+      "adx": 28.7483959911216
+    }
+  ]
+}

@@ -650,7 +650,7 @@ class TradeLifecycleManager:
                             COALESCE(SUM(net_pnl), 0)                         AS net_pnl,
                             COALESCE(AVG(r_multiple), 0)                      AS avg_r
                         FROM trades
-                        WHERE DATE(entry_time) = :today
+                        WHERE DATE(entry_time AT TIME ZONE 'Asia/Kolkata') = :today
                           AND status = 'CLOSED'
                     """),
                     {"today": trading_date},
@@ -741,14 +741,16 @@ class TradeLifecycleManager:
                     r_multiple  = r_multiple,
                 )
             else:
-                # TIME_EXIT, MANUAL — generic alert
-                pnl_str = f"₹{net_pnl:+.2f}"
-                await notifier.system_error(
-                    component = "TradeLifecycle",
-                    message   = (
-                        f"{reason}: {direction} {symbol} closed @ ₹{exit_price:.2f} | "
-                        f"Net P&L: {pnl_str} | R: {r_multiple:.1f}x"
-                    ),
+                # TIME_EXIT, KILL_SWITCH, MANUAL — routine closure, not an error
+                await notifier.trade_closed(
+                    symbol      = symbol,
+                    direction   = direction,
+                    entry_price = entry_price,
+                    exit_price  = exit_price,
+                    quantity    = quantity,
+                    pnl         = net_pnl,
+                    r_multiple  = r_multiple,
+                    reason      = reason,
                 )
         except Exception as e:
             log.warning("lifecycle.notify_failed", symbol=symbol, error=str(e))

@@ -105,6 +105,20 @@ class HistoricalSeeder:
         symbols = await self._get_universe()
         index_symbols = [("NIFTY 50", "^NSEI")]   # (trading_symbol, yfinance_ticker)
 
+        # ⚠️  SURVIVORSHIP BIAS: symbols are today's index/exchange constituents.
+        # Stocks delisted, merged, or renamed between start_date and today are
+        # absent from this seed — backtests will not penalise for selecting them.
+        # Impact: backtest WR and avg-R are likely overstated (upward bias).
+        # Mitigation: live paper-trading results provide the unbiased ground truth.
+        # A proper fix requires historical constituent snapshots (not available via
+        # yfinance); this is a known, accepted limitation for now.
+        log.warning(
+            "historical_seed.survivorship_bias",
+            note="Seeding TODAY's universe — delisted/merged stocks absent from history",
+            symbols=len(symbols),
+            from_date=str(start_date),
+        )
+
         log.info("historical_seed.start", symbols=len(symbols), from_date=start_date, timeframes=timeframes)
 
         for i, symbol in enumerate(symbols):

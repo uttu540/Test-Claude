@@ -1,0 +1,108 @@
+{
+  "start_date": "2026-01-01",
+  "end_date": "2026-04-18",
+  "symbols": 50,
+  "total_trades": 28,
+  "winning": 12,
+  "losing": 16,
+  "net_pnl": 4032.37,
+  "gross_pnl": 4032.37,
+  "avg_pnl": 144.01,
+  "best_trade": 1102.4,
+  "worst_trade": -225.2,
+  "profit_factor": 3.84,
+  "max_drawdown": -569.55,
+  "sharpe_ratio": 6.79,
+  "win_rate": 0.4286,
+  "avg_rr": 1.93,
+  "by_signal": {
+    "BREAKOUT_HIGH": {
+      "trades": 3,
+      "wins": 1,
+      "win_rate": 0.3333,
+      "net_pnl": 68.05,
+      "avg_pnl": 22.68
+    },
+    "DOUBLE_TOP": {
+      "trades": 15,
+      "wins": 7,
+      "win_rate": 0.4667,
+      "net_pnl": 1883.12,
+      "avg_pnl": 125.54
+    },
+    "ENGULFING_BEAR": {
+      "trades": 8,
+      "wins": 3,
+      "win_rate": 0.375,
+      "net_pnl": 978.8,
+      "avg_pnl": 122.35
+    },
+    "EVENING_STAR": {
+      "trades": 2,
+      "wins": 1,
+      "win_rate": 0.5,
+      "net_pnl": 1102.4,
+      "avg_pnl": 551.2
+    }
+  },
+  "by_regime": {
+    "TRENDING_DOWN": {
+      "trades": 25,
+      "wins": 11,
+      "win_rate": 0.44,
+      "net_pnl": 3964.32,
+      "avg_pnl": 158.57
+    },
+    "TRENDING_UP": {
+      "trades": 3,
+      "wins": 1,
+      "win_rate": 0.3333,
+      "net_pnl": 68.05,
+      "avg_pnl": 22.68
+    }
+  },
+  "by_direction": {
+    "LONG": {
+      "trades": 3,
+      "wins": 1,
+      "win_rate": 0.3333,
+      "net_pnl": 68.05,
+      "avg_pnl": 22.68
+    },
+    "SHORT": {
+      "trades": 25,
+      "wins": 11,
+      "win_rate": 0.44,
+      "net_pnl": 3964.32,
+      "avg_pnl": 158.57
+    }
+  },
+  "by_exit": {
+    "TRAIL_STOP": 14,
+    "STOP": 12,
+    "MAX_HOLD": 2
+  },
+  "by_confluence": {
+    "score_10": {
+      "trades": 1,
+      "wins": 1,
+      "win_rate": 1.0,
+      "net_pnl": 344.76,
+      "avg_pnl": 344.76
+    },
+    "score_8": {
+      "trades": 19,
+      "wins": 8,
+      "win_rate": 0.4211,
+      "net_pnl": 3548.76,
+      "avg_pnl": 186.78
+    },
+    "score_9": {
+      "trades": 8,
+      "wins": 3,
+      "win_rate": 0.375,
+      "net_pnl": 138.85,
+      "avg_pnl": 17.36
+    }
+  }
+}

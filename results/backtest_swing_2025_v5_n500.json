@@ -1,0 +1,148 @@
+{
+  "start_date": "2025-06-01",
+  "end_date": "2025-12-31",
+  "symbols": 200,
+  "total_trades": 2081,
+  "winning": 640,
+  "losing": 1441,
+  "net_pnl": -90361.61,
+  "gross_pnl": -90361.61,
+  "avg_pnl": -43.42,
+  "best_trade": 9424.8,
+  "worst_trade": -1576.26,
+  "profit_factor": 0.83,
+  "max_drawdown": -95685.89,
+  "sharpe_ratio": -1.09,
+  "win_rate": 0.3075,
+  "avg_rr": 1.13,
+  "by_signal": {
+    "BEAR_FLAG": {
+      "trades": 7,
+      "wins": 3,
+      "win_rate": 0.4286,
+      "net_pnl": -880.9,
+      "avg_pnl": -125.84
+    },
+    "BREAKOUT_HIGH": {
+      "trades": 454,
+      "wins": 147,
+      "win_rate": 0.3238,
+      "net_pnl": 3264.52,
+      "avg_pnl": 7.19
+    },
+    "BREAKOUT_LOW": {
+      "trades": 9,
+      "wins": 1,
+      "win_rate": 0.1111,
+      "net_pnl": -3596.81,
+      "avg_pnl": -399.65
+    },
+    "BULL_FLAG": {
+      "trades": 3,
+      "wins": 0,
+      "win_rate": 0.0,
+      "net_pnl": -1603.5,
+      "avg_pnl": -534.5
+    },
+    "DOUBLE_BOTTOM": {
+      "trades": 238,
+      "wins": 64,
+      "win_rate": 0.2689,
+      "net_pnl": -25175.26,
+      "avg_pnl": -105.78
+    },
+    "DOUBLE_TOP": {
+      "trades": 109,
+      "wins": 25,
+      "win_rate": 0.2294,
+      "net_pnl": -15406.78,
+      "avg_pnl": -141.35
+    },
+    "ENGULFING_BEAR": {
+      "trades": 417,
+      "wins": 142,
+      "win_rate": 0.3405,
+      "net_pnl": -8203.58,
+      "avg_pnl": -19.67
+    },
+    "ENGULFING_BULL": {
+      "trades": 229,
+      "wins": 64,
+      "win_rate": 0.2795,
+      "net_pnl": -12522.8,
+      "avg_pnl": -54.68
+    },
+    "EVENING_STAR": {
+      "trades": 103,
+      "wins": 35,
+      "win_rate": 0.3398,
+      "net_pnl": -6139.18,
+      "avg_pnl": -59.6
+    },
+    "HAMMER": {
+      "trades": 90,
+      "wins": 26,
+      "win_rate": 0.2889,
+      "net_pnl": -2867.82,
+      "avg_pnl": -31.86
+    },
+    "HIGH_RVOL": {
+      "trades": 183,
+      "wins": 50,
+      "win_rate": 0.2732,
+      "net_pnl": -15916.28,
+      "avg_pnl": -86.97
+    },
+    "MORNING_STAR": {
+      "trades": 194,
+      "wins": 65,
+      "win_rate": 0.3351,
+      "net_pnl": 1500.81,
+      "avg_pnl": 7.74
+    },
+    "SHOOTING_STAR": {
+      "trades": 45,
+      "wins": 18,
+      "win_rate": 0.4,
+      "net_pnl": -2814.03,
+      "avg_pnl": -62.53
+    }
+  },
+  "by_regime": {
+    "TRENDING_DOWN": {
+      "trades": 734,
+      "wins": 235,
+      "win_rate": 0.3202,
+      "net_pnl": -39579.41,
+      "avg_pnl": -53.92
+    },
+    "TRENDING_UP": {
+      "trades": 1347,
+      "wins": 405,
+      "win_rate": 0.3007,
+      "net_pnl": -50782.2,
+      "avg_pnl": -37.7
+    }
+  },
+  "by_direction": {
+    "LONG": {
+      "trades": 1347,
+      "wins": 405,
+      "win_rate": 0.3007,
+      "net_pnl": -50782.2,
+      "avg_pnl": -37.7
+    },
+    "SHORT": {
+      "trades": 734,
+      "wins": 235,
+      "win_rate": 0.3202,
+      "net_pnl": -39579.41,
+      "avg_pnl": -53.92
+    }
+  },
+  "by_exit": {
+    "STOP": 1250,
+    "MAX_HOLD": 649,
+    "TRAIL_STOP": 182
+  }
+}

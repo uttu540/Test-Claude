@@ -1,0 +1,107 @@
+{
+  "start_date": "2024-07-01",
+  "end_date": "2024-10-01",
+  "symbols": 50,
+  "total_trades": 22,
+  "winning": 6,
+  "losing": 16,
+  "net_pnl": -222.51,
+  "gross_pnl": -222.51,
+  "avg_pnl": -10.11,
+  "best_trade": 498.96,
+  "worst_trade": -173.85,
+  "profit_factor": 0.88,
+  "max_drawdown": -794.67,
+  "sharpe_ratio": -0.84,
+  "win_rate": 0.2727,
+  "avg_rr": 1.23,
+  "by_signal": {
+    "BREAKOUT_HIGH": {
+      "trades": 18,
+      "wins": 5,
+      "win_rate": 0.2778,
+      "net_pnl": 63.8,
+      "avg_pnl": 3.54
+    },
+    "DOUBLE_TOP": {
+      "trades": 2,
+      "wins": 1,
+      "win_rate": 0.5,
+      "net_pnl": -36.65,
+      "avg_pnl": -18.33
+    },
+    "ENGULFING_BEAR": {
+      "trades": 1,
+      "wins": 0,
+      "win_rate": 0.0,
+      "net_pnl": -102.48,
+      "avg_pnl": -102.48
+    },
+    "EVENING_STAR": {
+      "trades": 1,
+      "wins": 0,
+      "win_rate": 0.0,
+      "net_pnl": -147.18,
+      "avg_pnl": -147.18
+    }
+  },
+  "by_regime": {
+    "TRENDING_DOWN": {
+      "trades": 4,
+      "wins": 1,
+      "win_rate": 0.25,
+      "net_pnl": -286.31,
+      "avg_pnl": -71.58
+    },
+    "TRENDING_UP": {
+      "trades": 18,
+      "wins": 5,
+      "win_rate": 0.2778,
+      "net_pnl": 63.8,
+      "avg_pnl": 3.54
+    }
+  },
+  "by_direction": {
+    "LONG": {
+      "trades": 18,
+      "wins": 5,
+      "win_rate": 0.2778,
+      "net_pnl": 63.8,
+      "avg_pnl": 3.54
+    },
+    "SHORT": {
+      "trades": 4,
+      "wins": 1,
+      "win_rate": 0.25,
+      "net_pnl": -286.31,
+      "avg_pnl": -71.58
+    }
+  },
+  "by_exit": {
+    "STOP": 15,
+    "TRAIL_STOP": 7
+  },
+  "by_confluence": {
+    "score_10": {
+      "trades": 2,
+      "wins": 0,
+      "win_rate": 0.0,
+      "net_pnl": -280.19,
+      "avg_pnl": -140.09
+    },
+    "score_8": {
+      "trades": 11,
+      "wins": 5,
+      "win_rate": 0.4545,
+      "net_pnl": 559.21,
+      "avg_pnl": 50.84
+    },
+    "score_9": {
+      "trades": 9,
+      "wins": 1,
+      "win_rate": 0.1111,
+      "net_pnl": -501.53,
+      "avg_pnl": -55.73
+    }
+  }
+}

@@ -3,10 +3,10 @@ services/execution/charges.py
 ───────────────────────────────
 Zerodha intraday equity charge calculator.
 
-All rates as of 2025 (NSE MIS equity segment):
+All rates as of Oct 2024 (NSE MIS equity segment):
   Brokerage:        min(₹20, 0.03%) per side
   STT:              0.025% on sell-side turnover only
-  Exchange (NSE):   0.00345% of total turnover
+  Exchange (NSE):   0.00297% of total turnover  ← revised Oct 2024 (was 0.00345%)
   SEBI charges:     ₹10 per crore of turnover (0.000001)
   GST:              18% on (brokerage + exchange charges + SEBI)
   Stamp duty:       0.003% on buy-side turnover (capped ₹1,500 for intraday)
@@ -61,8 +61,8 @@ def calculate_intraday_charges(
     # STT: 0.025% on sell side only (intraday equity delivery is different)
     stt = sell_value * 0.00025
 
-    # Exchange transaction charges (NSE): 0.00345% of total turnover
-    exchange_charges = turnover * 0.0000345
+    # Exchange transaction charges (NSE): 0.00297% of total turnover (revised Oct 2024)
+    exchange_charges = turnover * 0.0000297
 
     # SEBI charges: ₹10 per crore = 0.000001 × turnover
     sebi_charges = turnover * 0.000001

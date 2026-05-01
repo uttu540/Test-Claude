@@ -319,6 +319,30 @@ class TelegramNotifier:
         )
         await self._send(msg, parse_mode="Markdown")
 
+    async def trade_closed(
+        self,
+        symbol:      str,
+        direction:   str,
+        entry_price: float,
+        exit_price:  float,
+        quantity:    int,
+        pnl:         float,
+        r_multiple:  float,
+        reason:      str,
+    ) -> None:
+        """Routine trade closure notification (TIME_EXIT, MANUAL, KILL_SWITCH)."""
+        pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+        msg = (
+            f"📋 *TRADE CLOSED — {reason}*\n"
+            f"──────────────────\n"
+            f"*{symbol}* ({direction})\n"
+            f"Entry: ₹{entry_price:.2f} → Exit: ₹{exit_price:.2f}\n"
+            f"Qty: {quantity}\n"
+            f"{pnl_emoji} P&L: ₹{pnl:+,.2f}  |  R: {r_multiple:+.2f}R\n"
+            f"Time: {datetime.now().strftime('%H:%M:%S IST')}"
+        )
+        await self._send(msg, parse_mode="Markdown")
+
     async def system_error(self, component: str, error: str) -> None:
         await self.send(f"System error in *{component}*:\n`{error[:200]}`", AlertLevel.ERROR)
 

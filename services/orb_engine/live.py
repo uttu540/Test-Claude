@@ -32,7 +32,10 @@ OR_MIN_RANGE_PCT = 0.3
 OR_MAX_RANGE_PCT = 2.5
 MIN_PRICE        = 50.0
 MIN_AVG_VOL      = 50_000
-TRADE_COST_PCT   = 0.05   # one-way slippage + brokerage (%)
+TRADE_COST_PCT   = 0.15   # one-way slippage + brokerage (%)
+# Increased from 0.05 → 0.15: ORB entry order lands at ~10:00 AM market price,
+# not the 9:45 candle close. A live market order on a breakout stock routinely
+# fills 0.1-0.2% above the breakout candle close. 0.05% was too optimistic.
 
 
 def _today_15min(buffer_entry: deque, today: date) -> list[dict]:
@@ -250,12 +253,30 @@ def scan_orb_signals(
 
         vol_ratio = round(volume / or_avg_vol, 2)
 
+        # Dynamic confidence: base 72, scored on vol surge + OR range quality + ATR data.
+        # All setups that reach here have already passed hard binary gates (range, volume,
+        # Nifty trend-day). Confidence reflects *how good* the setup is, not whether it fires.
+        _orb_conf = 72
+        if vol_ratio >= 3.0:
+            _orb_conf += 10    # exceptional volume surge
+        elif vol_ratio >= 2.0:
+            _orb_conf += 5     # strong surge
+        # OR range in Goldilocks zone (0.5-1.5%): tight enough to avoid chaos days,
+        # wide enough to give meaningful breakout momentum
+        if 0.5 <= or_range_pct <= 1.5:
+            _orb_conf += 8
+        elif or_range_pct <= 0.8:
+            _orb_conf -= 5     # very tight range — breakout may be noise
+        if real_atr is not None:
+            _orb_conf += 5     # real ATR available for proper stop sizing
+        _orb_conf = max(65, min(_orb_conf, 95))
+
         sig = Signal(
             trading_symbol  = symbol,
             timeframe       = "15min",
             signal_type     = SignalType.ORB_BREAKOUT,
             direction       = Direction.BULLISH,
-            confidence      = 82,   # Fixed confidence — ORB quality is binary (fires or not)
+            confidence      = _orb_conf,
             price_at_signal = entry_price,
             indicators      = {
                 "atr_14":       real_atr or round(stop_distance, 2),  # real ATR; fallback to range

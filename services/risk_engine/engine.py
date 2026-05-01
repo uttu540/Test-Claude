@@ -214,13 +214,13 @@ class RiskEngine:
         try:
             async with get_db_session() as session:
                 closed_result = await session.execute(
-                    text("SELECT COALESCE(SUM(net_pnl), 0) FROM trades WHERE DATE(entry_time) = :today AND status = 'CLOSED'"),
+                    text("SELECT COALESCE(SUM(net_pnl), 0) FROM trades WHERE DATE(entry_time AT TIME ZONE 'Asia/Kolkata') = :today AND status = 'CLOSED'"),
                     {"today": today},
                 )
                 realized = float(closed_result.scalar() or 0)
 
                 open_result = await session.execute(
-                    text("SELECT trading_symbol, entry_price, entry_quantity, direction FROM trades WHERE status = 'OPEN' AND DATE(entry_time) = :today"),
+                    text("SELECT trading_symbol, entry_price, entry_quantity, direction FROM trades WHERE status = 'OPEN' AND DATE(entry_time AT TIME ZONE 'Asia/Kolkata') = :today"),
                     {"today": today},
                 )
                 open_rows = open_result.fetchall()
@@ -304,7 +304,7 @@ class RiskEngine:
                         "SELECT COUNT(*) FROM trades "
                         "WHERE trading_symbol = :sym "
                         "  AND status IN ('OPEN', 'CLOSED') "
-                        "  AND DATE(entry_time) = :today"
+                        "  AND DATE(entry_time AT TIME ZONE 'Asia/Kolkata') = :today"
                     ),
                     {"sym": symbol, "today": today},
                 )

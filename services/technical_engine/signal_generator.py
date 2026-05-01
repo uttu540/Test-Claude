@@ -473,8 +473,10 @@ class SignalDetector:
             curr_rsi = df[rsi_col].iloc[-1]
             prev_rsi = df[rsi_col].iloc[-2]
 
-            # RSI turning up from oversold
-            if prev_rsi < 30 and curr_rsi > prev_rsi:
+            # RSI crossed above 30 from oversold.
+            # Require curr_rsi >= 30 — without this, RSI grinding from 22→25 (still
+            # oversold) fires the signal on every bar, causing repeated identical entries.
+            if prev_rsi < 30 and curr_rsi >= 30:
                 signals.append(Signal(
                     trading_symbol  = symbol,
                     timeframe       = tf,
@@ -483,11 +485,12 @@ class SignalDetector:
                     confidence      = 60,
                     price_at_signal = price,
                     indicators      = self._key_indicators(latest),
-                    notes           = f"RSI {curr_rsi:.1f} turning up from oversold",
+                    notes           = f"RSI crossed above 30 ({prev_rsi:.1f}→{curr_rsi:.1f})",
                 ))
 
-            # RSI turning down from overbought
-            if prev_rsi > 70 and curr_rsi < prev_rsi:
+            # RSI crossed below 70 from overbought.
+            # Same fix: require curr_rsi <= 70 to confirm actual exit from overbought zone.
+            if prev_rsi > 70 and curr_rsi <= 70:
                 signals.append(Signal(
                     trading_symbol  = symbol,
                     timeframe       = tf,
@@ -496,7 +499,7 @@ class SignalDetector:
                     confidence      = 60,
                     price_at_signal = price,
                     indicators      = self._key_indicators(latest),
-                    notes           = f"RSI {curr_rsi:.1f} turning down from overbought",
+                    notes           = f"RSI crossed below 70 ({prev_rsi:.1f}→{curr_rsi:.1f})",
                 ))
 
         # MACD cross
@@ -1522,11 +1525,22 @@ class MultiTimeframeSignalEngine:
                 bear = sum(1 for s in signals if s.direction == Direction.BEARISH)
                 directions_by_tf[tf] = Direction.BULLISH if bull > bear else Direction.BEARISH
 
+        # Apply regime filter FIRST — filtered-out signals must not influence
+        # the confluence boost. Without this ordering, a regime-blocked BULLISH
+        # 1day signal still sits in directions_by_tf and boosts all BULLISH 15min
+        # signals that survive the filter — inflating scores on unsuitable setups.
+        all_signals = self._filter.apply(all_signals, regime)
+
+        # Recompute directions_by_tf from surviving signals only, then boost
+        directions_by_tf = {}
+        for tf_key in {s.timeframe for s in all_signals}:
+            tf_sigs = [s for s in all_signals if s.timeframe == tf_key]
+            bull = sum(1 for s in tf_sigs if s.direction == Direction.BULLISH)
+            bear = sum(1 for s in tf_sigs if s.direction == Direction.BEARISH)
+            directions_by_tf[tf_key] = Direction.BULLISH if bull >= bear else Direction.BEARISH
+
         # Boost confidence for signals whose direction aligns with higher timeframes
         all_signals = self._apply_confluence_boost(all_signals, directions_by_tf)
-
-        # Apply regime filter — remove signals that don't suit current conditions
-        all_signals = self._filter.apply(all_signals, regime)
 
         # Apply per-signal-type minimum confidence overrides (from backtest findings)
         orb_min  = int(self._config.get("orb_min_confidence",  70))

@@ -449,11 +449,16 @@ async def _run_signals(symbol: str) -> None:
             else:
                 _f_mom = 0
 
-        # Factor 5: multi-signal agreement (distinct signal types in full list)
-        _distinct = len({s.signal_type for s in signals})
-        if _distinct >= 3:
+        # Factor 5: multi-timeframe agreement.
+        # Count distinct timeframes that agree with top signal's direction.
+        # Previously counted distinct signal_types — but MACD + RSI + EMA all firing
+        # on the same 15min bar are driven by the same price move (correlated, not
+        # independent). A 15min signal + 1hr signal + 1day signal agreeing is genuine
+        # multi-source confirmation.
+        _agreeing_tfs = len({s.timeframe for s in signals if s.direction == top.direction})
+        if _agreeing_tfs >= 3:
             _f_multi = 2
-        elif _distinct >= 2:
+        elif _agreeing_tfs >= 2:
             _f_multi = 1
         else:
             _f_multi = 0
