@@ -245,15 +245,19 @@ def _volume_indicators(df: pd.DataFrame, cfg: IndicatorConfig) -> pd.DataFrame:
 def _support_resistance(df: pd.DataFrame, cfg: IndicatorConfig) -> pd.DataFrame:
     lb = cfg.swing_lookback
 
-    # Swing highs and lows
-    df["swing_high"] = df["high"].where(
-        (df["high"] == df["high"].rolling(lb * 2 + 1, center=True).max()),
-        other=np.nan,
-    )
-    df["swing_low"] = df["low"].where(
-        (df["low"] == df["low"].rolling(lb * 2 + 1, center=True).min()),
-        other=np.nan,
-    )
+    # Swing highs and lows — trailing window only (no center=True look-ahead).
+    # A bar is a confirmed swing high if it was the highest high in the trailing
+    # 2*lb+1 window AND lb bars have since elapsed (shift(lb) aligns confirmation
+    # to the bar that originally qualified, now that we have lb future bars of proof).
+    # This means the most recent lb bars will have NaN swing_high/low — correct
+    # behaviour for live trading (unconfirmed swings are not yet valid pivots).
+    rolling_high = df["high"].rolling(lb * 2 + 1, min_periods=lb * 2 + 1).max()
+    rolling_low  = df["low"].rolling(lb * 2 + 1,  min_periods=lb * 2 + 1).min()
+    # Shift back lb periods so the pivot is tagged at the actual peak/trough bar
+    is_swing_high = df["high"] == rolling_high.shift(-lb)
+    is_swing_low  = df["low"]  == rolling_low.shift(-lb)
+    df["swing_high"] = df["high"].where(is_swing_high, other=np.nan)
+    df["swing_low"]  = df["low"].where(is_swing_low,   other=np.nan)
 
     # Classic Pivot Points (daily — use prev day OHLC)
     df["pivot"]     = (df["high"].shift(1) + df["low"].shift(1) + df["close"].shift(1)) / 3

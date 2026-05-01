@@ -34,7 +34,9 @@ from services.technical_engine.signal_generator import Direction, Signal
 log = structlog.get_logger(__name__)
 
 EXCHANGE = "NSE"
-PRODUCT  = "MIS"   # Intraday — auto square-off at 3:12 PM
+# Product is determined per-signal at execution time (see _get_product).
+# MIS = intraday (auto square-off 3:20 PM); CNC = delivery (holds overnight).
+_SWING_TIMEFRAMES = {"1day", "1week"}
 
 
 class TradeExecutor:
@@ -46,6 +48,15 @@ class TradeExecutor:
     def __init__(self) -> None:
         self._risk = RiskEngine()
 
+    @staticmethod
+    def _get_product(signal: Signal) -> str:
+        """
+        MIS (intraday) for short-timeframe signals — broker auto-squares off at 3:20 PM.
+        CNC (delivery) for daily/weekly signals — position holds overnight as a swing trade.
+        Paper/dev broker ignores this field, but it's used in order records and charge calc.
+        """
+        return "CNC" if signal.timeframe in _SWING_TIMEFRAMES else "MIS"
+
     async def execute(self, signal: Signal) -> Trade | None:
         """
         Attempt to open a position based on the signal.
@@ -56,12 +67,17 @@ class TradeExecutor:
             log.warning("executor.no_atr", symbol=signal.trading_symbol, signal=signal.signal_type.value)
             return None
 
+        # explicit_stop: ORB and any caller that has a structure-based stop
+        # (e.g. OR low) can set this to bypass the ATR-derived stop in RiskEngine.
+        explicit_stop = signal.indicators.get("explicit_stop")
+
         # ── 1. Risk evaluation ────────────────────────────────────────────────
         decision = await self._risk.evaluate(
-            symbol      = signal.trading_symbol,
-            direction   = signal.direction.value,
-            entry_price = signal.price_at_signal,
-            atr         = atr,
+            symbol         = signal.trading_symbol,
+            direction      = signal.direction.value,
+            entry_price    = signal.price_at_signal,
+            atr            = atr,
+            explicit_stop  = explicit_stop,
         )
 
         if not decision.approved:
@@ -129,12 +145,16 @@ class TradeExecutor:
         # ── 4. Record trade in DB first ───────────────────────────────────────
         # Must happen BEFORE place_order so the FK constraint on orders.parent_trade_id
         # is satisfied when _record_order runs inside place_order / place_stop_loss.
-        broker = get_broker()
-        trade  = await self._record_trade(trade_id, signal, direction, decision, ai_decision, broker.BROKER)
+        broker  = get_broker()
+        product = self._get_product(signal)   # MIS for intraday, CNC for swing
+        trade   = await self._record_trade(trade_id, signal, direction, decision, ai_decision, broker.BROKER)
         if trade is None:
             # DB write failed — abort; no order should be placed without a trade record
             log.error("executor.aborted_no_db_record", symbol=signal.trading_symbol)
             return None
+
+        log.info("executor.product_selected", symbol=signal.trading_symbol,
+                 timeframe=signal.timeframe, product=product)
 
         # ── 5. Entry order ────────────────────────────────────────────────────
         broker_id = await broker.place_order(
@@ -143,7 +163,7 @@ class TradeExecutor:
             transaction_type = side,
             quantity         = decision.position_size,
             order_type       = "MARKET",
-            product          = PRODUCT,
+            product          = product,
             tag              = f"BOT_{signal.signal_type.value[:8]}",
             trade_id         = str(trade_id),
         )
@@ -163,7 +183,7 @@ class TradeExecutor:
             exchange      = EXCHANGE,
             quantity      = decision.position_size,
             trigger_price = decision.stop_loss,
-            product       = PRODUCT,
+            product       = product,
             direction     = direction,
             tag           = "BOT_SL",
             trade_id      = str(trade_id),
@@ -175,22 +195,28 @@ class TradeExecutor:
                 symbol=signal.trading_symbol, exchange=EXCHANGE,
                 transaction_type="SELL" if side == "BUY" else "BUY",
                 quantity=decision.position_size, order_type="MARKET",
-                product=PRODUCT, tag="BOT_EMERGENCY_SQ", trade_id=str(trade_id),
+                product=product, tag="BOT_EMERGENCY_SQ", trade_id=str(trade_id),
             )
             await self._cancel_trade_record(trade_id)
             return None
 
         # ── 7. Target order ───────────────────────────────────────────────────
-        await broker.place_target(
-            symbol      = signal.trading_symbol,
-            exchange    = EXCHANGE,
-            quantity    = decision.position_size,
-            limit_price = decision.target,
-            product     = PRODUCT,
-            direction   = direction,
-            tag         = "BOT_TGT",
-            trade_id    = str(trade_id),
-        )
+        # Swing trades: skip broker LIMIT target — in-process trailing stop owns exits.
+        # Intraday trades: place LIMIT at 1:2R so EOD square-off isn't the only exit.
+        if product == "CNC":
+            log.info("executor.swing_no_limit_target", symbol=signal.trading_symbol,
+                     reason="trailing stop manages swing exits; broker limit would cap at 1:2R")
+        else:
+            await broker.place_target(
+                symbol      = signal.trading_symbol,
+                exchange    = EXCHANGE,
+                quantity    = decision.position_size,
+                limit_price = decision.target,
+                product     = product,
+                direction   = direction,
+                tag         = "BOT_TGT",
+                trade_id    = str(trade_id),
+            )
 
         # ── 8. Telegram notification ──────────────────────────────────────────
         _trade_type = "SWING" if signal.timeframe in ("1day", "1week") else "INTRADAY"

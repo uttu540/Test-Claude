@@ -100,23 +100,29 @@ class TradeLifecycleManager:
 
     async def close_all_open_trades(self, reason: str = "TIME_EXIT") -> int:
         """
-        Force-close every OPEN trade at current market price.
-        Called at 3:20 PM by scheduler, or on kill switch.
+        Force-close OPEN intraday trades at current market price.
+        TIME_EXIT (3:12 PM): skips SWING trades — they hold overnight on CNC product.
+        KILL_SWITCH: closes everything regardless of type.
         Returns the number of trades closed.
         """
-        open_trades = await self._load_open_trades()
+        intraday_only = (reason == "TIME_EXIT")
+        open_trades = await self._load_open_trades(intraday_only=intraday_only)
         closed = 0
         for trade in open_trades:
             price = await self._get_current_price(trade["trading_symbol"])
             if price is None:
-                # No live tick in Redis (feed not running or symbol unsubscribed).
-                # Fall back to entry price so the trade is still closed at EOD
-                # rather than silently left open.
+                # No live tick in Redis — try last candle close from buffer before
+                # falling back to entry price (entry price produces fake zero P&L).
+                price = await self._get_last_candle_close(trade["trading_symbol"])
+            if price is None:
+                # Absolute last resort — use entry price and flag loudly.
+                # This hides real P&L but is better than leaving the trade open.
                 price = float(trade["entry_price"])
-                log.warning(
-                    "lifecycle.no_tick_fallback",
+                log.error(
+                    "lifecycle.eod_price_unknown",
                     symbol=trade["trading_symbol"],
-                    using_entry_price=price,
+                    fallback="entry_price",
+                    warning="P&L will be reported as zero — investigate feed",
                 )
             await self._close_trade(trade, exit_price=price, reason=reason)
             closed += 1
@@ -680,18 +686,25 @@ class TradeLifecycleManager:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    async def _load_open_trades(self) -> list[dict]:
-        """Load all OPEN trades from DB."""
+    async def _load_open_trades(self, intraday_only: bool = False) -> list[dict]:
+        """
+        Load OPEN trades from DB.
+        intraday_only=True: skip SWING trades (strategy_mode='SWING') — used by EOD
+        square-off so swing positions are not force-closed at 3:12 PM.
+        """
         try:
             async with get_db_session() as session:
+                where = "WHERE status = 'OPEN'"
+                if intraday_only:
+                    where += " AND (strategy_mode IS NULL OR strategy_mode != 'SWING')"
                 result = await session.execute(
-                    text("""
+                    text(f"""
                         SELECT id, trading_symbol, direction,
                                entry_price, entry_quantity,
                                planned_stop_loss, planned_target_1,
-                               market_regime
+                               market_regime, strategy_mode
                         FROM trades
-                        WHERE status = 'OPEN'
+                        {where}
                     """)
                 )
                 return [dict(row._mapping) for row in result.fetchall()]
@@ -705,6 +718,33 @@ class TradeLifecycleManager:
             self._price_extremes[trade_key] = (entry_price, entry_price)
         low, high = self._price_extremes[trade_key]
         self._price_extremes[trade_key] = (min(low, current_price), max(high, current_price))
+
+    async def _get_last_candle_close(self, symbol: str) -> float | None:
+        """
+        Fallback price source for EOD close when Redis tick is unavailable.
+        Reads the most recent 1-min or 5-min candle close from the ohlcv table.
+        Better than entry_price because it reflects where the market actually was.
+        """
+        try:
+            async with get_db_session() as session:
+                result = await session.execute(
+                    text("""
+                        SELECT close FROM ohlcv
+                        WHERE trading_symbol = :sym
+                          AND timeframe IN ('1min', '5min', '15min')
+                        ORDER BY ts DESC LIMIT 1
+                    """),
+                    {"sym": symbol},
+                )
+                row = result.fetchone()
+                if row:
+                    val = float(row[0])
+                    log.warning("lifecycle.eod_candle_close_fallback",
+                                symbol=symbol, close=val)
+                    return val
+        except Exception as e:
+            log.error("lifecycle.eod_candle_close_error", symbol=symbol, error=str(e))
+        return None
 
     async def _get_current_price(self, symbol: str) -> float | None:
         """Read latest tick price from Redis (dev/paper mode)."""

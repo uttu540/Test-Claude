@@ -233,13 +233,20 @@ def scan_orb_signals(
         # Entry price with slippage
         entry_price = round(close * (1 + TRADE_COST_PCT / 100), 2)
 
-        # Stop = OR low. Trick the risk engine: set atr_14 so that
-        #   stop_loss = entry - 2.0 × atr_14 = or_low
-        #   → atr_14 = (entry - or_low) / 2.0
         stop_distance = entry_price - or_low
         if stop_distance <= 0:
             continue
-        atr_proxy = stop_distance / 2.0   # ATR_STOP_MULTIPLIER = 2.0 in RiskEngine
+
+        # Real ATR from daily buffer (used for analytics/logging, NOT for stop sizing)
+        real_atr = None
+        daily_buf = candle_buffer.get(symbol, {}).get("1day")
+        if daily_buf and len(daily_buf) >= 15:
+            closes = [c["close"] for c in list(daily_buf)[-15:]]
+            highs  = [c["high"]  for c in list(daily_buf)[-15:]]
+            lows   = [c["low"]   for c in list(daily_buf)[-15:]]
+            trs = [max(h - l, abs(h - pc), abs(l - pc))
+                   for h, l, pc in zip(highs[1:], lows[1:], closes[:-1])]
+            real_atr = round(sum(trs[-14:]) / 14, 2) if trs else None
 
         vol_ratio = round(volume / or_avg_vol, 2)
 
@@ -251,13 +258,14 @@ def scan_orb_signals(
             confidence      = 82,   # Fixed confidence — ORB quality is binary (fires or not)
             price_at_signal = entry_price,
             indicators      = {
-                "atr_14":       round(atr_proxy,    2),
+                "atr_14":       real_atr or round(stop_distance, 2),  # real ATR; fallback to range
+                "explicit_stop": round(or_low, 2),  # RiskEngine reads this — no fake ATR needed
                 "or_high":      round(or_high,      2),
                 "or_low":       round(or_low,       2),
                 "or_range_pct": round(or_range_pct, 2),
                 "or_avg_vol":   int(or_avg_vol),
                 "breakout_vol": int(volume),
-                "rvol":         vol_ratio,   # For confluence gate volume factor
+                "rvol":         vol_ratio,
                 "stop_price":   round(or_low, 2),
             },
             notes = (

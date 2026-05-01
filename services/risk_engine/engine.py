@@ -51,9 +51,14 @@ class RiskEngine:
         direction: str,        # "BULLISH" or "BEARISH"
         entry_price: float,
         atr: float,
+        explicit_stop: float | None = None,   # Override ATR-derived stop (e.g. ORB uses OR low)
     ) -> RiskDecision:
         """
         Full pre-trade evaluation. Returns approved=True with sizing if safe to trade.
+
+        explicit_stop: when provided, used directly as stop_loss instead of entry ± 2×ATR.
+        Target is then placed at entry + RR_RATIO × risk_per_share in the trade direction.
+        atr must still be a real ATR value (used only for logging/analytics when explicit_stop set).
         """
         # ── 1. Daily loss limit ───────────────────────────────────────────────
         daily_pnl = await self._get_todays_pnl()
@@ -85,16 +90,27 @@ class RiskEngine:
                 reason=f"Already traded {symbol} today — one trade per symbol per day",
             )
 
-        # ── 4. Calculate stop loss and target from ATR ────────────────────────
-        if atr <= 0:
-            return RiskDecision(approved=False, reason="ATR is zero — cannot size position")
-
-        if direction == "BULLISH":
-            stop_loss = entry_price - (atr * self.ATR_STOP_MULTIPLIER)
-            target    = entry_price + (atr * self.ATR_STOP_MULTIPLIER * self.RR_RATIO)
+        # ── 4. Calculate stop loss and target ────────────────────────────────
+        # explicit_stop: caller (e.g. ORB) passes the real structure-based stop
+        # directly so we don't have to reverse-engineer it from a fake ATR.
+        if explicit_stop is not None:
+            stop_loss = explicit_stop
+            risk_per_share = abs(entry_price - stop_loss)
+            if risk_per_share <= 0:
+                return RiskDecision(approved=False, reason="explicit_stop equals entry price — zero risk_per_share")
+            if direction == "BULLISH":
+                target = entry_price + risk_per_share * self.RR_RATIO
+            else:
+                target = entry_price - risk_per_share * self.RR_RATIO
         else:
-            stop_loss = entry_price + (atr * self.ATR_STOP_MULTIPLIER)
-            target    = entry_price - (atr * self.ATR_STOP_MULTIPLIER * self.RR_RATIO)
+            if atr <= 0:
+                return RiskDecision(approved=False, reason="ATR is zero — cannot size position")
+            if direction == "BULLISH":
+                stop_loss = entry_price - (atr * self.ATR_STOP_MULTIPLIER)
+                target    = entry_price + (atr * self.ATR_STOP_MULTIPLIER * self.RR_RATIO)
+            else:
+                stop_loss = entry_price + (atr * self.ATR_STOP_MULTIPLIER)
+                target    = entry_price - (atr * self.ATR_STOP_MULTIPLIER * self.RR_RATIO)
 
         risk_per_share = abs(entry_price - stop_loss)
 
