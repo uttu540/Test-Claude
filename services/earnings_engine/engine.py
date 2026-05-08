@@ -160,6 +160,32 @@ class EarningsSignalEngine:
                 log.info("earnings_engine.price_fading", symbol=symbol, gap_pct=round(gap_pct, 2))
                 return None
 
+        # ── Fundamental gate (only for BEAT — long-only mode) ────────────────
+        # Claude evaluates quarterly revenue + PAT quality from screener.in.
+        # Gate is fail-open: approves if screener.in / Claude unavailable.
+        fgate_flags: list[str] = []
+        fgate_reasoning: str   = ""
+        fgate_adj: int         = 0
+        if is_beat:
+            try:
+                from services.earnings_engine.fundamental_gate import evaluate_fundamental_gate
+                fgate = await evaluate_fundamental_gate(symbol, gap_pct, rvol)
+                fgate_flags    = fgate.red_flags
+                fgate_reasoning = fgate.reasoning
+                fgate_adj      = fgate.confidence_adj
+                if not fgate.approve:
+                    log.info(
+                        "earnings_engine.fundamental_gate_rejected",
+                        symbol    = symbol,
+                        gap_pct   = round(gap_pct, 2),
+                        red_flags = fgate.red_flags,
+                        reasoning = fgate.reasoning,
+                    )
+                    return None
+            except Exception as _fge:
+                log.warning("earnings_engine.fundamental_gate_error",
+                            symbol=symbol, error=str(_fge))
+
         # Confidence tier
         if is_beat:
             direction   = Direction.BULLISH
@@ -180,6 +206,10 @@ class EarningsSignalEngine:
             else:
                 confidence = CONFIDENCE_BASE
 
+        # Apply fundamental gate confidence adjustment (clamped to valid range)
+        if fgate_adj != 0:
+            confidence = max(0, min(100, confidence + fgate_adj))
+
         sig = Signal(
             trading_symbol  = symbol,
             timeframe       = "1day",
@@ -188,26 +218,35 @@ class EarningsSignalEngine:
             confidence      = confidence,
             price_at_signal = current_price,
             indicators      = {
-                "gap_pct":    round(gap_pct, 2),
-                "rvol":       round(rvol, 2),
-                "prev_close": prev_close,
-                "open":       open_price,
-                "orb_high":   orb_high,
-                "cum_volume": cum_volume,
-                "avg_volume": int(avg_volume),
-                "catalyst":   "EARNINGS",
+                "gap_pct":          round(gap_pct, 2),
+                "rvol":             round(rvol, 2),
+                "prev_close":       prev_close,
+                "open":             open_price,
+                "orb_high":         orb_high,
+                "cum_volume":       cum_volume,
+                "avg_volume":       int(avg_volume),
+                "catalyst":         "EARNINGS",
+                "fgate_adj":        fgate_adj,
+                "fgate_flags":      fgate_flags,
+                "fgate_reasoning":  fgate_reasoning,
             },
-            notes=f"Earnings {'beat' if is_beat else 'miss'}: gap {gap_pct:+.1f}%, RVOL {rvol:.1f}x",
+            notes=(
+                f"Earnings {'beat' if is_beat else 'miss'}: gap {gap_pct:+.1f}%, "
+                f"RVOL {rvol:.1f}x"
+                + (f" | Fundamental: {fgate_reasoning[:80]}" if fgate_reasoning else "")
+            ),
         )
 
         log.info(
             "earnings_engine.signal_found",
-            symbol     = symbol,
-            direction  = direction.value,
-            gap_pct    = round(gap_pct, 2),
-            rvol       = round(rvol, 2),
-            confidence = confidence,
-            orb_used   = orb_high is not None,
+            symbol         = symbol,
+            direction      = direction.value,
+            gap_pct        = round(gap_pct, 2),
+            rvol           = round(rvol, 2),
+            confidence     = confidence,
+            fgate_adj      = fgate_adj,
+            fgate_approved = not bool(fgate_flags and not is_beat),
+            orb_used       = orb_high is not None,
         )
         return sig
 
