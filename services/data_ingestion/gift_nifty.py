@@ -180,27 +180,76 @@ _NSE_BROWSER_HEADERS = {
 }
 
 
+def _nse_get(path: str, retries: int = 3) -> dict | list | None:
+    """
+    GET an NSE API endpoint with browser session + retry.
+    Hits the homepage first to obtain session cookies (NSE requires this).
+    Returns parsed JSON or None on all failures.
+    """
+    import httpx
+    import time
+
+    for attempt in range(retries):
+        try:
+            with httpx.Client(
+                headers=_NSE_BROWSER_HEADERS,
+                follow_redirects=True,
+                timeout=15,
+            ) as client:
+                client.get("https://www.nseindia.com")
+                time.sleep(0.4)
+                resp = client.get(f"https://www.nseindia.com{path}")
+
+            if resp.status_code == 200:
+                return resp.json()
+
+            log.debug("nse_api.non_200",
+                      path=path, status=resp.status_code, attempt=attempt + 1)
+        except Exception as e:
+            log.debug("nse_api.request_error",
+                      path=path, attempt=attempt + 1, error=str(e))
+
+        if attempt < retries - 1:
+            time.sleep(2 ** attempt)   # 1s, 2s back-off
+
+    log.warning("nse_api.all_attempts_failed", path=path)
+    return None
+
+
 async def fetch_fii_data() -> str | None:
     """
     Fetch previous day's FII/DII net equity activity from NSE.
-    Returns formatted string: "FII: Net Sell ₹341cr | DII: Net Buy ₹441cr"
-    or None on failure.
-    Source: https://www.nseindia.com/api/fiidiiTradeReact
+    Returns: "FII: Net Sell ₹341cr | DII: Net Buy ₹441cr" or None.
+    Cached in Redis for 2h — data doesn't change during the trading day.
     """
     import asyncio
-    return await asyncio.get_running_loop().run_in_executor(None, _fetch_fii_sync)
+
+    # Try Redis cache first
+    try:
+        from database.connection import get_redis
+        redis = get_redis()
+        cached = await redis.get("briefing:fii_data")
+        if cached:
+            return cached
+    except Exception:
+        pass
+
+    result = await asyncio.get_running_loop().run_in_executor(None, _fetch_fii_sync)
+
+    if result:
+        try:
+            await redis.setex("briefing:fii_data", 2 * 3600, result)
+        except Exception:
+            pass
+
+    return result
 
 
 def _fetch_fii_sync() -> str | None:
+    data = _nse_get("/api/fiidiiTradeReact")
+    if not data:
+        return None
     try:
-        import httpx, time
-        with httpx.Client(headers=_NSE_BROWSER_HEADERS, follow_redirects=True, timeout=15) as client:
-            client.get("https://www.nseindia.com")
-            time.sleep(0.3)
-            resp = client.get("https://www.nseindia.com/api/fiidiiTradeReact")
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
         parts = []
         for item in data:
             cat = item.get("category", "")
@@ -212,31 +261,44 @@ def _fetch_fii_sync() -> str | None:
         log.info("fii_data.fetched", result=result)
         return result
     except Exception as e:
-        log.warning("fii_data.fetch_failed", error=str(e))
+        log.warning("fii_data.parse_failed", error=str(e))
         return None
 
 
 async def fetch_advance_decline() -> str | None:
     """
-    Fetch Nifty 50 advance-decline ratio from NSE allIndices API.
-    Returns formatted string: "14A / 36D / 0U" or None on failure.
-    Source: https://www.nseindia.com/api/allIndices
+    Fetch Nifty 50 advance-decline ratio from NSE.
+    Returns: "14A / 36D / 0U" or None.
+    Cached in Redis for 10min — refreshes each briefing cycle.
     """
     import asyncio
-    return await asyncio.get_running_loop().run_in_executor(None, _fetch_adv_dec_sync)
+
+    try:
+        from database.connection import get_redis
+        redis = get_redis()
+        cached = await redis.get("briefing:adv_dec")
+        if cached:
+            return cached
+    except Exception:
+        pass
+
+    result = await asyncio.get_running_loop().run_in_executor(None, _fetch_adv_dec_sync)
+
+    if result:
+        try:
+            await redis.setex("briefing:adv_dec", 10 * 60, result)
+        except Exception:
+            pass
+
+    return result
 
 
 def _fetch_adv_dec_sync() -> str | None:
+    data = _nse_get("/api/allIndices")
+    if not data:
+        return None
     try:
-        import httpx, time
-        with httpx.Client(headers=_NSE_BROWSER_HEADERS, follow_redirects=True, timeout=15) as client:
-            client.get("https://www.nseindia.com")
-            time.sleep(0.3)
-            resp = client.get("https://www.nseindia.com/api/allIndices")
-        if resp.status_code != 200:
-            return None
-        items = resp.json().get("data", [])
-        for item in items:
+        for item in data.get("data", []):
             if item.get("index", "") == "NIFTY 50":
                 adv = item.get("advances", "?")
                 dec = item.get("declines", "?")
@@ -245,5 +307,5 @@ def _fetch_adv_dec_sync() -> str | None:
                 log.info("advance_decline.fetched", result=result)
                 return result
     except Exception as e:
-        log.warning("advance_decline.fetch_failed", error=str(e))
+        log.warning("advance_decline.parse_failed", error=str(e))
     return None

@@ -489,7 +489,8 @@ class EarningsSignalEngine:
             return None
 
         for candle in candles_15m:
-            ts = candle.get("timestamp") or candle.get("date")
+            # Buffer stores candles with "ts" key (both WS and preseed path)
+            ts = candle.get("ts") or candle.get("timestamp") or candle.get("date")
             if ts is None:
                 continue
             try:
@@ -497,6 +498,8 @@ class EarningsSignalEngine:
                     candle_dt = _dt.fromisoformat(ts).astimezone(IST)
                 elif hasattr(ts, "astimezone"):
                     candle_dt = ts.astimezone(IST)
+                elif hasattr(ts, "to_pydatetime"):
+                    candle_dt = ts.to_pydatetime().astimezone(IST)
                 else:
                     continue
                 if (candle_dt.date() == today

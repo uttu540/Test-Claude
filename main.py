@@ -1338,7 +1338,7 @@ async def job_watchdog() -> None:
     Critical jobs tracked:
       earnings_calendar  — window 08:00–09:14
       market_briefing    — window 09:10–09:59
-      earnings_scan      — window 09:30–10:30
+      earnings_scan      — window 09:31–10:30
       market_open_ping   — window 09:15–09:59
       orb_scan           — window 10:00–11:00
     """
@@ -1357,7 +1357,7 @@ async def job_watchdog() -> None:
     WATCHLIST = [
         ("earnings_calendar", job_fetch_earnings_calendar, (8,  0), (9, 14)),
         ("market_briefing",   job_market_open_briefing,    (9, 10), (9, 59)),
-        ("earnings_scan",     job_earnings_scan,            (9, 30), (10, 30)),
+        ("earnings_scan",     job_earnings_scan,            (9, 31), (10, 30)),
         ("market_open_ping",  job_market_open_ping,         (9, 15), (9, 59)),
         ("orb_scan",          job_orb_scan,                 (10, 0), (11,  0)),
     ]
@@ -1702,7 +1702,7 @@ async def main() -> None:
     scheduler.add_job(job_fetch_earnings_calendar, CronTrigger(day_of_week="0-4", hour=8, minute=0, timezone="Asia/Kolkata"))
     scheduler.add_job(job_daily_auth,          CronTrigger(day_of_week="0-4", hour=8,  minute=30, timezone="Asia/Kolkata"))
     scheduler.add_job(job_market_open_briefing, CronTrigger(day_of_week="0-4", hour=9, minute=10, timezone="Asia/Kolkata"))
-    scheduler.add_job(job_earnings_scan,        CronTrigger(day_of_week="0-4", hour=9, minute=30, timezone="Asia/Kolkata"))
+    scheduler.add_job(job_earnings_scan,        CronTrigger(day_of_week="0-4", hour=9, minute=31, timezone="Asia/Kolkata"))
     scheduler.add_job(job_market_open_ping,     CronTrigger(day_of_week="0-4", hour=9, minute=15, timezone="Asia/Kolkata"))
     scheduler.add_job(job_orb_scan,             CronTrigger(day_of_week="0-4", hour=10, minute=0, timezone="Asia/Kolkata"))
     scheduler.add_job(job_square_off_intraday,  CronTrigger(day_of_week="0-4", hour=15, minute=12, timezone="Asia/Kolkata"))
