@@ -166,3 +166,84 @@ def _fetch_vix_sync() -> float | None:
     except Exception as e:
         log.warning("india_vix.fetch_failed", error=str(e))
     return None
+
+
+_NSE_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept":          "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer":         "https://www.nseindia.com/",
+    "Connection":      "keep-alive",
+}
+
+
+async def fetch_fii_data() -> str | None:
+    """
+    Fetch previous day's FII/DII net equity activity from NSE.
+    Returns formatted string: "FII: Net Sell ₹341cr | DII: Net Buy ₹441cr"
+    or None on failure.
+    Source: https://www.nseindia.com/api/fiidiiTradeReact
+    """
+    import asyncio
+    return await asyncio.get_running_loop().run_in_executor(None, _fetch_fii_sync)
+
+
+def _fetch_fii_sync() -> str | None:
+    try:
+        import httpx, time
+        with httpx.Client(headers=_NSE_BROWSER_HEADERS, follow_redirects=True, timeout=15) as client:
+            client.get("https://www.nseindia.com")
+            time.sleep(0.3)
+            resp = client.get("https://www.nseindia.com/api/fiidiiTradeReact")
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        parts = []
+        for item in data:
+            cat = item.get("category", "")
+            net = float(item.get("netValue", 0))
+            label = "FII" if "FII" in cat.upper() else "DII"
+            sign  = "Net Buy" if net >= 0 else "Net Sell"
+            parts.append(f"{label}: {sign} ₹{abs(net):.0f}cr")
+        result = " | ".join(parts) if parts else None
+        log.info("fii_data.fetched", result=result)
+        return result
+    except Exception as e:
+        log.warning("fii_data.fetch_failed", error=str(e))
+        return None
+
+
+async def fetch_advance_decline() -> str | None:
+    """
+    Fetch Nifty 50 advance-decline ratio from NSE allIndices API.
+    Returns formatted string: "14A / 36D / 0U" or None on failure.
+    Source: https://www.nseindia.com/api/allIndices
+    """
+    import asyncio
+    return await asyncio.get_running_loop().run_in_executor(None, _fetch_adv_dec_sync)
+
+
+def _fetch_adv_dec_sync() -> str | None:
+    try:
+        import httpx, time
+        with httpx.Client(headers=_NSE_BROWSER_HEADERS, follow_redirects=True, timeout=15) as client:
+            client.get("https://www.nseindia.com")
+            time.sleep(0.3)
+            resp = client.get("https://www.nseindia.com/api/allIndices")
+        if resp.status_code != 200:
+            return None
+        items = resp.json().get("data", [])
+        for item in items:
+            if item.get("index", "") == "NIFTY 50":
+                adv = item.get("advances", "?")
+                dec = item.get("declines", "?")
+                unc = item.get("unchanged", "0")
+                result = f"{adv}A / {dec}D / {unc}U"
+                log.info("advance_decline.fetched", result=result)
+                return result
+    except Exception as e:
+        log.warning("advance_decline.fetch_failed", error=str(e))
+    return None

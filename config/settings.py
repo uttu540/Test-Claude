@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # ── Capital & Risk ────────────────────────────────────────────────────────
     total_capital: float = 100_000.0          # ₹1,00,000
     max_risk_per_trade_pct: float = 2.0       # Risk max 2% = ₹2,000 per trade
-    daily_loss_limit_pct: float = 2.0         # Halt if day loss > 2% = ₹2,000
+    daily_loss_limit_pct: float = 6.0         # Halt if day loss > 6% = ₹6,000 (3× max risk/trade)
     max_open_positions: int = 8
     max_position_size_pct: float = 15.0       # Max 15% in a single position
     max_aggregate_notional_pct: float = 95.0  # Total open notional cap as % of capital (prevents >100% deployment)

@@ -405,9 +405,9 @@ async def _run_signals(symbol: str) -> None:
 
         # ── Confluence gate ───────────────────────────────────────────────────
         # Port of _score_confluence from backtesting engine (5 factors, max 10).
-        # MIN_CONFLUENCE_SCORE lowered to 6 for paper trading observation.
-        # Raise back to 8 before going live.
-        _MIN_CONFLUENCE = 6
+        # Paper/dev: 4 — observe more setups, validate full trade flow.
+        # Live: 6 — tighter quality bar before real money.
+        _MIN_CONFLUENCE = 4 if settings.app_env.value in ("paper", "development") else 6
         _HQ_SIGNALS = {
             "BREAKOUT_HIGH",   "BREAKOUT_LOW",
             "DOUBLE_BOTTOM",   "DOUBLE_TOP",
@@ -755,11 +755,16 @@ async def job_market_open_briefing() -> None:
     from services.data_ingestion.gift_nifty import (
         fetch_gift_nifty_change,
         fetch_market_news_sentiment,
+        fetch_india_vix,
+        fetch_fii_data,
+        fetch_advance_decline,
     )
 
-    headlines: list[str] = []
-    gift_pct:   float | None = None
-    news_score: float | None = None
+    headlines:   list[str] = []
+    gift_pct:    float | None = None
+    news_score:  float | None = None
+    fii_str:     str | None = None
+    adv_dec_str: str | None = None
 
     try:
         news_service = get_news_service()
@@ -776,13 +781,24 @@ async def job_market_open_briefing() -> None:
     except Exception as e:
         log.warning("scheduler.briefing_news_error", error=str(e))
 
-    gift_pct, news_score = await asyncio.gather(
+    gift_pct, news_score, fii_str, adv_dec_str = await asyncio.gather(
         fetch_gift_nifty_change(),
         fetch_market_news_sentiment(hours=12),
+        fetch_fii_data(),
+        fetch_advance_decline(),
         return_exceptions=True,
     )
-    gift_pct   = gift_pct   if isinstance(gift_pct,   float) else None
-    news_score = news_score if isinstance(news_score, float) else None
+    gift_pct    = gift_pct    if isinstance(gift_pct,    float) else None
+    news_score  = news_score  if isinstance(news_score,  float) else None
+    fii_str     = fii_str     if isinstance(fii_str,     str)   else None
+    adv_dec_str = adv_dec_str if isinstance(adv_dec_str, str)   else None
+
+    # VIX fallback: if Redis tick unavailable (WebSocket not yet subscribed), use yfinance
+    if vix is None:
+        try:
+            vix = await fetch_india_vix()
+        except Exception:
+            pass
 
     # ── Re-publish regime with fresh GIFT Nifty + news data ──────────────────
     from sqlalchemy import text as _sql_text
@@ -818,6 +834,9 @@ async def job_market_open_briefing() -> None:
         vix              = vix,
         regime           = regime,
         news_headlines   = headlines,
+        advance_decline  = adv_dec_str or "N/A",
+        fii_activity     = fii_str     or "N/A",
+        top_movers       = [],
     )
 
     # If Claude detects a macro shock, override regime to HIGH_VOLATILITY
@@ -836,6 +855,8 @@ async def job_market_open_briefing() -> None:
         nifty_change_pct = round(nifty_change_pct, 2),
         gift_nifty_pct   = gift_pct,
         news_sentiment   = news_score,
+        fii_activity     = fii_str,
+        advance_decline  = adv_dec_str,
         headlines        = len(headlines),
     )
 
