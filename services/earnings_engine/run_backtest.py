@@ -189,6 +189,15 @@ def _print_report(
         )
     else:
         entry_label = f"Stop {engine.stop_mult}×ATR (gap-floor)"
+    if engine.slippage_entry_pct or engine.slippage_exit_pct or engine.commission_rt_pct:
+        cost_label = (
+            f"entry+{engine.slippage_entry_pct:.2f}%  "
+            f"exit-{engine.slippage_exit_pct:.2f}%  "
+            f"comm {engine.commission_rt_pct:.2f}% RT"
+        )
+    else:
+        cost_label = "no slippage (ideal)"
+
     console.print(
         f"  Criteria : gap {engine.min_gap_pct}–{engine.max_gap_pct}%  "
         f"RVOL ≥ {engine.min_rvol}× (scaled)  "
@@ -196,6 +205,7 @@ def _print_report(
         f"Target {engine.target_mult}×ATR  "
         f"MaxHold {engine.max_hold}d + trailing stop"
     )
+    console.print(f"  Cost model: {cost_label}")
     console.print()
 
     tbl = Table(show_header=True, header_style="bold cyan")
@@ -324,6 +334,14 @@ async def main() -> None:
                         help="Day 1 close must be in top X of Day 1 range (0=off, 0.5=above midpoint, 0.75=top quartile)")
     parser.add_argument("--day2-min-open", type=float, default=0.0,
                         help="Day 2 open must be ≥ X × Day 1 close (0=off, 0.99=no overnight fade)")
+    parser.add_argument("--slippage-entry", type=float, default=0.15,
+                        help="Entry slippage %% above open price (default 0.15)")
+    parser.add_argument("--slippage-exit",  type=float, default=0.10,
+                        help="Exit slippage %% worse than stop/target (default 0.10)")
+    parser.add_argument("--commission",     type=float, default=0.05,
+                        help="Round-trip commission %% (default 0.05)")
+    parser.add_argument("--no-slippage",    action="store_true",
+                        help="Disable slippage/commission model (ideal-world benchmark)")
     parser.add_argument("--output",       default=None)
     args = parser.parse_args()
 
@@ -341,6 +359,10 @@ async def main() -> None:
         console.print("[yellow]Fetching NSE announcement calendar (~4 min for 4yr)...[/yellow]")
         ann_dates = await _fetch_announcement_calendar(start_dt, end_dt)
 
+    slip_entry = 0.0 if args.no_slippage else args.slippage_entry
+    slip_exit  = 0.0 if args.no_slippage else args.slippage_exit
+    commission = 0.0 if args.no_slippage else args.commission
+
     engine = EarningsBacktestEngine(
         min_gap_pct        = args.min_gap,
         max_gap_pct        = args.max_gap,
@@ -352,6 +374,9 @@ async def main() -> None:
         day1_hold_pct      = args.day1_hold,
         day1_close_quality = args.day1_quality,
         day2_min_open      = args.day2_min_open,
+        slippage_entry_pct = slip_entry,
+        slippage_exit_pct  = slip_exit,
+        commission_rt_pct  = commission,
     )
 
     console.print(f"\n[cyan]Scanning {len(symbols)} symbols...[/cyan]")

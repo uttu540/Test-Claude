@@ -46,6 +46,15 @@ WARMUP_BARS      = 65     # need 60 for pre-trend check + 14 for ATR + buffer
 PRETREND_LOOKBACK = 60    # bars to look back for overextension check
 PRETREND_MAX_GAIN = 0.25  # skip if stock up >25% in prior 60 bars
 
+# ── Slippage / cost model ─────────────────────────────────────────────────────
+# NSE mid-cap realistic assumptions (Zerodha equity delivery):
+#   Entry: market order at open fills ~0.15% above open print (thin book at gap)
+#   Exit:  target/stop fills ~0.10% worse than modeled price
+#   Commission: ~0.05% round-trip (brokerage + STT + exchange fees + GST)
+SLIPPAGE_ENTRY_PCT  = 0.15   # % added to entry price
+SLIPPAGE_EXIT_PCT   = 0.10   # % worsening on exit (stop or target)
+COMMISSION_RT_PCT   = 0.05   # round-trip total transaction cost
+
 
 def _rvol_threshold(gap_pct: float) -> float:
     """RVOL minimum scales with gap size — large gaps on thin volume reverse."""
@@ -106,6 +115,9 @@ class EarningsBacktestEngine:
         day1_hold_pct:      float = 0.97,   # Day 1 close must be ≥ this × open to qualify
         day1_close_quality: float = 0.0,    # Day 1 close must be in top X of range (0=off, 0.5=above midpoint)
         day2_min_open:      float = 0.0,    # Day 2 open must be ≥ this × Day 1 close (0=off, 0.99=no fade)
+        slippage_entry_pct: float = SLIPPAGE_ENTRY_PCT,
+        slippage_exit_pct:  float = SLIPPAGE_EXIT_PCT,
+        commission_rt_pct:  float = COMMISSION_RT_PCT,
     ) -> None:
         self.min_gap_pct        = min_gap_pct
         self.max_gap_pct        = max_gap_pct
@@ -117,6 +129,9 @@ class EarningsBacktestEngine:
         self.day1_close_quality = day1_close_quality
         self.day2_min_open      = day2_min_open
         self.max_hold           = max_hold
+        self.slippage_entry_pct = slippage_entry_pct
+        self.slippage_exit_pct  = slippage_exit_pct
+        self.commission_rt_pct  = commission_rt_pct
 
     def run(
         self,
@@ -270,6 +285,11 @@ class EarningsBacktestEngine:
                 target    = round(entry + self.target_mult * atr, 2)
                 scan_start = 1
 
+            # ── Apply entry slippage ──────────────────────────────────────────
+            # Market order at open fills above the print on high-RVOL gap days.
+            raw_entry = entry
+            entry = round(entry * (1 + self.slippage_entry_pct / 100), 2)
+
             # 1:1 level — activate trailing stop when price hits entry + 1R
             one_r = round(entry + self.stop_mult * atr, 2)
 
@@ -296,22 +316,29 @@ class EarningsBacktestEngine:
                         current_stop = trail_from_high
 
                 if f_low <= current_stop:
-                    exit_price  = current_stop
+                    # Stop fills worse than modeled (gaps through stop level)
+                    exit_price  = round(current_stop * (1 - self.slippage_exit_pct / 100), 2)
                     exit_reason = "STOP"
                     exit_day    = j
                     break
                 if f_high >= target:
-                    exit_price  = target
+                    # Target limit order fills slightly below target
+                    exit_price  = round(target * (1 - self.slippage_exit_pct / 100), 2)
                     exit_reason = "TARGET"
                     exit_day    = j
                     break
 
             if exit_price is None:
                 end_idx    = min(i + self.max_hold, len(df) - 1)
-                exit_price = float(df.iloc[end_idx]["close"])
+                # MAX_HOLD exit is a market sell — apply exit slippage
+                exit_price = round(
+                    float(df.iloc[end_idx]["close"]) * (1 - self.slippage_exit_pct / 100), 2
+                )
                 exit_day   = end_idx - i
 
-            pnl_pct = (exit_price - entry) / entry * 100
+            # P&L after slippage and round-trip commission
+            gross_pnl_pct = (exit_price - entry) / entry * 100
+            pnl_pct = gross_pnl_pct - self.commission_rt_pct
 
             trades.append(EarningsBacktestTrade(
                 symbol       = symbol,
