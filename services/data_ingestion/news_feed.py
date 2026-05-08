@@ -104,17 +104,21 @@ class NewsFeedService:
 
         total_stored = 0
         for batch in batches:
-            stored = await self._fetch_batch(batch)
+            stored, rate_limited = await self._fetch_batch(batch)
             total_stored += stored
+            if rate_limited:
+                # Stop entire cycle — no point hammering remaining batches
+                log.warning("news_feed.rate_limited_abort", batches_remaining=len(batches))
+                break
             await asyncio.sleep(1)   # Small delay between API calls
 
         log.info("news_feed.cycle_complete", articles_stored=total_stored)
 
-    async def _fetch_batch(self, symbols: list[str]) -> int:
+    async def _fetch_batch(self, symbols: list[str]) -> tuple[int, bool]:
         """
         Fetch news for a batch of symbols.
         Builds an OR query from company names for better recall.
-        Returns number of new articles stored.
+        Returns (articles_stored, rate_limited).
         """
         # Build query: "Reliance Industries" OR "HDFC Bank" OR ...
         # Use first 3 words of company name to keep URL short
@@ -151,16 +155,17 @@ class NewsFeedService:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 log.warning("news_feed.rate_limited", retry_after="15min")
+                return 0, True   # Signal rate-limit to caller so it aborts the cycle
             else:
                 log.error("news_feed.http_error", status=e.response.status_code, error=str(e))
-            return 0
+            return 0, False
         except Exception as e:
             log.error("news_feed.fetch_error", error=str(e))
-            return 0
+            return 0, False
 
         articles = data.get("articles", [])
         if not articles:
-            return 0
+            return 0, False
 
         stored = 0
         for article in articles:
@@ -172,7 +177,7 @@ class NewsFeedService:
             if await self._store_article(article, matched_symbol):
                 stored += 1
 
-        return stored
+        return stored, False
 
     def _match_symbol(self, text: str, symbols: list[str]) -> str | None:
         """

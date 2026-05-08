@@ -41,8 +41,10 @@ MIN_DAILY_BARS = 60
 #   TRENDING_DOWN → require RS ≥ 8% vs Nifty 20d ROC (genuine sector leaders only)
 _RS_THRESHOLD = {
     "TRENDING_DOWN": 8.0,
+    # RANGING: no RS gate in paper mode — observing all setups
+    # Restore RANGING block before going live (23% WR in backtest)
 }
-_REGIME_BLOCKED = {"RANGING"}
+_REGIME_BLOCKED: set[str] = set()   # RANGING unblocked for paper observation
 
 
 class MomentumLiveEngine:
@@ -74,7 +76,7 @@ class MomentumLiveEngine:
             relative strength vs Nifty (sector rotation filter)
         """
         if len(daily_df) < MIN_DAILY_BARS:
-            log.debug("momentum_live.insufficient_bars", symbol=symbol, bars=len(daily_df))
+            log.info("momentum_live.insufficient_bars", symbol=symbol, bars=len(daily_df), required=MIN_DAILY_BARS)
             return []
 
         # ── Gate 1: Regime filter ─────────────────────────────────────────────
@@ -83,7 +85,7 @@ class MomentumLiveEngine:
         # TRENDING_DOWN: only fire if stock has strong relative strength (RS ≥ 8%)
         #   — these are genuine sector rotation leaders (defense, sugar etc.)
         if regime in _REGIME_BLOCKED:
-            log.debug("momentum_live.regime_blocked", symbol=symbol, regime=regime)
+            log.info("momentum_live.regime_blocked", symbol=symbol, regime=regime)
             return []
 
         rs_threshold = _RS_THRESHOLD.get(regime)  # None = TRENDING_UP / UNKNOWN
@@ -106,7 +108,7 @@ class MomentumLiveEngine:
 
             relative_strength = stock_roc20 - nifty_roc20
             if relative_strength < rs_threshold:
-                log.debug(
+                log.info(
                     "momentum_live.rs_skip",
                     symbol=symbol, regime=regime,
                     stock_roc20=round(stock_roc20, 1),
@@ -120,6 +122,7 @@ class MomentumLiveEngine:
         cooldown_key = f"momentum_live:fired:{symbol}:{date.today().isoformat()}"
         already_fired = await redis.get(cooldown_key)
         if already_fired:
+            log.info("momentum_live.cooldown_skip", symbol=symbol)
             return []
 
         # compute_all() mirrors what MomentumBacktestEngine does before calling detect()

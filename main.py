@@ -134,17 +134,22 @@ def on_candle_complete(candle: OHLCVCandle) -> None:
     })
 
     buf_len = len(_candle_buffer[sym][tf])
-    # Only print 15min candles — 1min would flood the terminal (50 symbols × 1/min)
+    # Only print/log 15min candles — 1min would flood the terminal (50 symbols × 1/min)
     if tf == "15min":
         print(f"[{datetime.now().strftime('%H:%M:%S')}] candle.closed_15min  {sym}  bars={buf_len}  close={candle.close:.2f}", flush=True)
+        log.info("candle.closed_15min", symbol=sym, bars=buf_len, close=candle.close, tf=tf)
 
     # Run signal detection on the 15min candle close
     # (avoids running on every 1min candle — too noisy)
     # Guard: skip if a signal task is already running for this symbol
     if tf == "15min" and sym not in _active_signal_tasks:
-        task = asyncio.create_task(_run_signals(sym))
-        _active_signal_tasks.add(sym)
-        task.add_done_callback(lambda _: _active_signal_tasks.discard(sym))
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(_run_signals(sym))
+            _active_signal_tasks.add(sym)
+            task.add_done_callback(lambda _: _active_signal_tasks.discard(sym))
+        except RuntimeError as e:
+            log.error("candle.create_task_failed", symbol=sym, error=str(e))
 
 
 async def _run_signals(symbol: str) -> None:
@@ -166,8 +171,10 @@ async def _run_signals(symbol: str) -> None:
     if sem is not None:
         await sem.acquire()
     try:
+        log.info("signal.eval_start", symbol=symbol)
         from config.market_hours import is_market_open
         if not is_market_open():
+            log.info("signal.market_closed", symbol=symbol)
             return
 
         # Check for macro shock override (set by morning briefing)
@@ -201,7 +208,9 @@ async def _run_signals(symbol: str) -> None:
                 ohlcv_by_tf[tf] = pd.DataFrame(list(candles)).set_index("ts")
 
         if not ohlcv_by_tf:
-            log.debug("signal.no_buffer", symbol=symbol)
+            log.info("signal.no_buffer", symbol=symbol,
+                     buffer_tfs=list(_candle_buffer.get(symbol, {}).keys()),
+                     buffer_lens={tf: len(b) for tf, b in _candle_buffer.get(symbol, {}).items()})
             return
 
         # Update market regime when the daily candle closes (EOD only).
@@ -316,6 +325,20 @@ async def _run_signals(symbol: str) -> None:
                 redis    = redis,
             )
 
+        # ── Earnings catalyst engine (runs in parallel with momentum) ─────────
+        # Checks if this symbol reported results recently.
+        # Earnings signals bypass regime gates — the catalyst IS the regime override.
+        try:
+            earnings_recent_raw = await redis.get("earnings:recent_symbols")
+            earnings_recent: list[str] = json.loads(earnings_recent_raw) if earnings_recent_raw else []
+            if symbol in earnings_recent:
+                from services.earnings_engine.engine import EarningsSignalEngine
+                earnings_sig = await EarningsSignalEngine().check_symbol(symbol, _candle_buffer, redis)
+                if earnings_sig:
+                    signals.append(earnings_sig)
+        except Exception as _e:
+            log.warning("earnings_engine.check_error", symbol=symbol, error=str(_e))
+
         # Long-only: short-side code preserved but disabled from paper/live
         signals = [s for s in signals if s.direction.value == "BULLISH"]
 
@@ -340,7 +363,9 @@ async def _run_signals(symbol: str) -> None:
         # the pipeline for a given (symbol, signal_type) on the daily TF, mark it
         # as evaluated for today. Subsequent candle closes skip it.
         # 15min signals are NOT deduplicated — each candle is genuinely new data.
-        if top.timeframe == "1day":
+        # EARNINGS_BEAT/MISS signals use their own earnings:fired cooldown key instead.
+        _earnings_signal = top.signal_type.value in ("EARNINGS_BEAT", "EARNINGS_MISS")
+        if top.timeframe == "1day" and not _earnings_signal:
             dedup_key = f"signal:daily_evaluated:{symbol}:{top.signal_type.value}"
             if await redis.get(dedup_key):
                 log.debug(
@@ -380,8 +405,9 @@ async def _run_signals(symbol: str) -> None:
 
         # ── Confluence gate ───────────────────────────────────────────────────
         # Port of _score_confluence from backtesting engine (5 factors, max 10).
-        # MIN_CONFLUENCE_SCORE = 8: score_8 → 50% WR; score_9 over-filters.
-        _MIN_CONFLUENCE = 8
+        # MIN_CONFLUENCE_SCORE lowered to 6 for paper trading observation.
+        # Raise back to 8 before going live.
+        _MIN_CONFLUENCE = 6
         _HQ_SIGNALS = {
             "BREAKOUT_HIGH",   "BREAKOUT_LOW",
             "DOUBLE_BOTTOM",   "DOUBLE_TOP",
@@ -391,6 +417,7 @@ async def _run_signals(symbol: str) -> None:
             "BULL_FLAG",       "BEAR_FLAG",
             "KEY_LEVEL_BOUNCE",               # structural reversal — high quality
             "OPENING_DRIVE",                  # gap + strong first candle — clean setup
+            "EARNINGS_BEAT",                  # fundamental catalyst — always high quality
         }
         _ind  = top.indicators if hasattr(top, "indicators") and top.indicators else {}
         _bull = top.direction.value == "BULLISH"
@@ -529,15 +556,18 @@ async def _run_signals(symbol: str) -> None:
                 )
 
         # Execute if above confidence threshold → RiskEngine → Claude → broker
-        confidence_threshold = cfg.get("confidence_threshold", 75)
+        confidence_threshold = cfg.get("confidence_threshold", 65)
         if top.confidence >= confidence_threshold:
             executor = TradeExecutor()
             trade = await executor.execute(top)
-            # Set momentum cooldown ONLY after a trade actually opened —
-            # not before, so risk/AI rejections don't block the symbol tomorrow.
+            # Set cooldown ONLY after a trade actually opened.
             if trade is not None and top.timeframe == "1day":
-                cooldown_key = f"momentum:cooldown:{symbol}"
-                await redis.setex(cooldown_key, 86_400, "1")
+                if top.signal_type.value in ("EARNINGS_BEAT", "EARNINGS_MISS"):
+                    # 72h cooldown — same earnings event shouldn't re-fire next morning
+                    await redis.setex(f"earnings:fired:{symbol}", 72 * 3600, "1")
+                else:
+                    cooldown_key = f"momentum:cooldown:{symbol}"
+                    await redis.setex(cooldown_key, 86_400, "1")
         else:
             log.info(
                 "signal.below_threshold",
@@ -601,6 +631,92 @@ async def job_daily_auth(retry_count: int = 0) -> None:
                 f"Manual login required. Last error: {e}",
             )
             log.error("scheduler.auth_exhausted", attempts=MAX_RETRIES + 1)
+
+
+async def job_fetch_earnings_calendar() -> None:
+    """
+    8:00 AM IST — Fetch today's NSE earnings announcements and cache in Redis.
+    Runs before auth so the list is ready when the market opens.
+    Also invalidates the recent_symbols cache so it rebuilds with fresh data.
+    """
+    from config.market_hours import is_trading_day
+    if not is_trading_day():
+        return
+    try:
+        from services.earnings_engine.announcements import (
+            fetch_results_for_date,
+            invalidate_recent_cache,
+            get_recent_results_symbols,
+            check_fetch_failures,
+        )
+        from datetime import date as _date
+        today = _date.today()
+        today_symbols = await fetch_results_for_date(today)
+        await invalidate_recent_cache()
+        all_recent = await get_recent_results_symbols(lookback_days=3)
+        log.info(
+            "scheduler.earnings_calendar_fetched",
+            today=len(today_symbols),
+            recent_3d=len(all_recent),
+            today_symbols=today_symbols[:10],
+        )
+        notifier = get_notifier()
+        if await check_fetch_failures(today):
+            log.warning("scheduler.earnings_fetch_failed_alert", date=str(today))
+            await notifier._send(
+                f"⚠️ *Earnings fetch FAILED* for {today}\n"
+                "NSE API returned empty/error. Earnings signals may be unreliable today.",
+                parse_mode="Markdown",
+            )
+        elif today_symbols:
+            syms_str = ", ".join(today_symbols[:15])
+            await notifier._send(
+                f"📊 *Earnings Today ({len(today_symbols)} stocks)*\n`{syms_str}`",
+                parse_mode="Markdown",
+            )
+        await _mark_job_done("earnings_calendar")
+    except Exception as e:
+        log.error("scheduler.earnings_calendar_error", error=str(e))
+
+
+async def job_earnings_scan() -> None:
+    """
+    9:30 AM IST — Bulk scan all stocks with recent earnings for gap-and-go signals.
+    Fires 15 minutes after open so the gap is confirmed (not just pre-open noise).
+    """
+    from config.market_hours import is_trading_day
+    if not is_trading_day():
+        return
+    try:
+        from services.earnings_engine.engine import EarningsSignalEngine
+        from services.execution.trade_executor import TradeExecutor
+
+        redis = get_redis()
+        engine = EarningsSignalEngine()
+        signals = await engine.scan_all(_candle_buffer, redis)
+
+        if not signals:
+            log.info("scheduler.earnings_scan_no_signals")
+            return
+
+        # Long-only filter (same as main pipeline)
+        signals = [s for s in signals if s.direction.value == "BULLISH"]
+        log.info("scheduler.earnings_scan_signals", count=len(signals),
+                 symbols=[s.trading_symbol for s in signals])
+
+        executor = TradeExecutor()
+        for sig in signals:
+            try:
+                trade = await executor.execute(sig)
+                if trade:
+                    # 72h cooldown — per-candle check won't re-fire on same earnings event
+                    await redis.setex(f"earnings:fired:{sig.trading_symbol}", 72 * 3600, "1")
+            except Exception as e:
+                log.warning("scheduler.earnings_execute_error",
+                            symbol=sig.trading_symbol, error=str(e))
+        await _mark_job_done("earnings_scan")
+    except Exception as e:
+        log.error("scheduler.earnings_scan_error", error=str(e))
 
 
 async def job_market_open_briefing() -> None:
@@ -728,6 +844,7 @@ async def job_market_open_briefing() -> None:
         vix      = vix,
         briefing = briefing,
     )
+    await _mark_job_done("market_briefing")
 
 
 async def job_orb_scan() -> list:
@@ -765,7 +882,7 @@ async def job_orb_scan() -> list:
     log.info("orb_scan.start", symbols=len(symbols))
     import asyncio as _asyncio
     import functools as _functools
-    signals = await _asyncio.get_event_loop().run_in_executor(
+    signals = await _asyncio.get_running_loop().run_in_executor(
         None, _functools.partial(scan_orb_signals, _candle_buffer, symbols, today)
     )
 
@@ -806,6 +923,7 @@ async def job_orb_scan() -> list:
         except Exception as e:
             log.warning("orb_scan.execute_error", symbol=sig.trading_symbol, error=str(e))
 
+    await _mark_job_done("orb_scan")
     return signals
 
 
@@ -843,16 +961,22 @@ async def job_market_open_ping() -> None:
             if lp is None or prev_close is None:
                 try:
                     import yfinance as yf
-                    hist = await _asyncio.get_event_loop().run_in_executor(
+                    _ticker_sym = yf_ticker  # capture for lambda
+                    hist = await _asyncio.get_running_loop().run_in_executor(
                         None,
-                        lambda: yf.download(yf_ticker, period="2d", interval="1d",
-                                            progress=False, auto_adjust=True),
+                        lambda: yf.Ticker(_ticker_sym).history(
+                            period="5d", interval="1d", auto_adjust=True
+                        ),
                     )
                     if hist is not None and len(hist) >= 2:
                         prev_close = float(hist["Close"].iloc[-2])
                         lp         = float(hist["Close"].iloc[-1])
-                except Exception:
-                    pass
+                    elif hist is not None and len(hist) == 1:
+                        lp         = float(hist["Close"].iloc[-1])
+                        prev_close = lp   # no yesterday data, show flat
+                except Exception as _yf_err:
+                    log.warning("scheduler.market_open_ping_yfinance_error",
+                                symbol=symbol, error=str(_yf_err))
 
             return lp, prev_close
 
@@ -877,6 +1001,7 @@ async def job_market_open_ping() -> None:
         notifier = get_notifier()
         await notifier._send("\n".join(lines), parse_mode="Markdown")
         log.info("scheduler.market_open_ping_sent")
+        await _mark_job_done("market_open_ping")
     except Exception as e:
         log.error("scheduler.market_open_ping_failed", error=str(e), exc_info=True)
 
@@ -1059,7 +1184,7 @@ async def _preseed_candle_buffer() -> None:
                         FROM ohlcv
                         WHERE trading_symbol = :sym AND timeframe = '1day'
                         ORDER BY ts DESC
-                        LIMIT 50
+                        LIMIT 100
                     """),
                     {"sym": symbol},
                 )
@@ -1095,7 +1220,7 @@ async def _preseed_candle_buffer() -> None:
       try:
         import yfinance as yf
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         seeded_15min = 0
         bars_per_symbol_15min = 0
 
@@ -1162,6 +1287,75 @@ async def _preseed_candle_buffer() -> None:
         log.warning("startup.candle_buffer_15min_preseed_error", error=str(e))
 
     asyncio.create_task(_preseed_15min_bg())
+
+
+async def _mark_job_done(job_name: str) -> None:
+    """
+    Set Redis flag indicating `job_name` completed successfully today.
+    TTL = seconds until midnight IST — flag auto-expires, no manual reset needed.
+    Key: job:done:{job_name}:{YYYY-MM-DD}
+    """
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+    now = _dt.now(IST)
+    midnight = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    ttl = max(60, int((midnight - now).total_seconds()))
+    redis = get_redis()
+    await redis.setex(f"job:done:{job_name}:{now.date().isoformat()}", ttl, "1")
+    log.info("watchdog.job_flagged_done", job=job_name, ttl_sec=ttl)
+
+
+async def job_watchdog() -> None:
+    """
+    Runs every 5 min (7:45–11:00 AM IST, weekdays).
+    Checks if each critical morning job completed today.
+    If flag missing AND current time is within the job's retry window → reruns it.
+
+    Redis flags: job:done:{job_name}:{YYYY-MM-DD}  (TTL auto-expires at midnight)
+
+    Critical jobs tracked:
+      earnings_calendar  — window 08:00–09:14
+      market_briefing    — window 09:10–09:59
+      earnings_scan      — window 09:30–10:30
+      market_open_ping   — window 09:15–09:59
+      orb_scan           — window 10:00–11:00
+    """
+    from config.market_hours import is_trading_day
+    if not is_trading_day():
+        return
+
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+    now  = _dt.now(IST)
+    today = now.date().isoformat()
+    redis = get_redis()
+
+    # (flag_name, job_fn, retry_window_start_hhmm, retry_window_end_hhmm)
+    WATCHLIST = [
+        ("earnings_calendar", job_fetch_earnings_calendar, (8,  0), (9, 14)),
+        ("market_briefing",   job_market_open_briefing,    (9, 10), (9, 59)),
+        ("earnings_scan",     job_earnings_scan,            (9, 30), (10, 30)),
+        ("market_open_ping",  job_market_open_ping,         (9, 15), (9, 59)),
+        ("orb_scan",          job_orb_scan,                 (10, 0), (11,  0)),
+    ]
+
+    for flag_name, job_fn, (wh, wm), (eh, em) in WATCHLIST:
+        key = f"job:done:{flag_name}:{today}"
+        if await redis.get(key):
+            continue  # already ran — skip
+
+        window_start = now.replace(hour=wh, minute=wm, second=0, microsecond=0)
+        window_end   = now.replace(hour=eh, minute=em, second=0, microsecond=0)
+
+        if window_start <= now <= window_end:
+            log.warning("watchdog.rerunning_missed_job", job=flag_name,
+                        time=now.strftime("%H:%M:%S"))
+            try:
+                await job_fn()
+            except Exception as e:
+                log.error("watchdog.rerun_error", job=flag_name, error=str(e))
 
 
 async def job_status_heartbeat() -> None:
@@ -1426,6 +1620,22 @@ async def startup() -> None:
 
     log.info("startup.complete", env=settings.app_env.value)
 
+    # ── Startup Telegram notification ─────────────────────────────────────────
+    # Fires after all services are ready.  Useful when launchd starts the bot
+    # in the background (no Terminal window) — confirms it actually launched.
+    try:
+        from datetime import timezone as _tz
+        _now = datetime.now(tz=_tz.utc).astimezone()
+        _env_label = settings.app_env.value.upper()
+        _startup_msg = (
+            f"🚀 *Bot started — {_env_label}*\n"
+            f"Time: `{_now.strftime('%Y-%m-%d %H:%M:%S %Z')}`\n"
+            f"All services ready. Market opens at 09:15 IST."
+        )
+        await get_notifier()._send(_startup_msg, parse_mode="Markdown")
+    except Exception as _tg_err:
+        log.warning("startup.telegram_notification_failed", error=str(_tg_err))
+
 
 async def shutdown(scheduler: AsyncIOScheduler) -> None:
     """Graceful shutdown."""
@@ -1468,8 +1678,10 @@ async def main() -> None:
     _scheduler = scheduler
 
     # Weekdays only (Mon=0 … Fri=4)
+    scheduler.add_job(job_fetch_earnings_calendar, CronTrigger(day_of_week="0-4", hour=8, minute=0, timezone="Asia/Kolkata"))
     scheduler.add_job(job_daily_auth,          CronTrigger(day_of_week="0-4", hour=8,  minute=30, timezone="Asia/Kolkata"))
     scheduler.add_job(job_market_open_briefing, CronTrigger(day_of_week="0-4", hour=9, minute=10, timezone="Asia/Kolkata"))
+    scheduler.add_job(job_earnings_scan,        CronTrigger(day_of_week="0-4", hour=9, minute=30, timezone="Asia/Kolkata"))
     scheduler.add_job(job_market_open_ping,     CronTrigger(day_of_week="0-4", hour=9, minute=15, timezone="Asia/Kolkata"))
     scheduler.add_job(job_orb_scan,             CronTrigger(day_of_week="0-4", hour=10, minute=0, timezone="Asia/Kolkata"))
     scheduler.add_job(job_square_off_intraday,  CronTrigger(day_of_week="0-4", hour=15, minute=12, timezone="Asia/Kolkata"))
@@ -1478,6 +1690,8 @@ async def main() -> None:
     scheduler.add_job(job_db_backup,            CronTrigger(day_of_week="0-4", hour=16, minute=45, timezone="Asia/Kolkata"))
     # Paper/dev only: status heartbeat every 5 minutes
     scheduler.add_job(job_status_heartbeat,     CronTrigger(minute="*/5"))
+    # Watchdog: reruns missed morning jobs if network blip caused them to be skipped
+    scheduler.add_job(job_watchdog, CronTrigger(day_of_week="0-4", hour="7-10", minute="*/5", timezone="Asia/Kolkata"))
     # Session regime evaluation at 9:45 and 10:15 AM
     scheduler.add_job(
         job_session_regime,

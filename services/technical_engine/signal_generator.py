@@ -80,6 +80,9 @@ class SignalType(str, Enum):
     VOLUME_THRUST      = "VOLUME_THRUST"       # 3× avg vol on strong bullish candle
     EMA_RIBBON         = "EMA_RIBBON"          # EMA 8/21/50 fanning upward — trend acceleration
     BULL_MOMENTUM      = "BULL_MOMENTUM"       # ADX >30 + RSI 60-72 + EMA stack = continuation
+    # Fundamental catalyst signals
+    EARNINGS_BEAT      = "EARNINGS_BEAT"       # Gap up + RVOL surge on results day / post-results
+    EARNINGS_MISS      = "EARNINGS_MISS"       # Gap down + RVOL surge on results day
 
 
 @dataclass

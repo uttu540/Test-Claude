@@ -178,6 +178,10 @@ class ZerodhaFeed:
         self._ticker: KiteTicker | None = None
         self._running = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._refreshing = False   # guard: prevents concurrent restart fan-out
+        # token_int → trading_symbol lookup (populated in start())
+        # Zerodha WebSocket sends instrument_token but NOT tradingsymbol
+        self._token_symbol_map: dict[int, str] = {}
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -189,6 +193,19 @@ class ZerodhaFeed:
             raise RuntimeError("Kite access token missing. Run `make dev` after authentication.")
 
         self._ticker = KiteTicker(settings.kite_api_key, access_token)
+
+        # Build token → symbol reverse-map from kite:token_map (symbol → token)
+        # Zerodha WebSocket sends instrument_token only; tradingsymbol is not in ticks.
+        token_map_raw = await redis.get("kite:token_map")
+        if token_map_raw:
+            sym_to_token: dict[str, int] = json.loads(token_map_raw)
+            self._token_symbol_map = {v: k for k, v in sym_to_token.items()}
+            log.info("zerodha_feed.token_map_loaded", symbols=len(self._token_symbol_map))
+        else:
+            # Fallback: build from INDEX_INSTRUMENTS
+            self._token_symbol_map = {token: sym for sym, _, token in INDEX_INSTRUMENTS}
+            log.warning("zerodha_feed.token_map_missing",
+                        msg="kite:token_map not in Redis; only index symbols will resolve")
 
         # Fetch instrument tokens from Redis (populated by historical_seed)
         token_json = await redis.get("kite:instrument_tokens")
@@ -255,6 +272,8 @@ class ZerodhaFeed:
     def _schedule_token_refresh(self) -> None:
         """Schedule a feed restart with fresh token — called from ticker thread."""
         import asyncio
+        if self._refreshing:
+            return   # already restarting — drop duplicate callbacks
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(
                 lambda: asyncio.ensure_future(self._restart_with_fresh_token())
@@ -264,26 +283,42 @@ class ZerodhaFeed:
 
     async def _restart_with_fresh_token(self) -> None:
         """Stop current ticker, re-read token from Redis, reconnect."""
+        if self._refreshing:
+            return   # guard against concurrent restarts
+        self._refreshing = True
         log.info("zerodha_feed.token_refresh", status="restarting")
         try:
             if self._ticker:
                 self._ticker.close()
         except Exception:
             pass
-        await asyncio.sleep(2)
-        await self.start()
-
-    @staticmethod
-    def _normalise_tick(raw: dict) -> Tick | None:
-        """Convert Kite raw tick dict to our normalised Tick dataclass."""
+        await asyncio.sleep(5)   # give auth job time to store fresh token
         try:
+            await self.start()
+        finally:
+            self._refreshing = False
+
+    def _normalise_tick(self, raw: dict) -> Tick | None:
+        """Convert Kite raw tick dict to our normalised Tick dataclass.
+
+        Zerodha WebSocket ticks include instrument_token but NOT tradingsymbol.
+        We resolve symbol from self._token_symbol_map (built at start() from Redis).
+        Ticks with unresolvable tokens are silently skipped.
+        """
+        try:
+            token = raw["instrument_token"]
+            # Prefer the field if Kite ever includes it; fall back to our map
+            symbol = raw.get("tradingsymbol") or self._token_symbol_map.get(token, "")
+            if not symbol:
+                return None   # Unknown token — skip rather than pollute buffer with ""
+
             prev_close = raw.get("ohlc", {}).get("close", 0) or 1
             last = raw.get("last_price", 0)
             change = ((last - prev_close) / prev_close) * 100 if prev_close else 0
 
             return Tick(
-                instrument_token = raw["instrument_token"],
-                trading_symbol   = raw.get("tradingsymbol", ""),
+                instrument_token = token,
+                trading_symbol   = symbol,
                 last_price       = float(last),
                 volume           = int(raw.get("volume_traded", 0)),
                 buy_quantity     = int(raw.get("total_buy_quantity", 0)),
@@ -322,7 +357,7 @@ class MockFeed:
         self._running = False
 
     async def start(self) -> None:
-        self._seed_prices = await asyncio.get_event_loop().run_in_executor(
+        self._seed_prices = await asyncio.get_running_loop().run_in_executor(
             None, self._fetch_prices_yfinance
         )
         self._prices  = dict(self._seed_prices)

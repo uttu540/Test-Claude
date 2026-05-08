@@ -339,6 +339,71 @@ RANGING market + BREAKOUT_HIGH signal → blocked by filter → Claude never cal
 
 ---
 
+## D-027 — Earnings signals bypass regime gate; catalyst IS the regime
+
+**Decision:** `EARNINGS_BEAT` and `EARNINGS_MISS` signals are not filtered by `market:regime`. They skip the `HIGH_VOLATILITY` regime block, the RANGING block, and the TRENDING_DOWN RS gate.
+
+**Reasoning:**
+- A stock reporting strong quarterly results and gapping up 3–5% with 2× volume is its own micro-regime event. The broader Nifty trend is secondary to the stock-specific catalyst.
+- Regime gates exist to prevent fighting macro direction. An earnings beat is a fundamental catalyst that overrides macro direction — even in a TRENDING_DOWN market, a stock beating estimates by 30% and gapping up with RVOL ≥ 1.5× is a legitimate long entry.
+- India VIX > 20 remains a hard block (genuine systemic risk). A single earnings gap does not change systemic conditions.
+
+**Implementation:** In `_run_signals()`, earnings check runs after the `HIGH_VOLATILITY` block but ignores all other regime filters. `EARNINGS_BEAT` is in `_HQ_SIGNALS` so it receives full confluence scoring.
+
+**Trade-off accepted:** A stock can gap up on earnings and still be in a sector that's being sold off. The 99%-of-open price hold filter (`current_price >= open * 0.99`) partially mitigates this — if the gap is fading, no signal is emitted.
+
+---
+
+## D-028 — Zerodha WebSocket sends token only; reverse map required at startup
+
+**Decision:** `ZerodhaFeed` builds a `dict[int, str]` reverse token→symbol map at `start()` from the `kite:token_map` Redis key (populated by `ZerodhaAuthenticator._fetch_and_cache_instruments()`). `_normalise_tick()` uses this map to resolve symbol from `instrument_token`.
+
+**Reasoning:**
+- Zerodha's KiteTicker WebSocket protocol does not include `tradingsymbol` in tick payloads. Every tick only carries `instrument_token` (an integer). Without the reverse map, all ticks produce `trading_symbol = ""`, silently poisoning the candle buffer with empty-string keys.
+- This was a silent failure: ticks arrived, candles were built, signals ran — but all against symbol `""`. No errors, no warnings. Discovered only when checking the Redis `market:tick:` keyspace and finding zero entries with real symbol names.
+- `kite:token_map` stores `{symbol: token}`. The reverse `{token: symbol}` is built in-memory at startup. Not stored to Redis separately — it's derived, not source data.
+
+**Fallback:** If `kite:token_map` is not in Redis (first boot before auth), falls back to `INDEX_INSTRUMENTS` (hardcoded index tokens only). Logs a warning.
+
+---
+
+## D-029 — RANGING regime unblocked for paper trading; re-block before live
+
+**Decision:** `_REGIME_BLOCKED` in `services/momentum_engine/live.py` is an empty set `set()` during paper trading. RANGING market momentum signals are now generated (not filtered) so we can observe their quality.
+
+**Reasoning:**
+- The 23% win rate in RANGING markets came from backtesting. Paper trading gives live validation of whether the backtest result holds.
+- Blocking signals means zero data. Zero data means no way to improve the RANGING strategy or confirm the backtest finding empirically.
+- Paper trading has zero financial cost — letting low-probability signals through costs nothing and produces data.
+
+**Re-block requirement:** Before going live, add `"RANGING"` back to `_REGIME_BLOCKED`. The decision to keep it blocked in live is already documented in the code comment: `# Restore RANGING block before going live (23% WR in backtest)`.
+
+**Note logged:** `momentum_live.regime_blocked` message promoted to INFO so the block (when re-enabled) is visible in logs.
+
+---
+
+## D-030 — Bot startup at 7:45 AM (45 min before auth, 90 min before open)
+
+**Decision:** launchd auto-starts the bot at 7:45 AM IST on weekdays (changed from 8:30 AM).
+
+**Reasoning:**
+- Historical seeding (`seed_all`) for 2,135 symbols takes ~30 min on first-run or after Redis flush.
+- `job_fetch_earnings_calendar` runs at 8:00 AM. If the bot only starts at 8:30 AM, the earnings calendar job has already been missed and no earnings data is available until the next day's 8:00 AM job.
+- `job_daily_auth` (Zerodha TOTP) runs at 8:30 AM. Starting at 7:45 AM gives 45 min of buffer if startup itself is slow.
+- The historical seed is guarded by `meta:last_seed_date` in Redis — it only runs if the date has rolled over. Normal (non-first-run) startup at 7:45 AM takes < 1 minute.
+
+**Timeline with 7:45 AM start:**
+- 7:45 AM — Bot starts, Telegram "Bot started" notification sent
+- 7:46 AM — Historical seed (skips if already seeded today)
+- 7:47 AM — Regime bootstrapped from DB, WebSocket connecting
+- 8:00 AM — `job_fetch_earnings_calendar` fires: today's results stocks fetched and cached
+- 8:30 AM — `job_daily_auth` fires: fresh Zerodha token
+- 9:10 AM — `job_market_open_briefing` fires: Claude + news
+- 9:15 AM — Market opens, ticks flowing, candles building
+- 9:30 AM — `job_earnings_scan` fires: bulk gap-and-go scan
+
+---
+
 ## D-026 — Claude as morning research brain, not just a canned message sender
 
 **Decision:** `job_market_open_briefing()` (9:10 AM IST) now calls Claude with real market data — Nifty change %, India VIX, algo regime, and last 12h news headlines — and sends Claude's 3-4 sentence briefing via Telegram. Previously sent a hardcoded string.

@@ -236,8 +236,9 @@ class ZerodhaAuthenticator:
         all_tokens   = list(set(universe_tokens + index_tokens))
 
         redis = get_redis()
-        await redis.setex(REDIS_TOKEN_MAP_KEY,      TOKEN_TTL_SECONDS, json.dumps(token_map))
-        await redis.setex(REDIS_INSTRUMENTS_KEY,    TOKEN_TTL_SECONDS, json.dumps(all_tokens))
+        ttl   = _ttl_until_midnight_ist()
+        await redis.setex(REDIS_TOKEN_MAP_KEY,   ttl, json.dumps(token_map))
+        await redis.setex(REDIS_INSTRUMENTS_KEY, ttl, json.dumps(all_tokens))
 
         missing = [sym for sym in universe_symbols if sym not in token_map]
         if missing:

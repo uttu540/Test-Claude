@@ -10,6 +10,55 @@ _Next up: Paper trading validation run (#33) — 2-week live gate before semi-au
 
 ---
 
+## [0.6.0] — 2026-05-08 — Earnings Engine + Signal Pipeline Fixes
+
+### Added
+
+- **`services/earnings_engine/`** — New earnings catalyst engine (gap-and-go on results day)
+  - **`announcements.py`** — Fetches NSE corporate announcements via `nseindia.com/api/corporate-announcements`. Requires a browser-like session (cookies from hitting NSE home first). Filters announcements by subject keywords (`"financial results"`, `"quarterly results"`, etc.). Results cached in Redis: `earnings:results:{YYYY-MM-DD}` (6h TTL) and `earnings:recent_symbols` (4h TTL). `invalidate_recent_cache()` force-refreshes on each morning job run.
+  - **`engine.py`** — `EarningsSignalEngine`: reads tick from `market:tick:{symbol}`, computes gap % vs prev close and projected RVOL (cumulative volume scaled by session fraction elapsed). Entry criteria: gap ≥ 1.5%, RVOL ≥ 1.5×, price ≥ 99% of open (not fading). Generates `EARNINGS_BEAT` (gap up) or `EARNINGS_MISS` (gap down) Signal. Confidence tiers: 68 base / 74 moderate (gap ≥ 3% or RVOL ≥ 2.5×) / 80 strong (gap ≥ 4% + RVOL ≥ 3×). Per-day cooldown via `earnings:fired:{symbol}:{date}` Redis key.
+  - `scan_all()` — bulk 9:30 AM scan across all recent-results symbols
+  - `check_symbol()` — per-symbol check called from `_run_signals` on every 15min candle close
+
+- **`services/technical_engine/signal_generator.py`** — Two new `SignalType` enum values:
+  - `EARNINGS_BEAT = "EARNINGS_BEAT"` — gap up + RVOL surge on results day
+  - `EARNINGS_MISS = "EARNINGS_MISS"` — gap down + RVOL surge on results day
+
+- **`main.py`** — Two new scheduler jobs (weekdays only):
+  - `job_fetch_earnings_calendar()` at **8:00 AM IST** — fetches today's NSE results symbols, invalidates cache, rebuilds 3-day window, sends Telegram notification listing today's earnings stocks
+  - `job_earnings_scan()` at **9:30 AM IST** — bulk `EarningsSignalEngine.scan_all()` scan 15 min after open (gap confirmed), routes qualifying signals through `TradeExecutor`, sets per-symbol cooldown after trade
+
+### Changed
+
+- **`main.py` — `_run_signals()`** — Earnings check wired into per-candle signal loop. After momentum engine runs, checks `earnings:recent_symbols` in Redis; if symbol is in the list, calls `EarningsSignalEngine.check_symbol()` in parallel. Earnings signals appended to signal list alongside momentum signals.
+
+- **`main.py` — Daily dedup bypass for earnings** — The daily signal deduplication (`signal:daily_evaluated:{symbol}:{type}`) is skipped for `EARNINGS_BEAT` and `EARNINGS_MISS`. These use their own `earnings:fired` cooldown key instead, preventing the dedup from blocking re-evaluation throughout the day while the gap is holding.
+
+- **`main.py` — `_HQ_SIGNALS`** — Added `"EARNINGS_BEAT"` to the high-quality signal set (alongside `DARVAS_BREAKOUT`, `OPENING_DRIVE`, etc.). Ensures earnings signals receive full confluence scoring weight.
+
+- **`main.py` — Cooldown after trade** — After `TradeExecutor.execute()` succeeds, earnings signals set `earnings:fired:{symbol}:{date}` (86400s TTL); momentum signals continue to use `momentum:cooldown:{symbol}`.
+
+- **`main.py` — `_preseed_candle_buffer()`** — `LIMIT 50` changed to `LIMIT 100`. The previous value silently failed the `MIN_DAILY_BARS = 60` gate in `MomentumLiveEngine`, blocking all momentum signals on every startup until the bot had been running long enough to accumulate 60 live candles (~15 hours).
+
+- **`main.py` — `job_market_open_ping()`** — Fixed `yf.download()` MultiIndex column bug. New pandas/yfinance returns a MultiIndex DataFrame; `float(hist["Close"].iloc[-1])` was returning a `Series` not a scalar, raising silently and producing "data unavailable" in Telegram for Nifty and Sensex. Replaced with `yf.Ticker(sym).history(period="5d")` which returns flat columns.
+
+- **`services/data_ingestion/websocket_feed.py` — `ZerodhaFeed`** — Fixed root cause of empty symbol `""` on all live ticks. Zerodha's WebSocket sends `instrument_token` only — `tradingsymbol` is not present in tick payloads. Built a `self._token_symbol_map: dict[int, str]` reverse map at `start()` from `kite:token_map` Redis key (populated by authenticator). `_normalise_tick()` changed from `@staticmethod` to instance method and resolves symbol via this map. Ticks with unresolvable tokens return `None` (skipped). Fallback to `INDEX_INSTRUMENTS` if `kite:token_map` not in Redis.
+
+- **`services/data_ingestion/news_feed.py` — `_fetch_batch()`** — Fixed infinite rate-limit loop. Return type changed from `int` to `tuple[int, bool]` where second element signals a 429. `_fetch_and_store_all()` now breaks the batch loop immediately on first 429 instead of continuing to hammer all remaining batches.
+
+- **`services/momentum_engine/live.py`** — `_REGIME_BLOCKED` set changed from `{"RANGING"}` to `set()` (empty). RANGING regime is now unblocked for paper trading observation. Note: 23% WR empirically — will re-block before going live.
+
+- **`main.py`, `websocket_feed.py`** — All `asyncio.get_event_loop()` calls inside async functions replaced with `asyncio.get_running_loop()` (3 occurrences). Eliminates DeprecationWarning in Python 3.12 and guarantees the correct loop reference.
+
+- **`launchd` plist** — Bot auto-start time changed from **8:30 AM → 7:45 AM** IST (weekdays). Provides 1h30m before market open: historical seed (~30 min), earnings calendar fetch at 8:00 AM, Zerodha re-auth at 8:30 AM, briefing at 9:10 AM.
+
+### Fixed
+
+- **Signal pipeline producing zero signals despite live ticks** — Three compounding bugs: (1) all tick symbols were `""` (WebSocket token not resolved), (2) LIMIT 50 < MIN_DAILY_BARS 60 (momentum gate always returned `[]`), (3) multiple failure-mode logs were at DEBUG level (invisible in log file). All three fixed.
+- **`signal.none` never appearing in logs** — Promoted `signal.eval_start`, `signal.no_buffer`, `signal.market_closed`, `momentum_live.insufficient_bars`, `momentum_live.regime_blocked`, `momentum_live.rs_skip`, `momentum_live.cooldown_skip` from DEBUG → INFO.
+
+---
+
 ## [0.5.0] — 2026-04-29 — Frontend Refresh
 
 ### Changed (Frontend — Dashboard Redesign)
