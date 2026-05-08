@@ -176,10 +176,23 @@ def _print_report(
     console.print("[bold white]═══ Earnings Gap-and-Go Backtest ═══[/bold white]")
     console.print(f"  Period   : {start} → {end}")
     console.print(f"  Mode     : [cyan]{mode}[/cyan]")
+    if engine.day2_entry:
+        extra = []
+        if engine.day1_close_quality > 0:
+            extra.append(f"closeQ≥{engine.day1_close_quality:.0%}")
+        if engine.day2_min_open > 0:
+            extra.append(f"D2open≥{engine.day2_min_open:.0%}×D1close")
+        entry_label = (
+            f"Day2 entry (Day1 hold≥{engine.day1_hold_pct:.0%}"
+            + (f"  {' '.join(extra)}" if extra else "")
+            + ")  Stop=Day1Low-0.5×ATR"
+        )
+    else:
+        entry_label = f"Stop {engine.stop_mult}×ATR (gap-floor)"
     console.print(
         f"  Criteria : gap {engine.min_gap_pct}–{engine.max_gap_pct}%  "
         f"RVOL ≥ {engine.min_rvol}× (scaled)  "
-        f"Stop {engine.stop_mult}×ATR (gap-floor)  "
+        f"{entry_label}  "
         f"Target {engine.target_mult}×ATR  "
         f"MaxHold {engine.max_hold}d + trailing stop"
     )
@@ -297,13 +310,21 @@ async def main() -> None:
     parser.add_argument("--symbols",     nargs="+", default=None)
     parser.add_argument("--start",       default=None)
     parser.add_argument("--end",         default=None)
-    parser.add_argument("--min-gap",     type=float, default=3.0)
-    parser.add_argument("--max-gap",     type=float, default=12.0)
-    parser.add_argument("--min-rvol",    type=float, default=3.0)
-    parser.add_argument("--stop-mult",   type=float, default=1.5)
-    parser.add_argument("--target-mult", type=float, default=3.0)
-    parser.add_argument("--max-hold",    type=int,   default=15)
-    parser.add_argument("--output",      default=None)
+    parser.add_argument("--min-gap",      type=float, default=3.0)
+    parser.add_argument("--max-gap",      type=float, default=12.0)
+    parser.add_argument("--min-rvol",     type=float, default=3.0)
+    parser.add_argument("--stop-mult",    type=float, default=1.5)
+    parser.add_argument("--target-mult",  type=float, default=3.0)
+    parser.add_argument("--max-hold",     type=int,   default=15)
+    parser.add_argument("--day2",         action="store_true",
+                        help="Day 2 entry: enter at next-day open if gap held Day 1 close ≥97%% open")
+    parser.add_argument("--day1-hold",    type=float, default=0.97,
+                        help="Minimum Day 1 close/open ratio to qualify (default 0.97)")
+    parser.add_argument("--day1-quality", type=float, default=0.0,
+                        help="Day 1 close must be in top X of Day 1 range (0=off, 0.5=above midpoint, 0.75=top quartile)")
+    parser.add_argument("--day2-min-open", type=float, default=0.0,
+                        help="Day 2 open must be ≥ X × Day 1 close (0=off, 0.99=no overnight fade)")
+    parser.add_argument("--output",       default=None)
     args = parser.parse_args()
 
     end_dt   = date.fromisoformat(args.end)   if args.end   else date.today()
@@ -321,12 +342,16 @@ async def main() -> None:
         ann_dates = await _fetch_announcement_calendar(start_dt, end_dt)
 
     engine = EarningsBacktestEngine(
-        min_gap_pct  = args.min_gap,
-        max_gap_pct  = args.max_gap,
-        min_rvol     = args.min_rvol,
-        stop_mult    = args.stop_mult,
-        target_mult  = args.target_mult,
-        max_hold     = args.max_hold,
+        min_gap_pct        = args.min_gap,
+        max_gap_pct        = args.max_gap,
+        min_rvol           = args.min_rvol,
+        stop_mult          = args.stop_mult,
+        target_mult        = args.target_mult,
+        max_hold           = args.max_hold,
+        day2_entry         = args.day2,
+        day1_hold_pct      = args.day1_hold,
+        day1_close_quality = args.day1_quality,
+        day2_min_open      = args.day2_min_open,
     )
 
     console.print(f"\n[cyan]Scanning {len(symbols)} symbols...[/cyan]")

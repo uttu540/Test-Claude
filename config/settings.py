@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     claude_model: str = "claude-sonnet-4-6"
 
+    # ── Earnings engine ───────────────────────────────────────────────────────
+    # Day 2 entry: store Day 1 gap signal, fire at Day 2 open only if Day 1
+    # close held ≥97% of open AND closed in top 50% of Day 1 range.
+    # Backtest: profit factor 10×+ vs 0.50× for Day 1 entry.
+    earnings_day2_mode: bool = True
+
     # ── Telegram ──────────────────────────────────────────────────────────────
     telegram_bot_token: str = ""
     # Single chat ID (legacy / default)

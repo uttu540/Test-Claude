@@ -295,7 +295,7 @@ async def _call_claude_gate(prompt: str, symbol: str) -> FundamentalGateResult:
     try:
         resp = await client.messages.create(
             model      = settings.claude_model,
-            max_tokens = 256,
+            max_tokens = 400,
             system     = _FUNDAMENTAL_GATE_SYSTEM,
             messages   = [{"role": "user", "content": prompt}],
         )

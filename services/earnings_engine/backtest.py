@@ -83,6 +83,7 @@ class EarningsBacktestTrade:
     pnl_pct:      float
     is_win:       bool
     overextended: bool       # flagged but passed (for analysis)
+    day1_held:    bool = True  # Day2 mode: did gap hold by EOD Day 1?
 
 
 # ── Core engine ───────────────────────────────────────────────────────────────
@@ -95,19 +96,27 @@ class EarningsBacktestEngine:
 
     def __init__(
         self,
-        min_gap_pct:   float = MIN_GAP_PCT,
-        max_gap_pct:   float = MAX_GAP_PCT,
-        min_rvol:      float = 3.0,       # base floor — overridden by _rvol_threshold()
-        stop_mult:     float = STOP_ATR_MULT,
-        target_mult:   float = TARGET_ATR_MULT,
-        max_hold:      int   = MAX_HOLD_DAYS,
+        min_gap_pct:        float = MIN_GAP_PCT,
+        max_gap_pct:        float = MAX_GAP_PCT,
+        min_rvol:           float = 3.0,    # base floor — overridden by _rvol_threshold()
+        stop_mult:          float = STOP_ATR_MULT,
+        target_mult:        float = TARGET_ATR_MULT,
+        max_hold:           int   = MAX_HOLD_DAYS,
+        day2_entry:         bool  = False,  # enter at Day 2 open after gap holds Day 1
+        day1_hold_pct:      float = 0.97,   # Day 1 close must be ≥ this × open to qualify
+        day1_close_quality: float = 0.0,    # Day 1 close must be in top X of range (0=off, 0.5=above midpoint)
+        day2_min_open:      float = 0.0,    # Day 2 open must be ≥ this × Day 1 close (0=off, 0.99=no fade)
     ) -> None:
-        self.min_gap_pct  = min_gap_pct
-        self.max_gap_pct  = max_gap_pct
-        self.min_rvol     = min_rvol
-        self.stop_mult    = stop_mult
-        self.target_mult  = target_mult
-        self.max_hold     = max_hold
+        self.min_gap_pct        = min_gap_pct
+        self.max_gap_pct        = max_gap_pct
+        self.min_rvol           = min_rvol
+        self.stop_mult          = stop_mult
+        self.target_mult        = target_mult
+        self.day2_entry         = day2_entry
+        self.day1_hold_pct      = day1_hold_pct
+        self.day1_close_quality = day1_close_quality
+        self.day2_min_open      = day2_min_open
+        self.max_hold           = max_hold
 
     def run(
         self,
@@ -213,35 +222,74 @@ class EarningsBacktestEngine:
             if atr <= 0:
                 atr = prev_cl * 0.02
 
-            entry  = open_p
-            # Stop never placed inside the gap — gap floor is prev_close + 1%
-            gap_floor = prev_cl * 1.01
-            stop   = round(max(entry - self.stop_mult * atr, gap_floor), 2)
-            target = round(entry + self.target_mult * atr, 2)
+            # ── Day 2 entry mode ──────────────────────────────────────────────
+            # Enter at Day 2 open only if stock held gap by end of Day 1.
+            # Day 1 close < day1_hold_pct × open = gap-and-crap → skip.
+            # Stop below Day 1 low (market proved support there).
+            day1_held = True
+            if self.day2_entry:
+                # Need Day 2 bar to exist
+                if i + 1 >= len(df):
+                    continue
 
-            # 1:1 level — when price hits this, trail stop to entry (breakeven)
+                day1_bar   = df.iloc[i]
+                day1_close = float(day1_bar["close"])
+                day1_low   = float(day1_bar["low"])
+                day1_open  = open_p
+
+                # Gap must hold: close ≥ hold_pct × open
+                if day1_close < day1_open * self.day1_hold_pct:
+                    day1_held = False
+                    continue    # gap-and-crap — skip
+
+                # Day 1 close quality: close must be in top fraction of Day 1 range
+                # (close near low = all-day selling despite gap; skip)
+                if self.day1_close_quality > 0:
+                    day1_high = float(day1_bar["high"])
+                    day1_range = day1_high - day1_low
+                    if day1_range > 0:
+                        close_pos = (day1_close - day1_low) / day1_range
+                        if close_pos < self.day1_close_quality:
+                            continue
+
+                day2_bar = df.iloc[i + 1]
+                entry    = float(day2_bar["open"])
+
+                # Day 2 open no-fade: if overnight sellers gap it down, skip
+                if self.day2_min_open > 0 and entry < day1_close * self.day2_min_open:
+                    continue
+                # Stop: below Day 1 low minus small ATR buffer
+                stop     = round(day1_low - 0.5 * atr, 2)
+                # Recompute ATR relative to entry for target
+                target   = round(entry + self.target_mult * atr, 2)
+                scan_start = 2   # forward scan begins at Day 2+1 (Day 3)
+            else:
+                entry     = open_p
+                gap_floor = prev_cl * 1.01
+                stop      = round(max(entry - self.stop_mult * atr, gap_floor), 2)
+                target    = round(entry + self.target_mult * atr, 2)
+                scan_start = 1
+
+            # 1:1 level — activate trailing stop when price hits entry + 1R
             one_r = round(entry + self.stop_mult * atr, 2)
 
-            current_stop = stop
+            current_stop       = stop
             trailing_activated = False
-            exit_price  = None
-            exit_reason = "MAX_HOLD"
-            exit_day    = self.max_hold
+            exit_price         = None
+            exit_reason        = "MAX_HOLD"
+            exit_day           = self.max_hold
 
-            for j in range(1, self.max_hold + 1):
+            for j in range(scan_start, self.max_hold + 1):
                 if i + j >= len(df):
                     break
-                future = df.iloc[i + j]
-                f_high = float(future["high"])
-                f_low  = float(future["low"])
-                f_close = float(future["close"])
+                future  = df.iloc[i + j]
+                f_high  = float(future["high"])
+                f_low   = float(future["low"])
 
-                # Activate trailing stop once price touches 1:1 level
                 if not trailing_activated and f_high >= one_r:
                     trailing_activated = True
-                    current_stop = max(current_stop, entry)  # move stop to breakeven
+                    current_stop = max(current_stop, entry)
 
-                # After trailing activated, trail 1.5×ATR below each day's high
                 if trailing_activated:
                     trail_from_high = round(f_high - self.stop_mult * atr, 2)
                     if trail_from_high > current_stop:
@@ -280,6 +328,7 @@ class EarningsBacktestEngine:
                 pnl_pct      = round(pnl_pct, 2),
                 is_win       = exit_reason == "TARGET",
                 overextended = overextended,
+                day1_held    = day1_held,
             ))
 
             last_trade_end_idx = i + exit_day
