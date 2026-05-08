@@ -1379,15 +1379,25 @@ async def job_watchdog() -> None:
                 log.error("watchdog.rerun_error", job=flag_name, error=str(e))
 
 
+_tick_silence_alerted: bool = False   # rate-limit: one alert per silence episode
+
+
 async def job_status_heartbeat() -> None:
     """
     Prints a status line every 5 minutes during market hours.
     Shows regime, candle buffer depth, open positions, and last signal seen.
-    Only active in paper/dev mode — disabled in live to reduce noise.
+    Also checks for tick feed silence during market hours and sends Telegram alert.
     """
-    if settings.app_env.value == "live":
-        return
+    global _tick_silence_alerted
     try:
+        from zoneinfo import ZoneInfo
+        IST = ZoneInfo("Asia/Kolkata")
+        now_ist = datetime.now(IST)
+        in_market_hours = (
+            now_ist.weekday() < 5
+            and (9, 15) <= (now_ist.hour, now_ist.minute) <= (15, 30)
+        )
+
         redis  = get_redis()
         regime = await redis.get("market:regime") or "UNKNOWN"
 
@@ -1404,12 +1414,52 @@ async def job_status_heartbeat() -> None:
         except Exception:
             pass
 
+        # ── Tick silence detection ────────────────────────────────────────────
+        # During market hours, alert if no tick received in last 5 minutes.
+        # Uses in-process _last_tick_time first, falls back to Redis timestamp.
+        if in_market_hours and _feed_manager is not None:
+            last_tick = _feed_manager._last_tick_time
+            if last_tick is None:
+                # Try Redis fallback (persisted every 500 ticks)
+                ts_raw = await redis.get("feed:last_tick_time")
+                if ts_raw:
+                    try:
+                        last_tick = datetime.fromisoformat(ts_raw)
+                    except ValueError:
+                        pass
+
+            silence_threshold = 5 * 60  # 5 minutes in seconds
+            if last_tick is not None:
+                # Make naive for comparison
+                lt = last_tick.replace(tzinfo=None) if last_tick.tzinfo else last_tick
+                silent_secs = (datetime.now() - lt).total_seconds()
+                if silent_secs > silence_threshold and not _tick_silence_alerted:
+                    _tick_silence_alerted = True
+                    mins = int(silent_secs // 60)
+                    try:
+                        from services.notifications.telegram_bot import get_notifier
+                        notifier = get_notifier()
+                        if notifier:
+                            await notifier.send(
+                                f"⚠️ No ticks for {mins}min during market hours. "
+                                f"Feed may be disconnected or throttled."
+                            )
+                    except Exception:
+                        pass
+                elif silent_secs <= silence_threshold and _tick_silence_alerted:
+                    _tick_silence_alerted = False  # reset after recovery
+
         sample = {sym: {tf: len(buf) for tf, buf in tfs.items()}
                   for sym, tfs in list(_candle_buffer.items())[:3]}
+        last_tick_str = (
+            _feed_manager._last_tick_time.strftime("%H:%M:%S")
+            if _feed_manager and _feed_manager._last_tick_time
+            else "none"
+        )
         print(
             f"[{datetime.now().strftime('%H:%M:%S')}] HEARTBEAT | "
             f"regime={regime} | symbols_buffered={buffered} | open_positions={open_positions} | "
-            f"buffer_sample={sample}",
+            f"last_tick={last_tick_str} | buffer_sample={sample}",
             flush=True,
         )
     except Exception as e:

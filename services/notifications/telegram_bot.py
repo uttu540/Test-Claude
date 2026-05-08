@@ -443,47 +443,98 @@ async def _cmd_help(update: object, context: object) -> None:
 
 
 async def _cmd_status(update: object, context: object) -> None:
-    """Handle /status — bot mode, capital, market regime."""
+    """Handle /status — bot health, capital, WS feed, today's P&L, jobs."""
     from telegram import Update
     if not isinstance(update, Update) or not update.message:
         return
     if not _is_authorized(str(update.effective_user.id)):
         return
 
-    regime = "UNKNOWN"
-    total_pnl = 0.0
+    from datetime import datetime, date
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+    today = date.today().isoformat()
+
+    regime      = "UNKNOWN"
+    total_pnl   = 0.0
+    today_pnl   = 0.0
     open_positions = 0
+    ws_status   = "unknown"
+    last_tick   = "—"
+
     try:
         from database.connection import get_redis, get_db_session
         from sqlalchemy import text
         redis  = get_redis()
         regime = await redis.get("market:regime") or "UNKNOWN"
+
+        # WS feed status
+        ts_raw = await redis.get("feed:last_tick_time")
+        if ts_raw:
+            try:
+                lt = datetime.fromisoformat(ts_raw)
+                age_secs = (datetime.now() - lt.replace(tzinfo=None)).total_seconds()
+                last_tick = lt.strftime("%H:%M:%S")
+                ws_status = "🟢 live" if age_secs < 300 else f"🔴 stale ({int(age_secs//60)}min ago)"
+            except ValueError:
+                ws_status = "🟡 unknown"
+        else:
+            ws_status = "⚪ no data"
+
+        # Jobs completed today
+        jobs_done = []
+        for job in ("earnings_calendar", "market_briefing", "earnings_scan", "orb_scan"):
+            flag = await redis.get(f"job:done:{job}:{today}")
+            jobs_done.append(f"{'✅' if flag else '❌'} {job}")
+
         async with get_db_session() as session:
-            pnl_result = await session.execute(
+            # All-time P&L
+            r = await session.execute(
                 text("SELECT COALESCE(SUM(net_pnl), 0) FROM trades WHERE status = 'CLOSED'")
             )
-            total_pnl = float(pnl_result.scalar() or 0)
-            pos_result = await session.execute(
+            total_pnl = float(r.scalar() or 0)
+
+            # Today's P&L
+            r2 = await session.execute(
+                text("SELECT COALESCE(SUM(net_pnl), 0) FROM trades "
+                     "WHERE status = 'CLOSED' AND DATE(closed_at) = CURRENT_DATE")
+            )
+            today_pnl = float(r2.scalar() or 0)
+
+            # Open positions
+            r3 = await session.execute(
                 text("SELECT COUNT(*) FROM trades WHERE status = 'OPEN'")
             )
-            open_positions = int(pos_result.scalar() or 0)
+            open_positions = int(r3.scalar() or 0)
+
     except Exception:
-        pass
+        jobs_done = []
 
     effective_capital = settings.total_capital + total_pnl
-    pnl_sign  = "+" if total_pnl >= 0 else ""
-    pnl_emoji = "💚" if total_pnl >= 0 else "🔴"
     mode = settings.app_env.value.upper()
+
+    def _pnl_fmt(v: float) -> str:
+        sign = "+" if v >= 0 else ""
+        emoji = "💚" if v >= 0 else "🔴"
+        return f"{emoji} {sign}₹{v:,.2f}"
+
+    jobs_str = "\n".join(f"  {j}" for j in jobs_done) if jobs_done else "  —"
+
     await update.message.reply_text(
         f"🤖 *TradeBot Status*\n"
         f"──────────────────\n"
         f"Mode:             `{mode}`\n"
-        f"Starting Capital: ₹{settings.total_capital:,.0f}\n"
-        f"{pnl_emoji} All-time P&L:  {pnl_sign}₹{total_pnl:,.2f}\n"
-        f"Effective Capital:₹{effective_capital:,.0f}\n"
+        f"Capital:          ₹{settings.total_capital:,.0f}  →  ₹{effective_capital:,.0f}\n"
+        f"Today P&L:        {_pnl_fmt(today_pnl)}\n"
+        f"All-time P&L:     {_pnl_fmt(total_pnl)}\n"
         f"Open Positions:   {open_positions}\n"
         f"──────────────────\n"
         f"Regime:           {regime}\n"
+        f"WS Feed:          {ws_status}\n"
+        f"Last Tick:        {last_tick}\n"
+        f"──────────────────\n"
+        f"*Jobs today:*\n{jobs_str}\n"
+        f"──────────────────\n"
         f"Max risk/trade:   ₹{settings.max_risk_per_trade_inr:,.0f}\n"
         f"Daily loss limit: ₹{settings.daily_loss_limit_inr:,.0f}\n"
         f"Max positions:    {settings.max_open_positions}",

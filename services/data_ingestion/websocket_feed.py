@@ -179,6 +179,7 @@ class ZerodhaFeed:
         self._running = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._refreshing = False   # guard: prevents concurrent restart fan-out
+        self._graceful_stop = False  # set in stop() — suppresses disconnect alert
         # token_int → trading_symbol lookup (populated in start())
         # Zerodha WebSocket sends instrument_token but NOT tradingsymbol
         self._token_symbol_map: dict[int, str] = {}
@@ -231,6 +232,7 @@ class ZerodhaFeed:
 
     def stop(self) -> None:
         self._running = False
+        self._graceful_stop = True
         if self._ticker:
             self._ticker.close()
             log.info("zerodha_feed.stop", status="disconnected")
@@ -251,11 +253,34 @@ class ZerodhaFeed:
             except Exception as e:
                 log.warning("zerodha_feed.tick_parse_error", error=str(e), raw=raw)
 
+    def _alert_telegram(self, msg: str) -> None:
+        """Fire-and-forget Telegram alert from the ticker thread."""
+        if not (self._loop and self._loop.is_running()):
+            return
+
+        async def _send():
+            try:
+                from services.notifications.telegram_bot import get_notifier
+                notifier = get_notifier()
+                if notifier:
+                    await notifier.send(msg)
+            except Exception:
+                pass
+
+        self._loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(_send())
+        )
+
     def _on_close(self, ws, code, reason) -> None:
         log.warning("zerodha_feed.closed", code=code, reason=reason)
-        # 403 = token expired — schedule full restart with fresh token from Redis
-        if code == 1006 and reason and "403" in str(reason):
+        is_token_expired = code == 1006 and reason and "403" in str(reason)
+        if is_token_expired:
             self._schedule_token_refresh()
+        elif not self._graceful_stop:
+            self._alert_telegram(
+                f"⚠️ WebSocket disconnected (code={code}). "
+                f"Auto-reconnect in progress — ticks paused."
+            )
 
     def _on_error(self, ws, code, reason) -> None:
         log.error("zerodha_feed.error", code=code, reason=reason)
@@ -264,9 +289,17 @@ class ZerodhaFeed:
 
     def _on_reconnect(self, ws, attempts) -> None:
         log.info("zerodha_feed.reconnect", attempt=attempts)
+        if attempts >= 2:
+            self._alert_telegram(
+                f"🔄 WebSocket reconnecting (attempt {attempts}) — still no ticks."
+            )
 
     def _on_noreconnect(self, ws) -> None:
         log.error("zerodha_feed.no_reconnect", status="max_retries_exceeded")
+        self._alert_telegram(
+            "🚨 WebSocket DEAD — max reconnect attempts exhausted. "
+            "Bot is running BLIND. Restart required."
+        )
         self._schedule_token_refresh()
 
     def _schedule_token_refresh(self) -> None:
@@ -295,6 +328,7 @@ class ZerodhaFeed:
         await asyncio.sleep(5)   # give auth job time to store fresh token
         try:
             await self.start()
+            self._alert_telegram("✅ WebSocket reconnected — ticks resumed.")
         finally:
             self._refreshing = False
 
@@ -513,6 +547,7 @@ class FeedManager:
         self._tick_batch: list[Tick] = []
         self._flush_scheduled: bool = False
         self._total_ticks: int = 0
+        self._last_tick_time: datetime | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
         if settings.use_real_feed:
@@ -529,11 +564,18 @@ class FeedManager:
         self._tick_batch.append(tick)
         self._candle_aggregator.process_tick(tick)
         self._total_ticks += 1
+        self._last_tick_time = datetime.now()
 
-        # Print every 500 ticks (~10s at 50 symbols/sec) so we know the feed is alive
+        # Every 500 ticks: print liveness + persist last-tick timestamp to Redis
         if self._total_ticks % 500 == 0:
-            from datetime import datetime
             print(f"[{datetime.now().strftime('%H:%M:%S')}] feed.ticks_processed total={self._total_ticks}", flush=True)
+            if self._loop and self._loop.is_running():
+                ts_str = self._last_tick_time.isoformat()
+                self._loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(
+                        get_redis().set("feed:last_tick_time", ts_str)
+                    )
+                )
 
         if not self._flush_scheduled:
             self._flush_scheduled = True
