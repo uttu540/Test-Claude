@@ -267,7 +267,10 @@ async def _run_signals(symbol: str) -> None:
         import json
         import pandas as pd
         from config.bot_config import get_bot_config
-        from services.momentum_engine.live import MomentumLiveEngine
+        # V2 momentum engine: relaxed 200EMA gate (near_200) + ADX lookforward,
+        # TRENDING_DOWN hard-blocked (backtest-aligned). Validated better than V1
+        # on 3yr N500 + full-NSE backtests.
+        from services.momentum_engine_v2.live import MomentumV2LiveEngine as MomentumLiveEngine
 
         cfg   = await get_bot_config()
         redis = get_redis()
