@@ -78,6 +78,16 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "desc": "Double Top/Bottom, Bull/Bear Flag, Darvas Box, NR7.",
         "group": "strategies",
     },
+    "momentum_watchlist_enabled": {
+        "default": False, "type": "bool",
+        "label": "RS Watchlist Filter (Darvas Incubator)",
+        "desc": (
+            "Only run Darvas box detection on top-50 RS leaders (stocks outperforming "
+            "Nifty on 20-day ROC, within 15% of 52wk high). Built daily at 4 PM. "
+            "Flip off to revert instantly to scanning full universe."
+        ),
+        "group": "strategies",
+    },
     # ── Per-signal minimum confidence overrides ────────────────────────────────
     # Backtest finding (90d, Nifty 50, Apr 2026): ORB WR=38%, VWAP WR=39% at
     # default thresholds. Raising their floors to 70+ filters low-quality setups.

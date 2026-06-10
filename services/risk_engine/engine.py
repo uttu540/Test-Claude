@@ -8,6 +8,7 @@ Never throws — always returns a RiskDecision so the caller can log and act.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import date
 
@@ -16,6 +17,11 @@ from sqlalchemy import text
 
 from config.settings import settings
 from database.connection import get_db_session
+
+# Per-symbol asyncio lock: prevents two concurrent coroutines from both
+# passing the duplicate-position check for the same symbol when signals
+# fire simultaneously (e.g. multiple ORB setups processed in the same batch).
+_entry_locks: dict[str, asyncio.Lock] = {}
 
 log = structlog.get_logger(__name__)
 
@@ -59,7 +65,27 @@ class RiskEngine:
         explicit_stop: when provided, used directly as stop_loss instead of entry ± 2×ATR.
         Target is then placed at entry + RR_RATIO × risk_per_share in the trade direction.
         atr must still be a real ATR value (used only for logging/analytics when explicit_stop set).
+
+        Thread-safety: uses a per-symbol asyncio lock so two concurrent coroutines
+        processing the same symbol simultaneously (e.g. ORB batch scan) cannot both
+        pass the duplicate-position check before either trade is committed to DB.
         """
+        # Acquire per-symbol lock — held until this evaluation completes.
+        # Prevents duplicate entries when two coroutines race on the same symbol.
+        if symbol not in _entry_locks:
+            _entry_locks[symbol] = asyncio.Lock()
+        async with _entry_locks[symbol]:
+            return await self._evaluate_locked(symbol, direction, entry_price, atr, explicit_stop)
+
+    async def _evaluate_locked(
+        self,
+        symbol: str,
+        direction: str,
+        entry_price: float,
+        atr: float,
+        explicit_stop: float | None = None,
+    ) -> RiskDecision:
+        """Inner evaluate — called only while holding the per-symbol lock."""
         # ── 1. Daily loss limit ───────────────────────────────────────────────
         daily_pnl = await self._get_todays_pnl()
         if daily_pnl <= -settings.daily_loss_limit_inr:
@@ -251,8 +277,13 @@ class RiskEngine:
             return total
 
         except Exception as e:
-            log.error("risk.db_error.daily_pnl", error=str(e))
-            return -float("inf")
+            # Fail-open: return 0 so a transient DB/Redis blip doesn't permanently
+            # block all trading for the rest of the day. Per-trade risk limits still
+            # apply. The old -inf failsafe caused all same-day signals to be rejected
+            # after any momentary exception (e.g. DB contention during ORB batch scan).
+            log.warning("risk.db_error.daily_pnl", error=str(e),
+                        msg="Could not read daily PnL — assuming 0, per-trade limits still enforced")
+            return 0.0
 
     async def _get_open_count(self) -> int:
         try:

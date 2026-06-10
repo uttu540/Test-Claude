@@ -1,12 +1,15 @@
 """
 services/orb_engine/run.py
 ───────────────────────────
-CLI runner for the ORB 30-min backtest (trailing stop version).
+CLI runner for the ORB 30-min backtest.
+
+Uses Zerodha Kite Historical API (requires kite:access_token in Redis).
+Falls back to yfinance only for the Nifty index.
 
 Usage:
     python -m services.orb_engine.run --universe nifty50
-    python -m services.orb_engine.run --universe nifty500 --output results/orb_n500.json
-    python -m services.orb_engine.run --symbols RELIANCE TCS INFY --trail-mult 0.8
+    python -m services.orb_engine.run --universe nifty50 --start 2024-01-01 --end 2025-01-01
+    python -m services.orb_engine.run --symbols RELIANCE TCS INFY --days 365
 """
 from __future__ import annotations
 
@@ -207,32 +210,48 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="ORB 30-min backtest — trailing stop")
     parser.add_argument("--symbols",    nargs="+")
     parser.add_argument("--universe",   default="nifty50", choices=["nifty50", "nifty500", "all_nse"])
-    parser.add_argument("--days",       type=int, default=55)
+    parser.add_argument("--days",       type=int, default=365)
     parser.add_argument("--start",      help="YYYY-MM-DD")
     parser.add_argument("--end",        help="YYYY-MM-DD")
     parser.add_argument("--output",     help="JSON output path")
-    parser.add_argument("--trail-mult", type=float, default=1.0,
-                        help="Trail distance = OR range × mult (default 1.0)")
-    parser.add_argument("--vol-mult",   type=float, default=1.5,
-                        help="Volume multiplier for breakout candle (default 1.5)")
+    parser.add_argument("--trail-mult",           type=float, default=2.0)
+    parser.add_argument("--vol-mult",             type=float, default=1.5)
+    parser.add_argument("--or-max-range",         type=float, default=1.5,
+                        help="Max OR width %% (default 1.5, was 2.5)")
+    parser.add_argument("--nifty-margin",         type=float, default=0.0,
+                        help="Nifty 9:45 must clear OR high by this fraction (default 0%%)")
+    parser.add_argument("--max-signals-per-day",  type=int,   default=5,
+                        help="Cap signals per day to limit correlated blowup (default 5)")
+    parser.add_argument("--workers",              type=int,   default=3,
+                        help="Parallel fetch workers (default 3)")
+    parser.add_argument("--no-cache",             action="store_true",
+                        help="Bypass disk cache and re-fetch from Kite API")
+    parser.add_argument("--r-milestones",         action="store_true", default=False,
+                        help="Use R-multiple milestone trail instead of distance trail")
     args = parser.parse_args()
 
     end   = date.fromisoformat(args.end)   if args.end   else date.today()
     start = date.fromisoformat(args.start) if args.start else end - timedelta(days=args.days)
 
-    earliest = date.today() - timedelta(days=59)
-    if start < earliest:
-        console.print(f"[yellow]Clamping start to {earliest} (yfinance 15-min limit)[/yellow]")
-        start = earliest
-
     symbols = args.symbols or _get_universe(args.universe)
+    cache_status = "[yellow]no-cache[/yellow]" if args.no_cache else "[green]cache on[/green]"
     console.print(
-        f"\n[bold]ORB 30-min — Trailing Stop[/bold]  |  "
-        f"{len(symbols)} symbols  |  {start} → {end}  |  "
-        f"Trail {args.trail_mult}× OR-range  |  Vol {args.vol_mult}×"
+        f"\n[bold]ORB 30-min[/bold]  |  {len(symbols)} symbols  |  {start} → {end}  |  "
+        f"OR≤{args.or_max_range}%  |  Trail {args.trail_mult}×  |  "
+        f"Vol {args.vol_mult}×  |  MaxSig/day {args.max_signals_per_day}  |  "
+        f"{args.workers} workers  |  {cache_status}"
     )
 
-    engine = ORBBacktestEngine(volume_mult=args.vol_mult, trail_mult=args.trail_mult)
+    engine = ORBBacktestEngine(
+        volume_mult         = args.vol_mult,
+        trail_mult          = args.trail_mult,
+        or_max_range_pct    = args.or_max_range,
+        nifty_margin        = args.nifty_margin,
+        max_signals_per_day = args.max_signals_per_day,
+        fetch_workers       = args.workers,
+        no_cache            = args.no_cache,
+        use_r_milestones    = args.r_milestones,
+    )
     with console.status("[cyan]Running...[/cyan]"):
         trades = engine.run(symbols, start, end)
 

@@ -86,6 +86,16 @@ class ZerodhaAuthenticator:
         """
         Uses a headless Chromium browser to log into Zerodha's OAuth page
         and extract the request_token from the redirect URL.
+
+        TOTP strategies tried in order (Kite UI changes periodically):
+          1. input[placeholder*="TOTP/OTP/authenticator"] — new Kite single-field UI
+          2. input[autocomplete="one-time-code"]
+          3. Individual input[type="number"] digit boxes — old Kite UI
+          4. Any visible text/tel/number input as last resort
+
+        After filling TOTP, waits for redirect URL containing request_token
+        rather than sleeping blindly. Falls back to clicking submit if no
+        auto-submit (new UI auto-submits on 6th digit; old UI requires click).
         """
         try:
             from playwright.async_api import async_playwright
@@ -113,46 +123,110 @@ class ZerodhaAuthenticator:
 
                 page.on("request", _on_request)
 
-                # Go to Kite login page
+                # ── Step 1: Load login page ───────────────────────────────────
+                # Use domcontentloaded — Kite SPA has background polling that
+                # prevents networkidle from ever resolving cleanly.
                 await page.goto(login_url, timeout=30_000)
-                await page.wait_for_load_state("networkidle", timeout=15_000)
+                await page.wait_for_load_state("domcontentloaded", timeout=15_000)
+                await page.wait_for_timeout(1000)
 
-                # Enter user ID and password
+                # ── Step 2: Fill user ID + password ──────────────────────────
                 await page.fill('input[type="text"]', settings.kite_user_id, timeout=10_000)
                 await page.fill('input[type="password"]', settings.kite_password, timeout=10_000)
                 await page.click('button[type="submit"]', timeout=10_000)
-                await page.wait_for_load_state("networkidle", timeout=15_000)
-                await page.wait_for_timeout(2000)
+                await page.wait_for_load_state("domcontentloaded", timeout=15_000)
+                await page.wait_for_timeout(1500)
 
-                # Handle TOTP page
-                totp_code = pyotp.TOTP(settings.kite_totp_secret).now()
-                log.debug("zerodha_auth.totp_generated", totp_generated=True)  # Never log the code itself
+                # ── Step 3: Fill TOTP ─────────────────────────────────────────
+                # NOTE: use keyboard.type() not fill() — Kite SPA counts per-keystroke
+                # input events and auto-submits on the 6th digit. fill() sets the value
+                # in bulk (single input event), so auto-submit never fires.
+                totp_filled = False
 
-                # Zerodha's TOTP input is a series of individual digit boxes
-                # Try filling the combined input first, then individual boxes
+                # Strategy A: single input field — try known selectors in priority order.
+                # Kite 2024+ TOTP input is type="tel" with no TOTP-related placeholder.
+                # Regenerate TOTP right before each click so code is never stale.
+                for sel in [
+                    'input[placeholder*="TOTP" i]',
+                    'input[placeholder*="totp" i]',
+                    'input[placeholder*="OTP" i]',
+                    'input[placeholder*="authenticator" i]',
+                    'input[autocomplete="one-time-code"]',
+                    'input[type="tel"]',       # Kite 2024+ TOTP field (no placeholder)
+                    'input[type="number"]:not([step])',  # single-box number input
+                ]:
+                    try:
+                        loc = page.locator(sel).first
+                        if await loc.count() > 0 and await loc.is_visible(timeout=2_000):
+                            await loc.click(timeout=3_000)
+                            totp_code = pyotp.TOTP(settings.kite_totp_secret).now()
+                            await page.keyboard.type(totp_code, delay=50)
+                            totp_filled = True
+                            log.info("zerodha_auth.totp_filled", strategy=sel)
+                            break
+                    except Exception:
+                        pass
+
+                # Strategy B: individual digit boxes (old Kite UI)
+                if not totp_filled:
+                    try:
+                        digit_inputs = page.locator('input[type="number"]')
+                        count = await digit_inputs.count()
+                        if count >= 6:
+                            totp_code = pyotp.TOTP(settings.kite_totp_secret).now()
+                            for i, digit in enumerate(totp_code):
+                                await digit_inputs.nth(i).fill(digit, timeout=3_000)
+                            totp_filled = True
+                            log.info("zerodha_auth.totp_filled", strategy="digit_boxes")
+                    except Exception:
+                        pass
+
+                # Strategy C: any single visible text/tel/number input (last resort)
+                if not totp_filled:
+                    try:
+                        fallback = page.locator(
+                            'input[type="text"]:visible, input[type="tel"]:visible, '
+                            'input[type="number"]:visible'
+                        ).first
+                        if await fallback.count() > 0:
+                            await fallback.click(timeout=3_000)
+                            totp_code = pyotp.TOTP(settings.kite_totp_secret).now()
+                            await page.keyboard.type(totp_code, delay=50)
+                            totp_filled = True
+                            log.info("zerodha_auth.totp_filled", strategy="visible_fallback")
+                    except Exception:
+                        pass
+
+                if not totp_filled:
+                    log.warning("zerodha_auth.totp_fill_skipped",
+                                url=page.url, msg="No TOTP input found — page may have changed")
+
+                # ── Step 4: Wait for redirect containing request_token ────────
+                # New Kite UI auto-submits on 6th TOTP digit (keyboard.type triggers this).
+                # Old Kite UI requires explicit submit click.
                 try:
-                    totp_input = page.locator('input[label="External TOTP"]').first
-                    if await totp_input.count() > 0:
-                        await totp_input.fill(totp_code, timeout=10_000)
-                    else:
-                        # Individual digit inputs
-                        inputs = page.locator('input[type="number"]')
-                        for i, digit in enumerate(totp_code):
-                            await inputs.nth(i).fill(digit, timeout=5_000)
+                    await page.wait_for_url("**/request_token=**", timeout=6_000)
                 except Exception:
-                    # Fallback: fill whatever input is visible
-                    await page.fill('input[type="number"]', totp_code, timeout=10_000)
+                    # Auto-submit didn't fire — try multiple button text variants
+                    try:
+                        submit_btn = page.locator(
+                            'button[type="submit"], '
+                            'button:has-text("Continue"), button:has-text("Verify"), '
+                            'button:has-text("Proceed"), button:has-text("Submit")'
+                        ).first
+                        if await submit_btn.count() > 0:
+                            await submit_btn.click(timeout=5_000)
+                        await page.wait_for_url("**/request_token=**", timeout=8_000)
+                    except Exception:
+                        # URL may be 127.0.0.1 (browser errors but token captured via request event)
+                        await page.wait_for_timeout(3_000)
 
-                # Wait for TOTP to auto-submit and redirect to redirect_url with token.
-                # Redirect URL = 127.0.0.1 (Kite dev console) → browser errors, but
-                # the request event fires first and _on_request captures the token.
-                await page.wait_for_timeout(4000)
-
-                # Fallback: if authorize page still showing, click the button
+                # ── Step 5: Authorize page (first-time / consent) ────────────
                 if "connect/authorize" in page.url:
                     try:
                         authorize_btn = page.locator(
-                            'button:has-text("Authorize"), button:has-text("Authorise"), button:has-text("I Allow"), button:has-text("Allow")'
+                            'button:has-text("Authorize"), button:has-text("Authorise"), '
+                            'button:has-text("I Allow"), button:has-text("Allow")'
                         ).first
                         if await authorize_btn.count() > 0:
                             try:

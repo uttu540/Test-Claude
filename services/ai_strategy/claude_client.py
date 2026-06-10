@@ -198,7 +198,7 @@ class ClaudeStrategyClient:
 
         try:
             response = await self._client.messages.create(
-                model      = settings.claude_model,
+                model      = settings.claude_model_fast,  # Haiku — 10× cheaper, fine for JSON scoring
                 max_tokens = 512,
                 system     = SYSTEM_PROMPT,
                 messages   = [{"role": "user", "content": user_prompt}],

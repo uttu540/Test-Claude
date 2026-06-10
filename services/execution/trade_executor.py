@@ -63,13 +63,16 @@ class TradeExecutor:
         Returns the Trade record on success, None if rejected or failed.
         """
         atr = signal.indicators.get("atr_14", 0)
-        if not atr:
+
+        # explicit_stop: ORB, IDARVAS, Catalyst and any caller that has a
+        # structure-based stop can set this to bypass the ATR-derived stop.
+        # When explicit_stop is provided, ATR is only used for logging — the
+        # risk engine computes position size from (entry - explicit_stop).
+        explicit_stop = signal.indicators.get("explicit_stop")
+
+        if not atr and explicit_stop is None:
             log.warning("executor.no_atr", symbol=signal.trading_symbol, signal=signal.signal_type.value)
             return None
-
-        # explicit_stop: ORB and any caller that has a structure-based stop
-        # (e.g. OR low) can set this to bypass the ATR-derived stop in RiskEngine.
-        explicit_stop = signal.indicators.get("explicit_stop")
 
         # ── 1. Risk evaluation ────────────────────────────────────────────────
         decision = await self._risk.evaluate(
@@ -130,10 +133,17 @@ class TradeExecutor:
             return None
 
         # ── 2. Claude AI evaluation ───────────────────────────────────────────
-        # ORB_BREAKOUT has its own quality gates (OR range, volume, Nifty gate)
-        # and lacks RSI/MACD/ATR% — skip AI to avoid false "data anomaly" rejections.
+        # Strategies with their own multi-layer quality gates (OR range/volume/Nifty,
+        # Darvas box/RVOL/gap, day1/day2 PEAD conditions) are exempt from AI eval —
+        # they lack generic indicators (RSI/MACD/ATR%) which causes false "data
+        # anomaly" SKIP decisions. The strategy gate IS the quality filter.
         from services.technical_engine.signal_generator import SignalType
-        if signal.signal_type != SignalType.ORB_BREAKOUT:
+        _AI_SKIP_SIGNALS = {
+            SignalType.ORB_BREAKOUT,       # OR range + volume + Nifty gate
+            SignalType.INTRADAY_IDARVAS,   # gap% + RVOL + Darvas box + compactness + VWAP
+            SignalType.CATALYST_GAP_PEAD,  # day1 gap/RVOL/close-high + day2 open hold
+        }
+        if signal.signal_type not in _AI_SKIP_SIGNALS:
             ai_decision: AIDecision = await get_claude_client().analyse(signal)
 
             if not ai_decision.is_actionable:
@@ -155,7 +165,7 @@ class TradeExecutor:
             ai_decision = AIDecision(
                 action     = TradeAction.BUY,
                 confidence = signal.confidence / 100.0,
-                reasoning  = "ORB_BREAKOUT: AI evaluation skipped — strategy uses own quality gates",
+                reasoning  = f"{signal.signal_type.value}: AI evaluation skipped — strategy uses own quality gates",
             )
 
         trade_id  = uuid.uuid4()

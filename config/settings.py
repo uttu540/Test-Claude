@@ -61,7 +61,8 @@ class Settings(BaseSettings):
 
     # ── Anthropic / Claude ────────────────────────────────────────────────────
     anthropic_api_key: str = ""
-    claude_model: str = "claude-sonnet-4-6"
+    claude_model: str = "claude-sonnet-4-6"          # used for market briefing (needs quality)
+    claude_model_fast: str = "claude-haiku-4-5"      # used for trade signal scoring (10× cheaper)
 
     # ── Earnings engine ───────────────────────────────────────────────────────
     # Day 2 entry: store Day 1 gap signal, fire at Day 2 open only if Day 1

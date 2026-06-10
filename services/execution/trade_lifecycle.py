@@ -115,8 +115,10 @@ class TradeLifecycleManager:
                 # falling back to entry price (entry price produces fake zero P&L).
                 price = await self._get_last_candle_close(trade["trading_symbol"])
             if price is None:
+                # Third fallback: yfinance spot price (slow but better than entry)
+                price = await self._get_yfinance_spot(trade["trading_symbol"])
+            if price is None:
                 # Absolute last resort — use entry price and flag loudly.
-                # This hides real P&L but is better than leaving the trade open.
                 price = float(trade["entry_price"])
                 log.error(
                     "lifecycle.eod_price_unknown",
@@ -124,6 +126,10 @@ class TradeLifecycleManager:
                     fallback="entry_price",
                     warning="P&L will be reported as zero — investigate feed",
                 )
+            # Cancel any pending SL-M / LIMIT child orders before closing DB record.
+            # Without this, the broker-poll loop sees the pending order become COMPLETE
+            # (exchange cancels it at EOD) and fires _close_trade a second time.
+            await self._cancel_all_child_orders(str(trade["id"]))
             await self._close_trade(trade, exit_price=price, reason=reason)
             closed += 1
         log.info("lifecycle.force_close_all", count=closed, reason=reason)
@@ -202,11 +208,18 @@ class TradeLifecycleManager:
         """
         Update the milestone-based trailing stop for a trade.
 
-        Milestones (same as backtesting engine):
-          Hit 1:2 → trail to breakeven (entry price)
-          Hit 1:3 → trail to +1R
-          Hit 1:5 → trail to +3R
-          Hit 1:8 → trail to +5R
+        Milestones differ by timeframe — same intent (let winners breathe), different scale:
+
+        SWING (1day / 1week) — V5 validated, trail first at 4R:
+          Below 4R → hold original stop
+          4R  → +1R  |  5R → +2R  |  8R → +4R  |  12R → +6R
+          Rationale: swing trades hold 35 days, 2R trail too early kills big movers.
+
+        INTRADAY (15min / 5min / 1min) — trail first at 2R:
+          Below 2R → hold original stop
+          2R  → breakeven  |  3R → +1R  |  5R → +2R
+          Rationale: intraday max target ~3R. Trail at 2R locks no-loss,
+          3R gives +1R cushion. 5R milestone rarely hit but protects outlier runs.
 
         For LONG:  trailing stop only moves UP (ratchets in favour)
         For SHORT: trailing stop only moves DOWN (ratchets in favour)
@@ -216,7 +229,9 @@ class TradeLifecycleManager:
         if not planned_stop:
             return
 
-        is_long = trade["direction"] == "LONG"
+        is_long   = trade["direction"] == "LONG"
+        timeframe = trade.get("timeframe", "1day")
+        is_swing  = timeframe in ("1day", "1week")
 
         # Initialise from planned stop if first time we see this trade
         existing = self._trailing_stops.get(trade_id, planned_stop)
@@ -227,16 +242,28 @@ class TradeLifecycleManager:
                 return
             move       = current_price - entry_price
             r_multiple = move / initial_risk
-            if r_multiple >= 8:
-                new_trail = entry_price + 5 * initial_risk
-            elif r_multiple >= 5:
-                new_trail = entry_price + 3 * initial_risk
-            elif r_multiple >= 3:
-                new_trail = entry_price + 1 * initial_risk
-            elif r_multiple >= 2:
-                new_trail = entry_price   # breakeven
+            if is_swing:
+                # V5 swing milestones — trail first at 4R
+                if r_multiple >= 12:
+                    new_trail = entry_price + 6 * initial_risk
+                elif r_multiple >= 8:
+                    new_trail = entry_price + 4 * initial_risk
+                elif r_multiple >= 5:
+                    new_trail = entry_price + 2 * initial_risk
+                elif r_multiple >= 4:
+                    new_trail = entry_price + 1 * initial_risk
+                else:
+                    new_trail = planned_stop  # no trail below 4R
             else:
-                new_trail = planned_stop  # unchanged
+                # Intraday milestones — trail first at 2R
+                if r_multiple >= 5:
+                    new_trail = entry_price + 2 * initial_risk
+                elif r_multiple >= 3:
+                    new_trail = entry_price + 1 * initial_risk
+                elif r_multiple >= 2:
+                    new_trail = entry_price  # breakeven
+                else:
+                    new_trail = planned_stop  # no trail below 2R
             # Only move the stop upward (never give back ground)
             self._trailing_stops[trade_id] = max(existing, new_trail)
         else:
@@ -245,16 +272,28 @@ class TradeLifecycleManager:
                 return
             move       = entry_price - current_price
             r_multiple = move / initial_risk
-            if r_multiple >= 8:
-                new_trail = entry_price - 5 * initial_risk
-            elif r_multiple >= 5:
-                new_trail = entry_price - 3 * initial_risk
-            elif r_multiple >= 3:
-                new_trail = entry_price - 1 * initial_risk
-            elif r_multiple >= 2:
-                new_trail = entry_price   # breakeven
+            if is_swing:
+                # V5 swing milestones — trail first at 4R
+                if r_multiple >= 12:
+                    new_trail = entry_price - 6 * initial_risk
+                elif r_multiple >= 8:
+                    new_trail = entry_price - 4 * initial_risk
+                elif r_multiple >= 5:
+                    new_trail = entry_price - 2 * initial_risk
+                elif r_multiple >= 4:
+                    new_trail = entry_price - 1 * initial_risk
+                else:
+                    new_trail = planned_stop  # no trail below 4R
             else:
-                new_trail = planned_stop  # unchanged
+                # Intraday milestones — trail first at 2R
+                if r_multiple >= 5:
+                    new_trail = entry_price - 2 * initial_risk
+                elif r_multiple >= 3:
+                    new_trail = entry_price - 1 * initial_risk
+                elif r_multiple >= 2:
+                    new_trail = entry_price  # breakeven
+                else:
+                    new_trail = planned_stop  # no trail below 2R
             # Only move the stop downward (never give back ground)
             self._trailing_stops[trade_id] = min(existing, new_trail)
 
@@ -363,6 +402,33 @@ class TradeLifecycleManager:
             )
         except Exception as e:
             log.error("lifecycle.order_update_failed", broker_id=broker_order_id, error=str(e))
+
+    async def _cancel_all_child_orders(self, trade_id: str) -> None:
+        """
+        Cancel ALL pending child orders for a trade (SL-M + LIMIT legs).
+        Called before force-close (TIME_EXIT / KILL_SWITCH) so the broker-poll
+        loop doesn't see a later exchange-cancelled order as a fresh exit signal.
+        """
+        try:
+            from services.execution.broker_router import get_broker
+            om = get_broker()
+
+            async with get_db_session() as session:
+                result = await session.execute(
+                    text("""
+                        SELECT broker_order_id FROM orders
+                        WHERE parent_trade_id = :tid
+                          AND status NOT IN ('COMPLETE', 'CANCELLED', 'REJECTED')
+                    """),
+                    {"tid": trade_id},
+                )
+                for row in result.fetchall():
+                    if row.broker_order_id:
+                        await om.cancel_order(row.broker_order_id)
+                        log.info("lifecycle.child_order_cancelled",
+                                 trade_id=trade_id, broker_id=row.broker_order_id)
+        except Exception as e:
+            log.warning("lifecycle.cancel_all_children_failed", trade_id=trade_id, error=str(e))
 
     async def _cancel_sibling_order(self, trade_id: str, skip_broker_id: str) -> None:
         """Cancel the other leg (SL if target hit, or target if SL hit)."""
@@ -541,7 +607,7 @@ class TradeLifecycleManager:
                 exit_order_row = exit_order_result.fetchone()
                 exit_order_id  = str(exit_order_row.id) if exit_order_row else None
 
-                await session.execute(
+                result = await session.execute(
                     text("""
                         UPDATE trades SET
                             status            = 'CLOSED',
@@ -566,6 +632,7 @@ class TradeLifecycleManager:
                             exit_context      = :exit_context,
                             updated_at        = NOW()
                         WHERE id = :trade_id
+                          AND status = 'OPEN'
                     """),
                     {
                         "exit_order_id":    exit_order_id,
@@ -591,6 +658,18 @@ class TradeLifecycleManager:
                     },
                 )
                 await session.commit()
+
+                # Idempotency guard: if no rows updated, trade was already closed
+                # by a concurrent path (e.g. broker poll closed it while TIME_EXIT
+                # was also running). Skip notification to prevent duplicate Telegram.
+                if result.rowcount == 0:
+                    log.warning(
+                        "lifecycle.close_skipped_already_closed",
+                        trade_id = str(trade_id),
+                        symbol   = symbol,
+                        reason   = reason,
+                    )
+                    return
 
             log.info(
                 "lifecycle.trade_closed",
@@ -816,6 +895,32 @@ class TradeLifecycleManager:
         except Exception as e:
             log.error("lifecycle.eod_candle_close_error", symbol=symbol, error=str(e))
         return None
+
+    async def _get_yfinance_spot(self, symbol: str) -> float | None:
+        """
+        Fetch current/last price from yfinance when Redis tick and candle DB are both
+        unavailable (e.g. WebSocket was dead all day). Runs in executor to avoid blocking.
+        """
+        try:
+            import yfinance as yf
+            loop = asyncio.get_running_loop()
+
+            def _fetch() -> float | None:
+                t = yf.Ticker(f"{symbol}.NS")
+                hist = t.history(period="1d", interval="5m")
+                if not hist.empty:
+                    return float(hist["Close"].iloc[-1])
+                return None
+
+            price = await loop.run_in_executor(None, _fetch)
+            if price:
+                log.warning("lifecycle.eod_yfinance_fallback",
+                            symbol=symbol, price=price,
+                            msg="Used yfinance spot — Redis tick unavailable")
+            return price
+        except Exception as e:
+            log.error("lifecycle.eod_yfinance_failed", symbol=symbol, error=str(e))
+            return None
 
     async def _get_current_price(self, symbol: str) -> float | None:
         """Read latest tick price from Redis (dev/paper mode)."""

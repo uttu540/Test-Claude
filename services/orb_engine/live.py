@@ -43,11 +43,12 @@ def _today_15min(buffer_entry: deque, today: date) -> list[dict]:
     result = []
     for c in buffer_entry:
         ts = c["ts"]
-        # Handle both tz-aware and tz-naive timestamps
+        # Always produce an IST-aware datetime so sort() never compares
+        # offset-naive vs offset-aware (mixed buffer from live feed + yfinance backfill).
         if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
             ts_ist = ts.astimezone(IST)
         else:
-            ts_ist = ts
+            ts_ist = ts.replace(tzinfo=IST)   # naive → assume IST
         if ts_ist.date() == today:
             result.append({**c, "_ts_ist": ts_ist})
     return sorted(result, key=lambda x: x["_ts_ist"])
@@ -119,7 +120,7 @@ def _backfill_today_from_yfinance(
             missing.append(sym)
             continue
         has_today = any(
-            (c["ts"].astimezone(IST) if hasattr(c["ts"], "tzinfo") and c["ts"].tzinfo else c["ts"]).date() == today
+            (c["ts"].astimezone(IST) if (hasattr(c["ts"], "tzinfo") and c["ts"].tzinfo) else c["ts"].replace(tzinfo=IST)).date() == today
             for c in buf
         )
         if not has_today:

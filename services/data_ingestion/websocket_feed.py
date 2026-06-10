@@ -180,6 +180,7 @@ class ZerodhaFeed:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._refreshing = False   # guard: prevents concurrent restart fan-out
         self._graceful_stop = False  # set in stop() — suppresses disconnect alert
+        self._refresh_attempts = 0   # exponential backoff counter
         # token_int → trading_symbol lookup (populated in start())
         # Zerodha WebSocket sends instrument_token but NOT tradingsymbol
         self._token_symbol_map: dict[int, str] = {}
@@ -240,9 +241,11 @@ class ZerodhaFeed:
     # ── KiteTicker callbacks (run in ticker's thread) ─────────────────────────
 
     def _on_connect(self, ws, response) -> None:
+        self._refresh_attempts = 0   # reset backoff counter on confirmed connection
         log.info("zerodha_feed.connected", token_count=len(self._tokens))
         ws.subscribe(self._tokens)
-        ws.set_mode(ws.MODE_FULL, self._tokens)
+        ws.set_mode(ws.MODE_QUOTE, self._tokens)  # QUOTE = 3000 token limit (FULL = 500, exceeded at 2120)
+        self._alert_telegram("✅ WebSocket reconnected — ticks resumed.")
 
     def _on_ticks_raw(self, ws, ticks: list[dict]) -> None:
         for raw in ticks:
@@ -276,11 +279,8 @@ class ZerodhaFeed:
         is_token_expired = code == 1006 and reason and "403" in str(reason)
         if is_token_expired:
             self._schedule_token_refresh()
-        elif not self._graceful_stop:
-            self._alert_telegram(
-                f"⚠️ WebSocket disconnected (code={code}). "
-                f"Auto-reconnect in progress — ticks paused."
-            )
+        # code 1006 = abnormal close — KiteTicker auto-reconnects within seconds.
+        # No Telegram alert needed here; _on_reconnect alerts after 2+ failed attempts.
 
     def _on_error(self, ws, code, reason) -> None:
         log.error("zerodha_feed.error", code=code, reason=reason)
@@ -302,10 +302,23 @@ class ZerodhaFeed:
         )
         self._schedule_token_refresh()
 
+    async def force_reconnect(self) -> None:
+        """
+        Called externally (e.g. after daily re-auth) to restart WebSocket with fresh token.
+        Force-clears _refreshing in case a previous retry loop left it stuck True,
+        which would cause _schedule_token_refresh to silently drop the reconnect.
+        """
+        log.info("zerodha_feed.force_reconnect", reason="external_trigger",
+                 was_refreshing=self._refreshing)
+        self._refreshing = False   # clear any stuck flag from earlier retry loops
+        self._refresh_attempts = 0   # reset backoff so no long delay
+        self._schedule_token_refresh()
+
     def _schedule_token_refresh(self) -> None:
         """Schedule a feed restart with fresh token — called from ticker thread."""
         import asyncio
         if self._refreshing:
+            log.debug("zerodha_feed.schedule_refresh_dropped", reason="already_refreshing")
             return   # already restarting — drop duplicate callbacks
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(
@@ -315,20 +328,24 @@ class ZerodhaFeed:
             log.error("zerodha_feed.schedule_refresh_error", error="no loop ref — restart bot manually")
 
     async def _restart_with_fresh_token(self) -> None:
-        """Stop current ticker, re-read token from Redis, reconnect."""
+        """Stop current ticker, re-read token from Redis, reconnect with exponential backoff."""
         if self._refreshing:
             return   # guard against concurrent restarts
         self._refreshing = True
-        log.info("zerodha_feed.token_refresh", status="restarting")
+        self._refresh_attempts += 1
+        # Exponential backoff: 5s, 10s, 20s, 40s, 60s cap
+        delay = min(5 * (2 ** (self._refresh_attempts - 1)), 60)
+        log.info("zerodha_feed.token_refresh", status="restarting",
+                 attempt=self._refresh_attempts, delay_secs=delay)
         try:
             if self._ticker:
                 self._ticker.close()
         except Exception:
             pass
-        await asyncio.sleep(5)   # give auth job time to store fresh token
+        await asyncio.sleep(delay)
         try:
             await self.start()
-            self._alert_telegram("✅ WebSocket reconnected — ticks resumed.")
+            # Note: _refresh_attempts reset happens in _on_connect when connection confirmed
         finally:
             self._refreshing = False
 
@@ -621,6 +638,17 @@ class FeedManager:
     def flush_open_candles(self) -> None:
         """Emit all in-progress candles — call at EOD so last bar is not lost."""
         self._candle_aggregator.flush_open_candles()
+
+    async def force_reconnect(self) -> None:
+        """
+        Delegate a forced reconnect to the underlying ZerodhaFeed (no-op for MockFeed).
+        Call after daily re-auth so the WebSocket reconnects with the fresh token promptly
+        rather than waiting out the exponential backoff delay.
+        """
+        if isinstance(self._feed, ZerodhaFeed):
+            await self._feed.force_reconnect()
+        else:
+            log.debug("feed_manager.force_reconnect_skip", reason="not_zerodha_feed")
 
     async def stop(self) -> None:
         self._feed.stop()
