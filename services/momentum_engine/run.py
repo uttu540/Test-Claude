@@ -342,6 +342,9 @@ def _save_json(
                 "rvol":             t.rvol,
                 "rsi":              t.rsi,
                 "adx":              t.adx,
+                "stop_loss":        t.stop_loss,
+                "max_price":        t.max_price,
+                "max_gain_pct":     t.max_gain_pct,
             }
             for t in trades
         ],
@@ -369,8 +372,18 @@ def _parse_args() -> argparse.Namespace:
                    help="Min confluence score (default: 8)")
     p.add_argument("--min-conf",      type=int, default=65,
                    help="Min signal confidence (default: 65)")
-    p.add_argument("--sector-filter", action="store_true", default=False,
-                   help="Enable sector ROC-20 headwind filter (default: OFF)")
+    p.add_argument("--sector-filter", action="store_true", default=True,
+                   help="Enable sector ROC-20 filter for RANGING regime (default: ON)")
+    p.add_argument("--no-sector-filter", action="store_false", dest="sector_filter",
+                   help="Disable sector filter (blocks RANGING entirely)")
+    p.add_argument("--ranging-sector-roc", type=float, default=5.0,
+                   help="Min sector ROC-20%% to allow RANGING trades (default: 5.0)")
+    p.add_argument("--ranging-rs", type=float, default=3.0,
+                   help="Min stock RS vs Nifty to allow RANGING trades (default: 3.0)")
+    p.add_argument("--watchlist-filter", action="store_true", default=False,
+                   help="Enable RS-ranked incubator watchlist filter — only scan top-50 RS stocks per day (default: OFF)")
+    p.add_argument("--watchlist-size", type=int, default=50,
+                   help="How many top RS stocks qualify each day (default: 50)")
     return p.parse_args()
 
 
@@ -393,14 +406,18 @@ async def main() -> None:
         else end_date - timedelta(days=args.days)
     )
 
-    sector_label = "[green]ON[/green]" if args.sector_filter else "[dim]OFF[/dim]"
+    sector_label    = "[green]ON[/green]"  if args.sector_filter    else "[dim]OFF[/dim]"
+    watchlist_label = "[green]ON[/green]"  if args.watchlist_filter else "[dim]OFF[/dim]"
     console.print(
         f"\n[bold]Momentum Backtest[/bold]  "
         f"{len(symbols)} symbols  |  "
         f"{start_date} → {end_date}  |  "
         f"Min score: {args.min_score}  |  "
         f"Min confidence: {args.min_conf}  |  "
-        f"Sector filter: {sector_label}\n"
+        f"Sector filter: {sector_label}  |  "
+        f"Watchlist filter: {watchlist_label}"
+        + (f" (top-{args.watchlist_size})" if args.watchlist_filter else "")
+        + "\n"
     )
 
     engine = MomentumBacktestEngine(
@@ -411,6 +428,10 @@ async def main() -> None:
         min_score             = args.min_score,
         min_confidence        = args.min_conf,
         enable_sector_filter  = args.sector_filter,
+        watchlist_filter      = args.watchlist_filter,
+        watchlist_size        = args.watchlist_size,
+        ranging_sector_roc    = args.ranging_sector_roc,
+        ranging_rs_threshold  = args.ranging_rs,
     )
 
     result = await engine.run()

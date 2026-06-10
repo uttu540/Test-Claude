@@ -42,7 +42,7 @@ import structlog
 import yfinance as yf
 
 from services.technical_engine.indicators import compute_all
-from services.momentum_engine.signals import (
+from services.momentum_engine_v2.signals import (
     MomentumDetector,
     MomentumSignalType,
     score_momentum_confluence,

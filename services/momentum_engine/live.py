@@ -27,6 +27,7 @@ import pandas as pd
 import structlog
 
 from services.momentum_engine.signals import MomentumDetector, MomentumSignal
+from services.momentum_engine.watchlist import is_in_watchlist
 from services.technical_engine.indicators import compute_all
 from services.technical_engine.signal_generator import Direction, Signal, SignalType
 
@@ -35,16 +36,20 @@ log = structlog.get_logger(__name__)
 # Minimum daily candles needed for reliable indicator warm-up
 MIN_DAILY_BARS = 60
 
-# Regime behaviour:
+# Regime behaviour (V7 — validated 3yr backtest):
 #   TRENDING_UP   → fire freely
-#   RANGING       → skip (too noisy even with RS filter — 23% WR empirically)
-#   TRENDING_DOWN → require RS ≥ 8% vs Nifty 20d ROC (genuine sector leaders only)
+#   RANGING       → require sector ROC-20 ≥ 5% AND stock RS ≥ 3% vs Nifty
+#                   (sector rotation play: Nifty flat but sector trending)
+#   TRENDING_DOWN → require stock RS ≥ 8% vs Nifty 20d ROC (genuine sector leaders only)
 _RS_THRESHOLD = {
     "TRENDING_DOWN": 8.0,
-    # RANGING: no RS gate in paper mode — observing all setups
-    # Restore RANGING block before going live (23% WR in backtest)
+    # RANGING: handled dynamically via sector ROC check below (not a simple RS threshold)
 }
-_REGIME_BLOCKED: set[str] = set()   # RANGING unblocked for paper observation
+_REGIME_BLOCKED: set[str] = set()   # no hard block — RANGING handled via sector gate
+
+# V7 RANGING thresholds (validated: 31.2% WR, +₹12,981 over 3yr)
+_RANGING_SECTOR_ROC_MIN = 5.0   # sector index ROC-20 must be ≥ 5%
+_RANGING_RS_MIN         = 3.0   # stock ROC-20 must beat Nifty by ≥ 3%
 
 
 class MomentumLiveEngine:
@@ -80,32 +85,70 @@ class MomentumLiveEngine:
             return []
 
         # ── Gate 1: Regime filter ─────────────────────────────────────────────
-        # TRENDING_UP: fire freely.
-        # RANGING: skip — too noisy even with RS filter (23% WR empirically).
-        # TRENDING_DOWN: only fire if stock has strong relative strength (RS ≥ 8%)
-        #   — these are genuine sector rotation leaders (defense, sugar etc.)
+        # TRENDING_UP:   fire freely.
+        # RANGING:       sector ROC-20 ≥ 5% AND stock RS ≥ 3% vs Nifty.
+        #                Sector rotation play — Nifty flat, sector trending.
+        # TRENDING_DOWN: stock RS ≥ 8% vs Nifty (genuine sector leaders only).
         if regime in _REGIME_BLOCKED:
             log.info("momentum_live.regime_blocked", symbol=symbol, regime=regime)
             return []
 
-        rs_threshold = _RS_THRESHOLD.get(regime)  # None = TRENDING_UP / UNKNOWN
-        if rs_threshold is not None:
+        # Compute stock ROC-20 and Nifty ROC-20 (needed for RANGING + TRENDING_DOWN)
+        nifty_roc20 = 0.0
+        stock_roc20 = 0.0
+        if regime in ("RANGING", "TRENDING_DOWN"):
             nifty_roc20_raw = await redis.get("momentum:nifty_roc20")
-            nifty_roc20 = 0.0
             if nifty_roc20_raw is not None:
                 try:
                     nifty_roc20 = float(nifty_roc20_raw)
                 except ValueError:
                     pass
 
-            # Stock 20-day ROC from the last 21 bars of daily_df
             if len(daily_df) >= 21:
                 closes = daily_df["close"] if "close" in daily_df.columns else daily_df["Close"]
                 base_close = float(closes.iloc[-21])
                 stock_roc20 = float((closes.iloc[-1] / base_close - 1) * 100) if base_close > 0 else 0.0
-            else:
-                stock_roc20 = 0.0
 
+        if regime == "RANGING":
+            # Gate A: sector must be trending (ROC-20 ≥ 5%)
+            # Only applies when the symbol has a known sector (Nifty500 coverage).
+            # Non-N500 symbols (the other ~1200 in the full NSE universe) skip the
+            # sector gate and fall through to Gate B (RS vs Nifty) only —
+            # they don't get silently blocked just for being outside the N500 map.
+            from services.data_ingestion.nifty500_instruments import get_symbol_sector_map
+            _sector_map  = get_symbol_sector_map()
+            _sector      = _sector_map.get(symbol)
+            if _sector:
+                _sector_roc_raw = await redis.get(f"momentum:sector_roc20:{_sector}")
+                if _sector_roc_raw is None:
+                    log.debug("momentum_live.ranging_sector_missing", symbol=symbol, sector=_sector)
+                    return []   # sector ROC not yet computed — skip conservatively
+
+                try:
+                    _sector_roc = float(_sector_roc_raw)
+                except ValueError:
+                    return []
+
+                if _sector_roc < _RANGING_SECTOR_ROC_MIN:
+                    log.info("momentum_live.ranging_sector_skip",
+                             symbol=symbol, sector=_sector,
+                             sector_roc=round(_sector_roc, 1),
+                             threshold=_RANGING_SECTOR_ROC_MIN)
+                    return []
+            else:
+                log.debug("momentum_live.ranging_sector_unmapped",
+                          symbol=symbol, note="non-N500 symbol — skipping sector gate, RS gate still applies")
+
+            # Gate B: stock must outperform Nifty by ≥ 3%
+            relative_strength = stock_roc20 - nifty_roc20
+            if relative_strength < _RANGING_RS_MIN:
+                log.info("momentum_live.ranging_rs_skip",
+                         symbol=symbol, rs=round(relative_strength, 1),
+                         threshold=_RANGING_RS_MIN)
+                return []
+
+        elif regime == "TRENDING_DOWN":
+            rs_threshold      = _RS_THRESHOLD["TRENDING_DOWN"]
             relative_strength = stock_roc20 - nifty_roc20
             if relative_strength < rs_threshold:
                 log.info(
@@ -116,6 +159,16 @@ class MomentumLiveEngine:
                     rs=round(relative_strength, 1),
                     threshold=rs_threshold,
                 )
+                return []
+
+        # ── Gate 2: RS Watchlist filter (feature flag) ────────────────────────
+        # When enabled, only run Darvas detection on top-50 RS leaders.
+        # Built daily at 4 PM by job_watchlist_update. Flip flag off = instant revert.
+        from config.bot_config import get_bot_config
+        cfg = await get_bot_config()
+        if cfg.get("momentum_watchlist_enabled", False):
+            if not await is_in_watchlist(symbol):
+                log.debug("momentum_live.watchlist_skip", symbol=symbol)
                 return []
 
         # Per-symbol, per-day cooldown — prevents same setup re-firing every 15min

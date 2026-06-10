@@ -1,5 +1,5 @@
 """
-services/momentum_engine/signals.py
+services/momentum_engine_v2/signals.py — V2 - relaxed gates
 ─────────────────────────────────────
 Momentum/trend-following signal detector for TRENDING_UP markets.
 
@@ -160,10 +160,15 @@ class MomentumDetector:
         avg_vol  = float(df["volume"].tail(20).mean() or 1)
         rvol     = round(vol / avg_vol, 2) if avg_vol > 0 else 1.0
 
-        # Hard gate: must be above 200 EMA and have positive ADX for any signal
-        if not above_200:
+        # Relaxed 200 EMA gate: above 200 EMA OR within 8% below with positive stock momentum
+        near_200 = (ema200 > 0 and price >= ema200 * 0.92)
+        if not above_200 and not near_200:
             return []
-        if adx < 20:
+
+        # Relaxed ADX gate: allow if stock had a trend (ADX ≥20) in last 10 bars
+        # Darvas boxes form AFTER a trend — ADX naturally drops during the base
+        adx_recent_max = float(df["adx"].tail(10).max()) if "adx" in df.columns else adx
+        if adx < 20 and adx_recent_max < 20:
             return []
 
         signals: list[MomentumSignal] = []
