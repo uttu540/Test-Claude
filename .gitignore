@@ -69,3 +69,9 @@ frontend/.vite/
 results/
 backups/
 *.sql.gz
+
+# Finder duplicate dirs + local Claude settings
+logs 2/
+results 2/
+scripts 2/
+.claude/
