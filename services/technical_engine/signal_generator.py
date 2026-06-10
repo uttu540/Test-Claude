@@ -83,6 +83,9 @@ class SignalType(str, Enum):
     # Fundamental catalyst signals
     EARNINGS_BEAT      = "EARNINGS_BEAT"       # Gap up + RVOL surge on results day / post-results
     EARNINGS_MISS      = "EARNINGS_MISS"       # Gap down + RVOL surge on results day
+    CATALYST_GAP_PEAD  = "CATALYST_GAP_PEAD"  # Gap 7%+ + RVOL 8×+ + strong close → Day2 PEAD drift
+    INTRADAY_IDARVAS   = "INTRADAY_IDARVAS"   # Gap + RVOL, Darvas box consolidation → breakout at session high
+    INTRADAY_V2_BOX    = "INTRADAY_V2_BOX"    # V2: two-sided 5-min Darvas box, RS + breadth day-grade gated
 
 
 @dataclass
@@ -97,6 +100,15 @@ class Signal:
     indicators:      dict           # Snapshot of key indicator values
     timestamp:       datetime       = field(default_factory=datetime.now)
     notes:           str            = ""
+    # Entry/exit levels — set by live engines with defined entry logic (catalyst, IDARVAS, etc.)
+    entry_price:     float | None   = None
+    stop_loss:       float | None   = None
+    target:          float | None   = None
+
+    @property
+    def symbol(self) -> str:
+        """Alias for trading_symbol — convenience accessor."""
+        return self.trading_symbol
 
     def to_dict(self) -> dict:
         import numpy as _np

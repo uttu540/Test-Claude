@@ -92,7 +92,9 @@ console = Console()
 # Format: {symbol: {timeframe: deque([candle_dicts...], maxlen=BUFFER_MAX)}}
 _candle_buffer: dict[str, dict[str, deque]] = {}
 _active_signal_tasks: set[str] = set()   # Symbols with an in-flight signal task
+_active_v2_tasks: set[str] = set()       # Symbols with an in-flight intraday V2 task
 _signal_semaphore: asyncio.Semaphore | None = None  # Initialised in main() after event loop starts
+_v2_semaphore: asyncio.Semaphore | None = None      # Throttle for intraday V2 5-min scans
 BUFFER_MAX = 300   # Default; overridden per-timeframe by BUFFER_MAX_BY_TF
 # 1min: 375 candles/session — 300 would silently drop the first ~75 bars of the day.
 # Use 500 to keep today + partial yesterday without unbounded memory growth.
@@ -106,6 +108,7 @@ BUFFER_MAX_BY_TF: dict[str, int] = {
 _scheduler: AsyncIOScheduler | None = None   # Set in main(); used by retry jobs
 _tick_count: int = 0                          # Rolling tick counter for diagnostics
 _feed_manager: "FeedManager | None" = None   # Set in main(); used by EOD flush
+_orb_scan_lock: asyncio.Lock | None = None   # prevents concurrent ORB scan executions
 
 
 # ─── Candle Handler ───────────────────────────────────────────────────────────
@@ -150,6 +153,82 @@ def on_candle_complete(candle: OHLCVCandle) -> None:
             task.add_done_callback(lambda _: _active_signal_tasks.discard(sym))
         except RuntimeError as e:
             log.error("candle.create_task_failed", symbol=sym, error=str(e))
+
+    # Intraday V2 engine runs on 5-min candle closes (two-sided box breakouts).
+    # Routed directly to TradeExecutor — bypasses the long-only swing pipeline.
+    if tf == "5min" and sym not in _active_v2_tasks:
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(_run_v2_signal(sym))
+            _active_v2_tasks.add(sym)
+            task.add_done_callback(lambda _: _active_v2_tasks.discard(sym))
+        except RuntimeError as e:
+            log.error("candle.v2_task_failed", symbol=sym, error=str(e))
+
+
+async def _run_v2_signal(symbol: str) -> None:
+    """
+    Intraday V2 detection on a 5-min candle close.
+
+    Cheap pre-checks happen inside detect() (day context missing/C-grade,
+    cooldown, caps) so most calls return in <1ms with one Redis read.
+    Fires INTRADAY_V2_BOX signals straight to TradeExecutor (shorts allowed).
+    """
+    sem = _v2_semaphore
+    if sem is not None:
+        await sem.acquire()
+    try:
+        from config.market_hours import is_market_open
+        if not is_market_open():
+            return
+
+        buf_5m = _candle_buffer.get(symbol, {}).get("5min")
+        if not buf_5m or len(buf_5m) < 9:
+            return
+        daily_buf = _candle_buffer.get(symbol, {}).get("1day")
+
+        from services.intraday_engine_v2.live import IntradayV2LiveEngine
+        redis = get_redis()
+        sig = await IntradayV2LiveEngine().detect(symbol, buf_5m, daily_buf, redis)
+        if sig is None:
+            return
+
+        log.info(
+            "v2_signal.firing",
+            symbol=symbol, direction=sig.direction.value,
+            entry=sig.entry_price, stop=sig.stop_loss, target=sig.target,
+        )
+        from services.execution.trade_executor import TradeExecutor
+        trade = await TradeExecutor().execute(sig)
+        if trade:
+            log.info("v2_signal.trade_opened", symbol=symbol, direction=sig.direction.value)
+    except Exception as e:
+        log.warning("v2_signal.error", symbol=symbol, error=str(e))
+    finally:
+        if sem is not None:
+            sem.release()
+
+
+async def job_intraday_v2_context() -> None:
+    """9:26 IST — compute universe breadth + day grade for the intraday V2 engine."""
+    try:
+        from config.market_hours import is_market_open
+        if not is_market_open():
+            log.info("v2_context.market_closed")
+            return
+        from services.intraday_engine_v2.live import compute_day_context
+        redis = get_redis()
+        ctx = await compute_day_context(_candle_buffer, redis)
+        if ctx:
+            await get_notifier()._send(
+                f"📊 *Intraday V2 day context*\n"
+                f"Grade: *{ctx['grade']}* ({ctx['direction']})\n"
+                f"Breadth: {ctx['breadth']:.0%} | Market: {ctx['market_925']:+.2f}%\n"
+                f"Universe: {ctx['universe']} stocks",
+                parse_mode="Markdown",
+            )
+    except Exception as e:
+        log.error("v2_context.error", error=str(e))
 
 
 async def _run_signals(symbol: str) -> None:
@@ -313,7 +392,7 @@ async def _run_signals(symbol: str) -> None:
             return
 
         # Signals that only make sense intraday (VWAP resets daily, ORB is 9:15-9:30)
-        _INTRADAY_ONLY = frozenset({"VWAP_RECLAIM", "ORB_BREAKOUT"})
+        _INTRADAY_ONLY = frozenset({"VWAP_RECLAIM", "ORB_BREAKOUT", "INTRADAY_IDARVAS"})
 
         # Momentum engine — regime/RS logic handled inside MomentumLiveEngine
         if "1day" in ohlcv_by_tf:
@@ -339,6 +418,60 @@ async def _run_signals(symbol: str) -> None:
         except Exception as _e:
             log.warning("earnings_engine.check_error", symbol=symbol, error=str(_e))
 
+        # ── Catalyst gap PEAD engine (Day2 entry after gap day) ───────────────
+        # Detects: yesterday gapped 7%+ with RVOL 8×+ and held the gap (close/high≥90%).
+        # Today enters at open if gap still holding (today open ≥99% yesterday close).
+        # Bypass regime gates — the volume-confirmed gap IS the catalyst.
+        try:
+            if "1day" in ohlcv_by_tf:
+                from services.catalyst_engine.live import CatalystLiveEngine
+                # Extract today's 9:15 candle open from buffer
+                _today_open: float | None = None
+                _buf_15m = _candle_buffer.get(symbol, {}).get("15min")
+                if _buf_15m:
+                    from datetime import timezone as _tz, timedelta as _td, date as _date
+                    _IST = _tz(_td(hours=5, minutes=30))
+                    _today = datetime.now(_IST).date()
+                    for _c in _buf_15m:
+                        _ts = _c["ts"]
+                        _ts_ist = _ts.astimezone(_IST) if getattr(_ts, "tzinfo", None) else _ts.replace(tzinfo=_IST)
+                        if _ts_ist.date() == _today and _ts_ist.hour == 9 and _ts_ist.minute == 15:
+                            _today_open = float(_c["open"])
+                            break
+                cat_sig = await CatalystLiveEngine().detect(
+                    symbol     = symbol,
+                    daily_df   = ohlcv_by_tf["1day"],
+                    today_open = _today_open,
+                    redis      = redis,
+                )
+                if cat_sig:
+                    signals.append(cat_sig)
+        except Exception as _e:
+            log.warning("catalyst_engine.check_error", symbol=symbol, error=str(_e))
+
+        # ── IDARVAS intraday engine (Darvas box breakout on gap stocks) ──────
+        # Gap ≥1.5% + RVOL ≥2× stock; session high consolidates ≥75 min;
+        # breakout of box top with volume + VWAP confirmation.
+        # Validated 2024: 32 trades, 68.75% WR, Sharpe 9.8, max DD ₹1,060.
+        # Bypasses regime gate — gap+RVOL IS the catalyst context.
+        try:
+            _buf_15m_idarvas = _candle_buffer.get(symbol, {}).get("15min")
+            if _buf_15m_idarvas and "1day" in ohlcv_by_tf:
+                from services.intraday_engine.live import IntradayLiveEngine as _ILE
+                _prev_close_idarvas = float(ohlcv_by_tf["1day"]["close"].iloc[-2]) \
+                    if len(ohlcv_by_tf["1day"]) >= 2 else 0.0
+                _idarvas_sig = await _ILE().detect(
+                    symbol    = symbol,
+                    buf_15m   = _buf_15m_idarvas,
+                    prev_close = _prev_close_idarvas,
+                    daily_df  = ohlcv_by_tf["1day"],
+                    redis     = redis,
+                )
+                if _idarvas_sig:
+                    signals.append(_idarvas_sig)
+        except Exception as _e:
+            log.warning("idarvas_engine.check_error", symbol=symbol, error=str(_e))
+
         # Long-only: short-side code preserved but disabled from paper/live
         signals = [s for s in signals if s.direction.value == "BULLISH"]
 
@@ -355,7 +488,27 @@ async def _run_signals(symbol: str) -> None:
             log.info("signal.none_after_filter", symbol=symbol, regime=regime)
             return
 
-        top = signals[0]   # Highest confidence signal
+        # ── Signal priority sort ──────────────────────────────────────────────
+        # Priority order (explicit, not just insertion order):
+        #   1. Momentum engine signals (DARVAS_BREAKOUT, BREAKOUT_52W, etc.) — primary swing engine
+        #   2. Catalyst / earnings signals (CATALYST_GAP_PEAD, EARNINGS_BEAT)
+        #   3. IDARVAS intraday
+        #   4. Everything else
+        # Within each tier: sort by confidence descending.
+        _MOMENTUM_SIGNALS = {
+            "DARVAS_BREAKOUT", "BREAKOUT_52W", "VOLUME_THRUST", "EMA_RIBBON", "BULL_MOMENTUM",
+        }
+        _CATALYST_SIGNALS = {"CATALYST_GAP_PEAD", "EARNINGS_BEAT", "EARNINGS_MISS"}
+
+        def _signal_priority(s: Signal) -> tuple:
+            t = s.signal_type.value
+            tier = 3 if t in _MOMENTUM_SIGNALS else \
+                   2 if t in _CATALYST_SIGNALS else \
+                   1 if t == "INTRADAY_IDARVAS" else 0
+            return (tier, s.confidence)
+
+        signals.sort(key=_signal_priority, reverse=True)
+        top = signals[0]   # Highest priority + confidence signal
 
         # ── Daily signal deduplication ────────────────────────────────────────
         # 1day signals fire on every 15min candle close but the daily bar hasn't
@@ -364,7 +517,9 @@ async def _run_signals(symbol: str) -> None:
         # as evaluated for today. Subsequent candle closes skip it.
         # 15min signals are NOT deduplicated — each candle is genuinely new data.
         # EARNINGS_BEAT/MISS signals use their own earnings:fired cooldown key instead.
-        _earnings_signal = top.signal_type.value in ("EARNINGS_BEAT", "EARNINGS_MISS")
+        _earnings_signal = top.signal_type.value in (
+            "EARNINGS_BEAT", "EARNINGS_MISS", "CATALYST_GAP_PEAD", "INTRADAY_IDARVAS"
+        )
         if top.timeframe == "1day" and not _earnings_signal:
             dedup_key = f"signal:daily_evaluated:{symbol}:{top.signal_type.value}"
             if await redis.get(dedup_key):
@@ -418,6 +573,8 @@ async def _run_signals(symbol: str) -> None:
             "KEY_LEVEL_BOUNCE",               # structural reversal — high quality
             "OPENING_DRIVE",                  # gap + strong first candle — clean setup
             "EARNINGS_BEAT",                  # fundamental catalyst — always high quality
+            "CATALYST_GAP_PEAD",              # PEAD Day2 entry — backtest validated 2.28 Sharpe
+            "INTRADAY_IDARVAS",               # Darvas box on gap stock — backtest validated Sharpe 9.8
         }
         _ind  = top.indicators if hasattr(top, "indicators") and top.indicators else {}
         _bull = top.direction.value == "BULLISH"
@@ -565,6 +722,10 @@ async def _run_signals(symbol: str) -> None:
                 if top.signal_type.value in ("EARNINGS_BEAT", "EARNINGS_MISS"):
                     # 72h cooldown — same earnings event shouldn't re-fire next morning
                     await redis.setex(f"earnings:fired:{symbol}", 72 * 3600, "1")
+                elif top.signal_type.value == "CATALYST_GAP_PEAD":
+                    pass  # cooldown already set in CatalystLiveEngine.detect()
+                elif top.signal_type.value == "INTRADAY_IDARVAS":
+                    pass  # cooldown already set in IntradayLiveEngine.detect()
                 else:
                     cooldown_key = f"momentum:cooldown:{symbol}"
                     await redis.setex(cooldown_key, 86_400, "1")
@@ -606,6 +767,11 @@ async def job_daily_auth(retry_count: int = 0) -> None:
         await auth.authenticate()
         if retry_count > 0:
             log.info("scheduler.auth_retry_succeeded", attempt=retry_count + 1)
+        # Kick WebSocket feed to reconnect with the new token immediately.
+        # Without this, the feed's retry loop may be backed off for minutes.
+        if _feed_manager is not None:
+            asyncio.create_task(_feed_manager.force_reconnect())
+            log.info("scheduler.auth_feed_reconnect_triggered")
     except Exception as e:
         log.error("scheduler.auth_failed", attempt=retry_count + 1, error=str(e))
         MAX_RETRIES = 2
@@ -641,6 +807,9 @@ async def job_fetch_earnings_calendar() -> None:
     """
     from config.market_hours import is_trading_day
     if not is_trading_day():
+        return
+    if await _is_job_done("earnings_calendar"):
+        log.info("scheduler.earnings_calendar_skip", reason="already_done_today")
         return
     try:
         from services.earnings_engine.announcements import (
@@ -687,6 +856,9 @@ async def job_earnings_scan() -> None:
     from config.market_hours import is_trading_day
     if not is_trading_day():
         return
+    if await _is_job_done("earnings_scan"):
+        log.info("scheduler.earnings_scan_skip", reason="already_done_today")
+        return
     try:
         from services.earnings_engine.engine import EarningsSignalEngine
         from services.execution.trade_executor import TradeExecutor
@@ -725,6 +897,9 @@ async def job_market_open_briefing() -> None:
     if not is_trading_day():
         log.info("scheduler.briefing_skip", reason="NSE holiday or weekend")
         return
+    if await _is_job_done("market_briefing"):
+        log.info("scheduler.briefing_skip", reason="already_sent_today")
+        return
 
     import json as _json
     from services.ai_strategy.claude_client import get_claude_client
@@ -741,15 +916,20 @@ async def job_market_open_briefing() -> None:
     if vix_raw:
         vix = _json.loads(vix_raw).get("lp")
 
-    # ── Nifty 50 pre-open change % ────────────────────────────────────────────
+    # ── Nifty 50 expected change % ────────────────────────────────────────────
+    # NOTE: briefing fires at 9:10 AM — market still in pre-open session.
+    # Redis tick lp = pre-open equilibrium price, NOT actual opening price.
+    # Pre-open price can differ 50-100pts from actual open → use GIFT Nifty instead.
+    # nifty_change_pct will be overridden below with GIFT Nifty once fetched.
     nifty_change_pct = 0.0
+    nifty_prev_close = 0.0
     nifty_raw = await redis.get("market:tick:NIFTY 50")
     if nifty_raw:
-        nifty_data = _json.loads(nifty_raw)
-        lp = nifty_data.get("lp", 0)
-        c  = nifty_data.get("c", lp)   # previous close
-        if c and c != 0:
-            nifty_change_pct = (lp - c) / c * 100
+        try:
+            nifty_data   = _json.loads(nifty_raw)
+            nifty_prev_close = float(nifty_data.get("c", 0) or 0)  # prev close only
+        except Exception:
+            pass
 
     # ── Recent news headlines + GIFT Nifty (run in parallel) ─────────────────
     from services.data_ingestion.gift_nifty import (
@@ -792,6 +972,11 @@ async def job_market_open_briefing() -> None:
     news_score  = news_score  if isinstance(news_score,  float) else None
     fii_str     = fii_str     if isinstance(fii_str,     str)   else None
     adv_dec_str = adv_dec_str if isinstance(adv_dec_str, str)   else None
+
+    # Use GIFT Nifty % as the expected Nifty change — more accurate than pre-open lp
+    # GIFT Nifty futures closely track Nifty 50 expected open
+    if gift_pct is not None:
+        nifty_change_pct = gift_pct
 
     # VIX fallback: if Redis tick unavailable (WebSocket not yet subscribed), use yfinance
     if vix is None:
@@ -878,74 +1063,91 @@ async def job_orb_scan() -> list:
     qualifying setups directly through TradeExecutor — bypassing the daily-signal
     dedup and momentum confluence gate (ORB has its own entry criteria).
     """
-    from config.market_hours import is_trading_day
-    if not is_trading_day():
-        log.info("scheduler.orb_scan_skip", reason="NSE holiday or weekend")
+    # Redis SETNX: atomic dedup gate — works across asyncio tasks AND APScheduler threads.
+    # asyncio.Lock alone is insufficient when APScheduler fires two tasks near-simultaneously.
+    from datetime import date as _orb_date
+    _redis_dedup = get_redis()
+    _inprog_key  = f"job:inprogress:orb_scan:{_orb_date.today()}"
+    _acquired = await _redis_dedup.set(_inprog_key, "1", nx=True, ex=7200)
+    if not _acquired:
+        log.info("scheduler.orb_scan_skip", reason="already_running_or_done")
         return []
 
-    from datetime import date as _date
-    from services.orb_engine.live import scan_orb_signals
-    from services.data_ingestion.nifty500_instruments import get_live_universe
-    from services.execution.trade_executor import TradeExecutor
+    global _orb_scan_lock
+    if _orb_scan_lock is None:
+        _orb_scan_lock = asyncio.Lock()
+    async with _orb_scan_lock:
+        if await _is_job_done("orb_scan"):
+            log.info("scheduler.orb_scan_skip", reason="already_done_today")
+            return []
+        from config.market_hours import is_trading_day
+        if not is_trading_day():
+            log.info("scheduler.orb_scan_skip", reason="NSE holiday or weekend")
+            return []
 
-    # Check daily loss limit before scanning — no point firing if already at limit
-    from services.risk_engine.engine import RiskEngine
-    _risk = RiskEngine()
-    daily_pnl = await _risk._get_todays_pnl()
-    from config.settings import settings as _settings
-    if daily_pnl <= -_settings.daily_loss_limit_inr:
-        log.warning("orb_scan.blocked_daily_loss_limit", daily_pnl=daily_pnl)
-        return []
+        from datetime import date as _date
+        from services.orb_engine.live import scan_orb_signals
+        from services.data_ingestion.nifty500_instruments import get_live_universe
+        from services.execution.trade_executor import TradeExecutor
 
-    symbols = get_live_universe()
-    today   = _date.today()
+        # Check daily loss limit before scanning — no point firing if already at limit
+        from services.risk_engine.engine import RiskEngine
+        _risk = RiskEngine()
+        daily_pnl = await _risk._get_todays_pnl()
+        from config.settings import settings as _settings
+        if daily_pnl <= -_settings.daily_loss_limit_inr:
+            log.warning("orb_scan.blocked_daily_loss_limit", daily_pnl=daily_pnl)
+            return []
 
-    log.info("orb_scan.start", symbols=len(symbols))
-    import asyncio as _asyncio
-    import functools as _functools
-    signals = await _asyncio.get_running_loop().run_in_executor(
-        None, _functools.partial(scan_orb_signals, _candle_buffer, symbols, today)
-    )
+        symbols = get_live_universe()
+        today   = _date.today()
 
-    # Audit log — persist daily scan results to Redis (TTL 7 days)
-    import json as _json
-    _redis = get_redis()
-    _audit = {
-        "date": str(today),
-        "total_symbols": len(symbols),
-        "setups_found": len(signals),
-        "setups": [
-            {"symbol": s.trading_symbol, "entry": s.price_at_signal,
-             "or_high": s.indicators.get("or_high"), "or_low": s.indicators.get("or_low"),
-             "vol_ratio": s.indicators.get("vol_ratio")}
-            for s in signals
-        ],
-    }
-    await _redis.setex(f"orb:audit:{today}", 7 * 86400, _json.dumps(_audit))
+        log.info("orb_scan.start", symbols=len(symbols))
+        import asyncio as _asyncio
+        import functools as _functools
+        signals = await _asyncio.get_running_loop().run_in_executor(
+            None, _functools.partial(scan_orb_signals, _candle_buffer, symbols, today)
+        )
 
-    if not signals:
-        log.info("orb_scan.no_setups")
-        return []
+        # Audit log — persist daily scan results to Redis (TTL 7 days)
+        import json as _json
+        _redis = get_redis()
+        _audit = {
+            "date": str(today),
+            "total_symbols": len(symbols),
+            "setups_found": len(signals),
+            "setups": [
+                {"symbol": s.trading_symbol, "entry": s.price_at_signal,
+                 "or_high": s.indicators.get("or_high"), "or_low": s.indicators.get("or_low"),
+                 "vol_ratio": s.indicators.get("vol_ratio")}
+                for s in signals
+            ],
+        }
+        await _redis.setex(f"orb:audit:{today}", 7 * 86400, _json.dumps(_audit))
 
-    # Cap at top 5 setups by volume ratio — prevents flooding positions on strong trend days
-    MAX_ORB_TRADES = 5
-    signals = sorted(signals, key=lambda s: s.indicators.get("vol_ratio", 0), reverse=True)[:MAX_ORB_TRADES]
+        if not signals:
+            log.info("orb_scan.no_setups")
+            return []
 
-    log.info("orb_scan.firing", count=len(signals), symbols=[s.trading_symbol for s in signals])
+        # Cap at top 5 setups by volume ratio — prevents flooding positions on strong trend days
+        MAX_ORB_TRADES = 5
+        signals = sorted(signals, key=lambda s: s.indicators.get("vol_ratio", 0), reverse=True)[:MAX_ORB_TRADES]
 
-    executor = TradeExecutor()
-    for sig in signals:
-        try:
-            trade = await executor.execute(sig)
-            if trade:
-                log.info("orb_scan.trade_opened",
-                         symbol=sig.trading_symbol, entry=sig.price_at_signal,
-                         stop=sig.indicators.get("stop_price"))
-        except Exception as e:
-            log.warning("orb_scan.execute_error", symbol=sig.trading_symbol, error=str(e))
+        log.info("orb_scan.firing", count=len(signals), symbols=[s.trading_symbol for s in signals])
 
-    await _mark_job_done("orb_scan")
-    return signals
+        executor = TradeExecutor()
+        for sig in signals:
+            try:
+                trade = await executor.execute(sig)
+                if trade:
+                    log.info("orb_scan.trade_opened",
+                             symbol=sig.trading_symbol, entry=sig.price_at_signal,
+                             stop=sig.indicators.get("stop_price"))
+            except Exception as e:
+                log.warning("orb_scan.execute_error", symbol=sig.trading_symbol, error=str(e))
+
+        await _mark_job_done("orb_scan")
+        return signals
 
 
 async def job_market_open_ping() -> None:
@@ -958,6 +1160,9 @@ async def job_market_open_ping() -> None:
     from config.market_hours import is_trading_day
     if not is_trading_day():
         return
+    if await _is_job_done("market_open_ping"):
+        log.info("scheduler.market_open_ping_skip", reason="already_sent_today")
+        return
     try:
         import json as _json
         import asyncio as _asyncio
@@ -968,36 +1173,52 @@ async def job_market_open_ping() -> None:
             """Return (current_price, prev_close) for the given index."""
             lp, prev_close = None, None
 
-            # Try Redis tick first (live feed)
+            # Try Redis tick first (live feed) — only if tick is from TODAY
             tick_raw = await redis.get(f"market:tick:{symbol}")
             if tick_raw:
                 try:
-                    d = _json.loads(tick_raw)
-                    lp         = float(d.get("lp") or 0) or None
-                    prev_close = float(d.get("c")  or 0) or None
+                    from datetime import date as _date
+                    d  = _json.loads(tick_raw)
+                    ts = d.get("ts", "")
+                    # Accept tick only if it was written today (TTL=300s so stale ticks expire,
+                    # but guard explicitly in case clock skew re-delivers old data)
+                    if ts and ts[:10] == _date.today().isoformat():
+                        lp         = float(d.get("lp") or 0) or None
+                        prev_close = float(d.get("c")  or 0) or None
                 except Exception:
                     pass
 
-            # Fall back to yfinance if Redis unavailable
+            # Fall back to yfinance — use 1m interval to get today's actual open price.
+            # Daily interval at 9:16 AM returns yesterday's close as iloc[-1] (today not complete).
+            # 1m interval returns actual intraday bars including the 9:15 opening candle.
             if lp is None or prev_close is None:
                 try:
                     import yfinance as yf
-                    _ticker_sym = yf_ticker  # capture for lambda
-                    hist = await _asyncio.get_running_loop().run_in_executor(
-                        None,
-                        lambda: yf.Ticker(_ticker_sym).history(
-                            period="5d", interval="1d", auto_adjust=True
-                        ),
-                    )
-                    if hist is not None and len(hist) >= 2:
-                        prev_close = float(hist["Close"].iloc[-2])
-                        lp         = float(hist["Close"].iloc[-1])
-                    elif hist is not None and len(hist) == 1:
-                        lp         = float(hist["Close"].iloc[-1])
-                        prev_close = lp   # no yesterday data, show flat
+                    _ticker_sym = yf_ticker
+
+                    def _fetch():
+                        # Get today's 1m bars — first bar = opening price
+                        intra = yf.Ticker(_ticker_sym).history(period="1d", interval="1m", auto_adjust=True)
+                        # Get prev close from daily data
+                        daily = yf.Ticker(_ticker_sym).history(period="5d", interval="1d", auto_adjust=True)
+                        return intra, daily
+
+                    intra, daily = await _asyncio.get_running_loop().run_in_executor(None, _fetch)
+
+                    # prev_close = last completed daily bar close (yesterday)
+                    if daily is not None and len(daily) >= 1:
+                        prev_close = float(daily["Close"].iloc[-1])
+
+                    # lp = latest available intraday price (most recent 1m bar close)
+                    if intra is not None and len(intra) >= 1:
+                        lp = float(intra["Close"].iloc[-1])
+                    elif prev_close is not None:
+                        lp = prev_close  # market not yet open, show flat
+
                 except Exception as _yf_err:
                     log.warning("scheduler.market_open_ping_yfinance_error",
                                 symbol=symbol, error=str(_yf_err))
+                    # keep lp/prev_close as None — handled below
 
             return lp, prev_close
 
@@ -1098,6 +1319,62 @@ async def job_eod_summary() -> None:
                 )
     except Exception as e:
         log.error("scheduler.eod_summary_error", error=str(e))
+
+
+async def job_watchlist_update() -> None:
+    """4:00 PM IST — Rebuild RS-ranked incubator watchlist for the momentum engine."""
+    try:
+        from services.data_ingestion.nifty500_instruments import NIFTY500
+        from services.momentum_engine.watchlist import WatchlistBuilder
+
+        symbols = [s for s, _, _ in NIFTY500]
+        builder = WatchlistBuilder()
+        watchlist = await builder.update(symbols)
+        log.info("scheduler.watchlist_update_done", count=len(watchlist), top5=watchlist[:5])
+    except Exception as e:
+        log.error("scheduler.watchlist_update_error", error=str(e), exc_info=True)
+
+
+async def job_sector_roc_update() -> None:
+    """3:45 PM IST — Compute sector index ROC-20 and store in Redis.
+
+    Used by MomentumLiveEngine to gate RANGING-regime trades:
+    only fire Darvas signals when stock's sector ROC-20 ≥ 5%
+    (sector trending even though Nifty is flat = sector rotation play).
+
+    Redis keys: momentum:sector_roc20:{sector_name}  (float, TTL 28h)
+    """
+    try:
+        import yfinance as yf
+        import pandas as pd
+        from services.data_ingestion.nifty500_instruments import SECTOR_INDEX_MAP
+
+        redis  = _get_redis()
+        loaded = 0
+
+        for sector, yf_ticker in SECTOR_INDEX_MAP.items():
+            try:
+                raw = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda t=yf_ticker: yf.Ticker(t).history(period="60d", interval="1d", auto_adjust=True),
+                )
+                if raw.empty:
+                    continue
+
+                closes = raw["Close"].ffill()
+                if len(closes) < 21:
+                    continue
+
+                roc20 = float((closes.iloc[-1] / closes.iloc[-21] - 1) * 100)
+                redis_key = f"momentum:sector_roc20:{sector}"
+                await redis.set(redis_key, str(round(roc20, 2)), ex=28 * 3600)
+                loaded += 1
+            except Exception as e:
+                log.warning("scheduler.sector_roc_symbol_error", sector=sector, error=str(e))
+
+        log.info("scheduler.sector_roc_update_done", loaded=loaded, total=len(SECTOR_INDEX_MAP))
+    except Exception as e:
+        log.error("scheduler.sector_roc_update_error", error=str(e), exc_info=True)
 
 
 # ─── Startup & Shutdown ───────────────────────────────────────────────────────
@@ -1310,6 +1587,15 @@ async def _preseed_candle_buffer() -> None:
     asyncio.create_task(_preseed_15min_bg())
 
 
+async def _is_job_done(job_name: str) -> bool:
+    """Return True if job already ran successfully today (Redis flag set)."""
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    today = _dt.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+    redis = get_redis()
+    return bool(await redis.get(f"job:done:{job_name}:{today}"))
+
+
 async def _mark_job_done(job_name: str) -> None:
     """
     Set Redis flag indicating `job_name` completed successfully today.
@@ -1513,6 +1799,87 @@ async def job_session_regime(lock_after: bool = False) -> None:
         log.error("regime.session_job_error", error=str(e))
 
 
+async def _bootstrap_sector_roc() -> None:
+    """
+    Compute sector_roc20 Redis keys at startup if missing or stale.
+    The 3:45 PM cron keeps these fresh during normal operation, but a mid-day
+    restart leaves all keys missing → MomentumLiveEngine skips every RANGING
+    symbol conservatively → zero momentum trades even when valid setups exist.
+    TTL 28h so keys survive overnight until next day's cron run.
+    """
+    try:
+        import yfinance as yf
+        from services.data_ingestion.nifty500_instruments import SECTOR_INDEX_MAP
+        from database.connection import get_redis as _get_redis
+
+        redis = _get_redis()
+
+        # Check if keys already populated (any sector key exists and is fresh)
+        existing = await redis.keys("momentum:sector_roc20:*")
+        if len(existing) >= len(SECTOR_INDEX_MAP) // 2:
+            log.info("startup.sector_roc_ok", count=len(existing))
+            return
+
+        log.info("startup.sector_roc_bootstrap_start",
+                 missing=len(SECTOR_INDEX_MAP) - len(existing))
+        loaded = 0
+        for sector, yf_ticker in SECTOR_INDEX_MAP.items():
+            try:
+                raw = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda t=yf_ticker: yf.Ticker(t).history(
+                        period="60d", interval="1d", auto_adjust=True
+                    ),
+                )
+                if raw is None or raw.empty or len(raw) < 21:
+                    continue
+                closes = raw["Close"].ffill()
+                roc20 = float((closes.iloc[-1] / closes.iloc[-21] - 1) * 100)
+                await redis.set(
+                    f"momentum:sector_roc20:{sector}",
+                    str(round(roc20, 2)),
+                    ex=28 * 3600,
+                )
+                loaded += 1
+            except Exception as _e:
+                log.warning("startup.sector_roc_symbol_error", sector=sector, error=str(_e))
+
+        log.info("startup.sector_roc_bootstrap_done",
+                 loaded=loaded, total=len(SECTOR_INDEX_MAP))
+    except Exception as e:
+        log.warning("startup.sector_roc_bootstrap_failed", error=str(e))
+
+
+async def _bootstrap_watchlist() -> None:
+    """
+    Ensure the RS watchlist is populated before market open.
+    Runs in background at startup. Rebuilds if:
+      - Redis key missing (first run / Redis flush)
+      - Last update timestamp is not from today
+    Skips rebuild if watchlist was already updated today (4 PM cron already ran).
+    """
+    try:
+        from services.momentum_engine.watchlist import WatchlistBuilder, REDIS_UPDATED_KEY
+        from services.data_ingestion.nifty500_instruments import NIFTY500
+        from database.connection import get_redis as _get_redis
+
+        redis = _get_redis()
+        updated_raw = await redis.get(REDIS_UPDATED_KEY)
+        today_str   = datetime.now().strftime("%Y-%m-%d")
+
+        if updated_raw and today_str in updated_raw:
+            log.info("startup.watchlist_ok", updated=updated_raw)
+            return
+
+        log.info("startup.watchlist_rebuild", reason="stale or missing")
+        symbols = [s for s, _, _ in NIFTY500]
+        builder = WatchlistBuilder()
+        watchlist = await builder.update(symbols)
+        log.info("startup.watchlist_ready", count=len(watchlist), top5=watchlist[:5])
+    except Exception as e:
+        log.warning("startup.watchlist_error", error=str(e))
+
+
 async def _bootstrap_regime() -> None:
     """
     Compute and publish market regime from historical daily candles at startup.
@@ -1689,6 +2056,51 @@ async def startup() -> None:
     # 9. Trade lifecycle manager (monitors open trades, closes on SL/target hit)
     asyncio.create_task(get_lifecycle_manager().run())
 
+    # 9a. Stale open position cleanup — close any OPEN intraday trades left over
+    #     from a previous day (bot restart missed the 3:12 PM squareoff).
+    #     Closes at the last known tick price (or entry price if no tick available).
+    try:
+        from sqlalchemy import text as _text
+        from datetime import timezone as _tz, date as _date
+        IST_OFFSET = _tz(timedelta(hours=5, minutes=30))
+        today_ist  = datetime.now(IST_OFFSET).date()
+        async with get_db_session() as _session:
+            stale = await _session.execute(
+                _text(
+                    "SELECT id, trading_symbol, entry_price, entry_quantity "
+                    "FROM trades WHERE status = 'OPEN' "
+                    "AND DATE(entry_time AT TIME ZONE 'Asia/Kolkata') < :today"
+                ),
+                {"today": today_ist},
+            )
+            stale_rows = stale.fetchall()
+        if stale_rows:
+            log.warning(
+                "startup.stale_positions_found",
+                count=len(stale_rows),
+                symbols=[r.trading_symbol for r in stale_rows],
+                msg="Closing stale intraday positions from previous day(s)",
+            )
+            closed_stale = await get_lifecycle_manager().close_all_open_trades(
+                reason="STALE_POSITION_CLEANUP"
+            )
+            log.warning("startup.stale_positions_closed", count=closed_stale)
+        else:
+            log.info("startup.stale_positions_none")
+    except Exception as _stale_err:
+        log.error("startup.stale_position_check_failed", error=str(_stale_err))
+
+    # 10. Watchlist bootstrap — ensure RS watchlist is populated before market open.
+    #     Runs as background task so it doesn't block startup.
+    #     Logic: if watchlist key missing or last update was not today, rebuild now.
+    asyncio.create_task(_bootstrap_watchlist())
+
+    # 10a. Sector ROC bootstrap — compute sector_roc20 keys if missing.
+    #      Without these, MomentumLiveEngine returns [] for ALL RANGING symbols
+    #      (conservative skip when sector data absent). The cron runs at 3:45 PM,
+    #      so a mid-day restart leaves keys missing for the entire trading session.
+    asyncio.create_task(_bootstrap_sector_roc())
+
     log.info("startup.complete", env=settings.app_env.value)
 
     # ── Startup Telegram notification ─────────────────────────────────────────
@@ -1734,6 +2146,8 @@ async def main() -> None:
     # Semaphore must be created inside the running event loop
     global _signal_semaphore
     _signal_semaphore = asyncio.Semaphore(75)  # max 75 concurrent signal scans
+    global _v2_semaphore
+    _v2_semaphore = asyncio.Semaphore(50)      # max 50 concurrent intraday V2 scans
 
     # ── Feed ─────────────────────────────────────────────────────────────────
     global _feed_manager
@@ -1753,10 +2167,13 @@ async def main() -> None:
     scheduler.add_job(job_daily_auth,          CronTrigger(day_of_week="0-4", hour=8,  minute=30, timezone="Asia/Kolkata"))
     scheduler.add_job(job_market_open_briefing, CronTrigger(day_of_week="0-4", hour=9, minute=10, timezone="Asia/Kolkata"))
     scheduler.add_job(job_earnings_scan,        CronTrigger(day_of_week="0-4", hour=9, minute=31, timezone="Asia/Kolkata"))
-    scheduler.add_job(job_market_open_ping,     CronTrigger(day_of_week="0-4", hour=9, minute=15, timezone="Asia/Kolkata"))
+    scheduler.add_job(job_market_open_ping,     CronTrigger(day_of_week="0-4", hour=9, minute=16, timezone="Asia/Kolkata"))  # 9:16 not 9:15 — first trade needs 60s to propagate through WS
+    scheduler.add_job(job_intraday_v2_context,  CronTrigger(day_of_week="0-4", hour=9, minute=26, timezone="Asia/Kolkata"))  # breadth from first two 5-min candles
     scheduler.add_job(job_orb_scan,             CronTrigger(day_of_week="0-4", hour=10, minute=0, timezone="Asia/Kolkata"))
     scheduler.add_job(job_square_off_intraday,  CronTrigger(day_of_week="0-4", hour=15, minute=12, timezone="Asia/Kolkata"))
     scheduler.add_job(job_flush_eod_candles,    CronTrigger(day_of_week="0-4", hour=15, minute=31, timezone="Asia/Kolkata"))
+    scheduler.add_job(job_sector_roc_update,    CronTrigger(day_of_week="0-4", hour=15, minute=45, timezone="Asia/Kolkata"))
+    scheduler.add_job(job_watchlist_update,     CronTrigger(day_of_week="0-4", hour=16, minute=0,  timezone="Asia/Kolkata"))
     scheduler.add_job(job_eod_summary,          CronTrigger(day_of_week="0-4", hour=16, minute=30, timezone="Asia/Kolkata"))
     scheduler.add_job(job_db_backup,            CronTrigger(day_of_week="0-4", hour=16, minute=45, timezone="Asia/Kolkata"))
     # Paper/dev only: status heartbeat every 5 minutes
