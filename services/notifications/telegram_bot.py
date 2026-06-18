@@ -698,47 +698,52 @@ async def start_telegram_polling() -> object | None:
     # Inline button callbacks — semi-auto trade approvals
     app.add_handler(CallbackQueryHandler(_handle_approval_callback))
 
-    # Retry until internet is available — startup may run before network is up
     import asyncio as _asyncio
     from telegram.error import NetworkError as _TGNetworkError
-    _attempt = 0
-    _delays = [5, 10, 15, 30, 60]   # seconds between retries
-    while True:
+
+    async def _init_and_start() -> None:
+        """Background task: retry app.initialize() until Telegram reachable, then start polling."""
+        _attempt = 0
+        _delays = [5, 10, 30, 60, 120]
+        while True:
+            try:
+                await app.initialize()
+                break
+            except (_TGNetworkError, Exception) as _e:
+                if "ConnectError" not in str(type(_e).__name__) and not isinstance(_e, _TGNetworkError):
+                    log.error("telegram.init_fatal", error=str(_e)[:120])
+                    return
+                _delay = _delays[min(_attempt, len(_delays) - 1)]
+                log.warning("telegram.no_internet_retry",
+                            attempt=_attempt + 1, retry_in=_delay, error=str(_e)[:80])
+                await _asyncio.sleep(_delay)
+                _attempt += 1
+
+        # Explicitly delete any stale webhook before starting polling.
         try:
-            await app.initialize()
-            break
-        except (_TGNetworkError, Exception) as _e:
-            if "ConnectError" not in str(type(_e).__name__) and not isinstance(_e, _TGNetworkError):
-                raise
-            _delay = _delays[min(_attempt, len(_delays) - 1)]
-            log.warning("telegram.no_internet_retry",
-                        attempt=_attempt + 1, retry_in=_delay, error=str(_e)[:80])
-            await _asyncio.sleep(_delay)
-            _attempt += 1
+            await app.bot.delete_webhook(drop_pending_updates=True)
+            log.info("telegram.webhook_cleared")
+        except Exception as _e:
+            log.warning("telegram.webhook_clear_failed", error=str(_e)[:100])
 
-    # Explicitly delete any stale webhook before starting polling.
-    # If a webhook was ever set (testing, previous deploy), Telegram routes
-    # commands to it for ~15-30 min before giving up. deleteWebhook clears this.
-    try:
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        log.info("telegram.webhook_cleared")
-    except Exception as _e:
-        log.warning("telegram.webhook_clear_failed", error=str(_e)[:100])
+        await app.start()
+        await app.updater.start_polling(
+            allowed_updates=["message", "callback_query"],
+            drop_pending_updates=True,
+            timeout=10,
+            read_timeout=20,
+            write_timeout=10,
+            connect_timeout=10,
+            pool_timeout=5,
+        )
+        log.info("telegram.polling_started",
+                 commands=["/status", "/pnl", "/positions", "/orb", "/help"],
+                 semi_auto=settings.is_semi_auto,
+                 concurrent_updates=True)
 
-    await app.start()
-    await app.updater.start_polling(
-        allowed_updates=["message", "callback_query"],
-        drop_pending_updates=True,
-        timeout=10,           # getUpdates long-poll window (seconds)
-        read_timeout=20,      # HTTP read timeout — must exceed long-poll timeout
-        write_timeout=10,
-        connect_timeout=10,
-        pool_timeout=5,
-    )
-    log.info("telegram.polling_started",
-             commands=["/status", "/pnl", "/positions", "/orb", "/help"],
-             semi_auto=settings.is_semi_auto,
-             concurrent_updates=True)
+    _asyncio.ensure_future(_init_and_start())
+    log.info("telegram.polling_bg_task_launched",
+             note="Bot continues startup; Telegram connects in background when reachable")
     return app
 
 
