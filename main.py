@@ -156,7 +156,8 @@ def on_candle_complete(candle: OHLCVCandle) -> None:
 
     # Intraday V2 engine runs on 5-min candle closes (two-sided box breakouts).
     # Routed directly to TradeExecutor — bypasses the long-only swing pipeline.
-    if tf == "5min" and sym not in _active_v2_tasks:
+    # Disabled in swing-only mode (see settings.swing_only_mode).
+    if tf == "5min" and not settings.swing_only_mode and sym not in _active_v2_tasks:
         try:
             loop = asyncio.get_running_loop()
             task = loop.create_task(_run_v2_signal(sym))
@@ -212,6 +213,9 @@ async def _run_v2_signal(symbol: str) -> None:
 async def job_intraday_v2_context() -> None:
     """9:26 IST — compute universe breadth + day grade for the intraday V2 engine."""
     try:
+        if settings.swing_only_mode:
+            log.info("v2_context.skip", reason="swing_only_mode")
+            return
         from config.market_hours import is_market_open
         if not is_market_open():
             log.info("v2_context.market_closed")
@@ -457,9 +461,10 @@ async def _run_signals(symbol: str) -> None:
         # breakout of box top with volume + VWAP confirmation.
         # Validated 2024: 32 trades, 68.75% WR, Sharpe 9.8, max DD ₹1,060.
         # Bypasses regime gate — gap+RVOL IS the catalyst context.
+        # Disabled in swing-only mode (pure-intraday MIS engine).
         try:
             _buf_15m_idarvas = _candle_buffer.get(symbol, {}).get("15min")
-            if _buf_15m_idarvas and "1day" in ohlcv_by_tf:
+            if not settings.swing_only_mode and _buf_15m_idarvas and "1day" in ohlcv_by_tf:
                 from services.intraday_engine.live import IntradayLiveEngine as _ILE
                 _prev_close_idarvas = float(ohlcv_by_tf["1day"]["close"].iloc[-2]) \
                     if len(ohlcv_by_tf["1day"]) >= 2 else 0.0

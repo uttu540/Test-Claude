@@ -8,6 +8,91 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 _Next up: Paper trading validation run (#33) — 2-week live gate before semi-auto_
 
+### Added
+
+- **`services/ai_strategy/nvidia_client.py`** — Thin async client for the NVIDIA NIM OpenAI-compatible endpoint (`gpt-oss-120b`). A free-tier **secondary/research LLM** used strictly OFFLINE — pattern discovery on backtest data, strategy/code critique, and optional cross-checks of Claude's signal scoring. **Never wired into the live trade-execution path**; trading decisions stay on the validated Claude pipeline. Uses the `openai` SDK only as an OpenAI-compatible transport (no calls hit OpenAI). Key read from `NVIDIA_API_KEY` in `.env`; disabled gracefully if absent.
+  - `NvidiaClient.complete()` — single-shot completion returning `(content, reasoning_content)`; `gpt-oss` chain-of-thought exposed separately. Retries with backoff; never raises into the caller.
+
+- **Profit-max research scripts** (`scripts/`) — offline tooling for the Momentum V2 profit-maximization loop:
+  - **`profit_max_sweep.py`** — sweep harness: runs the V2 backtest across a date range/universe for a given parameter set, computes a full metrics block (WR, net P&L, avg R, profit factor, Sharpe, max drawdown, exit-reason breakdown), and appends each run to a JSONL log so the `/loop` can compare iterations. Tunable knobs: `--min-score`/`--max-score`/`--min-conf`, `--sector-filter`/`--watchlist-filter`.
+  - **`llm_edge_research.py`** — feeds aggregated V2 backtest stats to `gpt-oss` to generate TESTABLE edge hypotheses + a code-logic critique; each hypothesis is then encoded as a sweep variant and judged by the backtest (LLM never touches live trading).
+  - **`correlation_discovery.py`** — finds global/cross-asset series that correlate with and (crucially) LEAD Nifty daily returns via yfinance, then asks `gpt-oss` to turn lead-lag structure into testable NSE entry-signal hypotheses. Correlations print without an API key.
+
+### Changed
+
+- **`config/settings.py` — risk & strategy tuning:**
+  - `max_risk_per_trade_pct` raised **2.0% → 4.0%** (OOS-modeled: ~2× P&L and drawdown vs 2%).
+  - Added `momentum_min_adx: float = 30.0` — minimum ADX(14) floor at entry for the live V2 swing engine. OOS-validated (2020–2025 nifty50): ADX≥30 lifted WR 43.9%→51.9%, avg R 0.62→1.01, and cut max drawdown ~40% vs no floor. Set to `0` to disable.
+  - Added `swing_only_mode: bool = True` — disables the pure-intraday engines (Intraday V2 5-min box, IDARVAS 15-min gap box). Momentum V2 (daily swing), Earnings, and Catalyst/PEAD stay active. Set to `False` to re-enable intraday.
+  - Added NVIDIA config keys: `nvidia_api_key`, `nvidia_base_url` (`https://integrate.api.nvidia.com/v1`), `nvidia_model` (`openai/gpt-oss-120b`).
+
+- **`main.py`** — Intraday V2 5-min routing, the 9:26 AM V2 context job, and the IDARVAS 15-min engine are all gated behind `not settings.swing_only_mode`; skipped with a log line when swing-only mode is on.
+
+---
+
+## [0.7.0] — 2026-07-01 — Dual Intraday/Swing V2 Engines + Monitoring + Cost Model
+
+### Added
+
+- **`services/intraday_engine_v2/`** — Two-sided 5-min Darvas box engine, backtest-validated and wired live
+  - **`live.py`** — `IntradayV2LiveEngine`: detects 5-min box breakouts long and short. `compute_day_context()` runs at 9:26 AM, computing universe breadth and market median from the first two 5-min bars. `detect()` called on every 5-min candle close — applies RS / RVOL / room filters then calls `detect_box5`. Requires ≥9 bars before firing.
+  - **`backtest.py`** — full backtest with slippage/commission cost model
+  - **`run.py`** — CLI entrypoint (`python -m services.intraday_engine_v2.run`)
+  - **`scripts/diag_v2_breadth.py`** — breadth diagnostics script
+  - **`scripts/tune_intraday_v2.py`** — parameter tuner
+
+- **`services/momentum_engine_v2/`** — Relaxed-gate swing engine variant + watchlist incubator
+  - **`signals.py`** — `MomentumDetector` V2: 200 EMA gate relaxed to "within 8% below" (`near_200`), ADX lookforward (≥20 any time in last 10 bars). Enters during basing/early-recovery phase that V1's hard gates miss when the market turns.
+  - **`backtest.py`** — full backtest; validated against V1 on N500 and full-NSE 3yr runs (V2 beats V1 on trades/PnL/WR/Sharpe)
+  - **`watchlist.py`** — watchlist incubator for tracking near-trigger candidates
+  - **`scripts/backtest_200ema_gate_comparison.py`** — side-by-side V1 vs V2 gate comparison
+
+- **`services/intraday_engine/`** — IDARVAS gap-box intraday engine
+  - **`live.py`**, **`backtest.py`**, **`run.py`** — full live + backtest stack for IDARVAS gap-box patterns
+
+- **`services/catalyst_engine/`** — Catalyst engine for news/event-driven intraday plays
+  - **`scanner.py`** — universe scanner for catalyst candidates
+  - **`live.py`**, **`backtest.py`**, **`run_backtest.py`** — live adapter + backtest
+
+- **`scripts/seed_5min_cache.py`** — pre-seeds the 5-min candle cache from historical data on startup so intraday engines have enough bars from market open
+
+- **`services/earnings_engine/fundamental_gate.py`** — Claude fundamental quality gate. Evaluates earnings candidates against revenue growth, margin trajectory, debt levels, and promoter holding before allowing signal generation. Invoked from `EarningsSignalEngine` prior to entry.
+
+- **Earnings Day 2 entry mode** (`settings.earnings_day2_mode`) — On Day 2, the engine checks `earnings:pending_day2:*` Redis keys set by Day 1 trades. Validates that Day 1 close held ≥97% of open and closed in the top portion of the day's range (`_validate_day1_close` via yfinance). Fires a new entry at today's open if confirmed; skips on close quality failure.
+
+- **WS disconnect alerts + tick silence detection** (`main.py`, `telegram_bot.py`)
+  - `main.py` — module-level `_tick_silence_alerted` flag; during market hours, Telegram alert fires if no tick received for 5 minutes. Uses in-process `_last_tick_time` with Redis fallback (`feed:last_tick_time`). Auto-resets on recovery.
+  - `telegram_bot.py` — `/status` command: shows bot mode, capital deployed, WS feed status (🟢 live / 🔴 stale / 🟡 unknown), today's closed-trade P&L.
+
+- **Slippage + commission cost model in backtests** (`services/earnings_engine/backtest.py`)
+  - `SLIPPAGE_ENTRY_PCT` (0.05%), `SLIPPAGE_EXIT_PCT` (0.05%), `COMMISSION_RT_PCT` (0.05% round-trip covering brokerage + STT + exchange + GST). Entry slippage applied at fill; exit slippage applied on SL/target/max-hold exits. Net P&L = gross P&L − slippage − commission.
+
+### Changed
+
+- **`services/ai_strategy/claude_client.py`** — Signal scoring switched from Sonnet to `claude_model_fast` (Haiku 4.5 — ~10× cheaper for high-frequency JSON scoring calls). Market briefing generation stays on Sonnet. Controlled via new `settings.claude_model_fast` config key.
+
+- **`services/momentum_engine_v2/live.py`** — `MomentumV2LiveEngine` wired into `main.py` signal loop, replacing V1. Hard block on `TRENDING_DOWN`: backtest evidence shows long Darvas breakouts in down markets lose money (2026 YTD: 7 trades at 0% WR, −₹12.5k on relaxed gate; 4 trades at 25% WR, −₹2.5k on V2 gate). V1 RS ≥ 8 bypass removed (was unvalidated; p99 of live RS distribution = 7.7, effectively never triggered). Also eliminates ~7,500 `rs_skip` INFO log lines/day.
+
+- **`services/orb_engine/backtest.py`** — Slippage raised from 0.05% → 0.15% (more realistic for intraday fills). Real ATR used in analytics output instead of estimated. Confidence scoring made dynamic based on gap size and RVOL tier.
+
+- **`services/execution/trade_executor.py` + `trade_lifecycle.py`** — Explicit stop flow added; V5 swing trailing-stop milestones (4R triggers first trail, then 1R steps); intraday moves to BE at 2R instead of waiting for target.
+
+- **`services/data_ingestion/websocket_feed.py` + `historical_seed.py`** — Feed resilience: candle preseed on reconnect, stale buffer detection, graceful handling of empty symbol ticks.
+
+- **`services/data_ingestion/gift_nifty.py`** — `_nse_get()` helper: hits NSE homepage first to obtain session cookies (NSE requires a browser-like session), then fetches the target endpoint. 3-attempt retry with 0.4s inter-attempt delay. Browser-like headers. Fixed GIFT Nifty market briefing data (was returning stale/empty values).
+
+- **`config/settings.py`** — Added `earnings_day2_mode: bool`, `claude_model_fast: str` (defaults to `claude-haiku-4-5-20251001`).
+
+### Fixed
+
+- **ORB 15-min blind spot** (`services/data_ingestion/gift_nifty.py`, `services/orb_engine/`) — ORB candle aggregation was silently missing the 9:15–9:30 AM range on some days due to a timing edge case in the 15-min bucket. Fixed so the opening range is always captured before the ORB engine fires.
+
+- **NSE scraping failures** — `gift_nifty.py` NSE API calls were failing with 403s after the first few requests (no session cookie). Now fixed with browser session + retry wrapper (`_nse_get`).
+
+- **Telegram startup blocking** (`services/notifications/telegram_bot.py`) — Bot startup no longer hangs if Telegram is unreachable at launch time. Connectivity check is non-blocking; the bot proceeds with a warning log and retries on next scheduled use.
+
+- **Market briefing showing stale/empty data** (`main.py`, `services/data_ingestion/gift_nifty.py`) — `job_market_open_briefing()` was passing zeroed-out Nifty change and VIX values to Claude when the GIFT Nifty fetch failed silently. Fetch is now retried and falls back gracefully.
+
 ---
 
 ## [0.6.0] — 2026-05-08 — Earnings Engine + Signal Pipeline Fixes

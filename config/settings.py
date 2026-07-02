@@ -34,7 +34,7 @@ class Settings(BaseSettings):
 
     # ── Capital & Risk ────────────────────────────────────────────────────────
     total_capital: float = 100_000.0          # ₹1,00,000
-    max_risk_per_trade_pct: float = 2.0       # Risk max 2% = ₹2,000 per trade
+    max_risk_per_trade_pct: float = 4.0       # Risk max 4% = ₹4,000 per trade (OOS-modeled: ~2× P&L & DD vs 2%)
     daily_loss_limit_pct: float = 6.0         # Halt if day loss > 6% = ₹6,000 (3× max risk/trade)
     max_open_positions: int = 8
     max_position_size_pct: float = 15.0       # Max 15% in a single position
@@ -64,11 +64,32 @@ class Settings(BaseSettings):
     claude_model: str = "claude-sonnet-4-6"          # used for market briefing (needs quality)
     claude_model_fast: str = "claude-haiku-4-5"      # used for trade signal scoring (10× cheaper)
 
+    # ── NVIDIA NIM (OpenAI-compatible) — research / secondary LLM ───────────────
+    # Free-tier gpt-oss endpoint. Used for offline research (pattern discovery,
+    # code/strategy evaluation) and optionally as a cross-check on Claude signal
+    # scoring. NOT wired into live trade execution by default. Key lives in .env.
+    nvidia_api_key: str = ""
+    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+    nvidia_model: str = "openai/gpt-oss-120b"
+
     # ── Earnings engine ───────────────────────────────────────────────────────
     # Day 2 entry: store Day 1 gap signal, fire at Day 2 open only if Day 1
     # close held ≥97% of open AND closed in top 50% of Day 1 range.
     # Backtest: profit factor 10×+ vs 0.50× for Day 1 entry.
     earnings_day2_mode: bool = True
+
+    # ── Momentum V2 entry filters ──────────────────────────────────────────────
+    # Minimum ADX(14) at entry for the live V2 swing engine. Out-of-sample
+    # validated (2020-2025 nifty50): ADX≥30 lifted WR 43.9%→51.9%, avg R
+    # 0.62→1.01, and cut max drawdown ~40% vs no floor. Set to 0 to disable.
+    momentum_min_adx: float = 30.0
+
+    # ── Strategy mode ─────────────────────────────────────────────────────────
+    # Swing-only: disable pure-intraday engines (Intraday V2 5-min box, IDARVAS
+    # 15-min gap box). Momentum V2 (daily swing), Earnings, and Catalyst/PEAD
+    # stay active — the catalyst engines can hold multiple days. Set to False to
+    # re-enable the intraday engines.
+    swing_only_mode: bool = True
 
     # ── Telegram ──────────────────────────────────────────────────────────────
     telegram_bot_token: str = ""

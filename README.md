@@ -22,7 +22,7 @@ An automated trading bot for NSE (Nifty 50) stocks with technical analysis, AI-p
 **Key services:**
 - **Data Ingestion** — Kite Connect WebSocket (live ticks) or mock feed in dev
 - **Technical Engine** — 130+ indicators via pandas-ta, signal generation for all Nifty 50
-- **AI Strategy** — Claude claude-sonnet-4-6 validates signals, checks timeframe alignment
+- **AI Strategy** — Claude validates signals (Haiku 4.5 for fast signal scoring, Sonnet for market briefing) and checks timeframe alignment; optional NVIDIA `gpt-oss` secondary LLM for **offline** research/eval only
 - **Execution** — Zerodha Kite (live/semi-auto) or paper broker (dev/paper modes)
 - **Risk Manager** — Daily loss limit, max position sizing, per-trade R:R gate
 - **Telegram Bot** — Multi-user approval in semi-auto mode, trade alerts
@@ -119,7 +119,18 @@ MAX_OPEN_POSITIONS=5
 
 # Optional
 NEWS_API_KEY=...          # NewsAPI.org for sentiment (free tier works)
+
+# Optional — research/eval only (NOT used for live trading)
+NVIDIA_API_KEY=...                                  # build.nvidia.com free-tier key
+NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+NVIDIA_MODEL=openai/gpt-oss-120b
 ```
+
+> **NVIDIA / `openai` SDK:** the `openai` package is used only as an OpenAI-compatible
+> client for the free-tier NVIDIA NIM `gpt-oss` endpoint — no requests go to OpenAI.
+> It powers **offline research** (backtest pattern discovery, strategy/code critique,
+> correlation → hypothesis generation) and is deliberately never wired into the live
+> trade-execution path. Trading decisions stay on the validated Claude pipeline.
 
 ---
 
@@ -265,13 +276,24 @@ make test            # Run pytest
 │   │   ├── indicators.py            # pandas-ta indicator calculation
 │   │   └── signal_generator.py      # Signal detection + regime filter
 │   ├── ai_strategy/
-│   │   └── claude_client.py         # Claude AI signal validation
+│   │   ├── claude_client.py         # Claude AI signal validation
+│   │   └── nvidia_client.py         # NVIDIA gpt-oss (offline research/eval only)
+│   ├── momentum_engine_v2/          # Active daily swing engine (relaxed-gate V2)
+│   ├── earnings_engine/             # Earnings gap-and-go + Day 2 entry
+│   ├── catalyst_engine/            # News/event-driven plays (PEAD/catalyst)
+│   ├── intraday_engine/            # IDARVAS 15-min gap box (swing_only: off)
+│   ├── intraday_engine_v2/         # Two-sided 5-min box (swing_only: off)
 │   ├── execution/
 │   │   ├── broker_router.py         # Broker abstraction layer
 │   │   ├── kite_broker.py           # Zerodha Kite execution
 │   │   └── paper_broker.py          # Simulated paper execution
 │   ├── risk_manager.py              # Position sizing + daily loss limit
 │   └── notification/telegram_bot.py # Telegram alerts + semi-auto approval
+│
+├── scripts/                         # Offline research / profit-max tooling
+│   ├── profit_max_sweep.py          # V2 backtest sweep harness (JSONL log)
+│   ├── llm_edge_research.py         # gpt-oss edge-hypothesis generation
+│   └── correlation_discovery.py     # Global lead-lag → NSE signal hypotheses
 │
 └── frontend/
     ├── src/

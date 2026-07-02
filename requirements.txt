@@ -36,6 +36,7 @@ nsepython==2.9            # NSE India: option chains, FII/DII, indices
 
 # ── AI ────────────────────────────────────────────────────────────────────────
 anthropic==0.28.0
+openai==2.44.0          # OpenAI-compatible client for NVIDIA NIM (research/eval LLM)
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 python-telegram-bot==21.3

@@ -65,6 +65,40 @@ _ENTRY_DISABLED: frozenset[MomentumSignalType] = frozenset({
 # (COALINDIA 20%→8%, ZENSARTECH 24%→18%, JKIL 26%→20%). Extended to 35d.
 MAX_HOLD_DAYS = 35
 
+# Target distance in ATR multiples above entry (1:4.7 R:R vs the 1.5×ATR stop).
+# Exposed as a module constant so profit-max sweeps can vary it without editing
+# the entry logic. Backtests show this 7× target is rarely hit — most winners
+# exit via trailing stop or MAX_HOLD — so it's a prime tuning knob.
+TARGET_ATR_MULT = 7.0
+
+# Fixed-target exit: OFF by default (preserves the current trail+max-hold-only
+# behaviour). When True, a trade closes at `target` the first bar its high hits
+# it. Profit-max study toggles this to test whether locking the target beats
+# letting winners ride to MAX_HOLD.
+ENABLE_TARGET_EXIT = False
+
+# Optional entry filters (None = off). Profit-max study uses these to test
+# LLM-proposed discriminators (ADX / RSI floors) against the baseline. Must be
+# validated on a LONG window — tuning them on the 10-trade nifty50 sample would
+# just overfit.
+MIN_ADX_FILTER: float | None = None
+MIN_RSI_FILTER: float | None = None
+
+# Overnight-US entry gate (None = off). When set, a long entry is only allowed
+# if the prior US session's return (S&P 500, which closes ~02:00 IST before NSE
+# opens — no look-ahead) is >= this fraction (e.g. 0.0 = US was flat/up).
+# Correlation study: prev-day Dow/S&P lead next-day Nifty at ~0.28.
+MIN_US_OVERNIGHT_RET: float | None = None
+
+# LLM hypothesis: require a volume thrust at entry (winners had it, losers didn't).
+# Implemented as an RVOL floor. None = off.
+MIN_RVOL_FILTER: float | None = None
+
+# LLM hypothesis: regime-stability — require N consecutive Nifty TRENDING_UP days
+# before a TRENDING_UP entry (avoid premature entries right after a regime flip).
+# Only gates TRENDING_UP entries; RANGING entries are unaffected. None = off.
+REGIME_STABILITY_DAYS: int | None = None
+
 # Position sizing: matches config/settings.py — ₹1,00,000 capital, 2% risk = ₹2,000/trade
 from config.settings import settings as _settings
 NOTIONAL_CAPITAL = int(_settings.total_capital)   # ₹1,00,000
@@ -148,6 +182,7 @@ class MomentumBacktestEngine:
         self._nifty_roc20_by_date:       dict[date, float] = {}   # 20-day ROC for RS calc
         self._midcap_regime_by_date:     dict[date, str]   = {}
         self._smallcap_regime_by_date:   dict[date, str]   = {}
+        self._us_ret_series:             "pd.Series | None" = None  # prev-day US overnight gate
 
         # Sector filter (opt-in)
         self._enable_sector_filter  = enable_sector_filter
@@ -304,6 +339,25 @@ class MomentumBacktestEngine:
                              trading_days=len(regime_dict))
             except Exception as e:
                 log.warning(f"momentum_bt.{label}_load_failed", error=str(e))
+
+        # Overnight-US series (S&P 500) for the optional US entry gate.
+        # Daily close-to-close return, indexed by calendar date. Looked up via
+        # asof(entry_date - 1 day) so only the prior US close is used.
+        if MIN_US_OVERNIGHT_RET is not None:
+            try:
+                us = yf.Ticker("^GSPC").history(
+                    start=load_start.isoformat(), end=load_end,
+                    interval="1d", auto_adjust=True,
+                )
+                if not us.empty:
+                    us.index = pd.to_datetime(us.index)
+                    if us.index.tz is not None:
+                        us.index = us.index.tz_localize(None)
+                    self._us_ret_series = us["Close"].pct_change().dropna()
+                    log.info("momentum_bt.us_overnight_loaded",
+                             days=len(self._us_ret_series))
+            except Exception as e:
+                log.warning("momentum_bt.us_overnight_load_failed", error=str(e))
 
         if self._enable_sector_filter:
             await self._load_sector_indices()
@@ -584,6 +638,18 @@ class MomentumBacktestEngine:
             if not atr:
                 continue
 
+            # ── Optional LLM-proposed entry filters (off unless study enables) ─
+            if MIN_ADX_FILTER is not None and (top.adx or 0) < MIN_ADX_FILTER:
+                continue
+            if MIN_RSI_FILTER is not None and (top.rsi or 0) < MIN_RSI_FILTER:
+                continue
+            if MIN_RVOL_FILTER is not None and (top.rvol or 0) < MIN_RVOL_FILTER:
+                continue
+            if (REGIME_STABILITY_DAYS is not None
+                    and nifty_regime == "TRENDING_UP"
+                    and self._nifty_consec_up.get(candle_date, 0) < REGIME_STABILITY_DAYS):
+                continue
+
             # ── Entry price = next candle's open (no look-ahead) ──────────────
             # Note: 2-day confirmation tested and reverted — it didn't improve WR
             # (filtered winners and losers at identical ratio). Pure next-day open entry.
@@ -597,6 +663,13 @@ class MomentumBacktestEngine:
             if entry_price <= 0:
                 continue
             entry_date = trade_df.index[next_idx]
+
+            # ── Optional overnight-US gate (no look-ahead: prior US close) ─────
+            if MIN_US_OVERNIGHT_RET is not None and self._us_ret_series is not None:
+                prior = pd.Timestamp(entry_date).normalize() - pd.Timedelta(days=1)
+                us_ret = self._us_ret_series.asof(prior)
+                if pd.isna(us_ret) or us_ret < MIN_US_OVERNIGHT_RET:
+                    continue
             entry_date = entry_date.date() if hasattr(entry_date, "date") else entry_date
 
             # Open-gap filter tested (v6) and REVERTED:
@@ -628,7 +701,7 @@ class MomentumBacktestEngine:
                 _trade_max_hold = 40              # genuine sector leaders
 
             stop_loss = round(entry_price - _stop_atr_mult * atr, 2)
-            target    = round(entry_price + 7.0 * atr, 2)
+            target    = round(entry_price + TARGET_ATR_MULT * atr, 2)
 
             # ── Position size (fixed risk per trade) ─────────────────────────
             risk_per_share = entry_price - stop_loss
@@ -717,6 +790,12 @@ class MomentumBacktestEngine:
             if l <= trailing_stop:
                 exit_price  = trailing_stop
                 exit_reason = "STOP" if trailing_stop == stop_loss else "TRAIL_STOP"
+                break
+
+            # Optional fixed-target exit (off by default — see ENABLE_TARGET_EXIT)
+            if ENABLE_TARGET_EXIT and h >= target:
+                exit_price  = target
+                exit_reason = "TARGET"
                 break
 
             # Max hold
