@@ -16,7 +16,7 @@ import structlog
 from sqlalchemy import text
 
 from config.settings import settings
-from database.connection import get_db_session
+from database.connection import get_db_session, get_redis
 
 # Per-symbol asyncio lock: prevents two concurrent coroutines from both
 # passing the duplicate-position check for the same symbol when signals
@@ -237,6 +237,12 @@ class RiskEngine:
         down ₹3k showed ₹0, allowing more trades well past the real daily loss.
         """
         today = date.today()
+
+        # ── Realized P&L (DB) ───────────────────────────────────────────────
+        # This is the authoritative, conservative number. If we can't read it,
+        # we cannot know whether the daily loss limit has been breached, so we
+        # fail CLOSED (like every other helper in this class) rather than
+        # silently disabling the limit for the rest of the day.
         try:
             async with get_db_session() as session:
                 closed_result = await session.execute(
@@ -250,10 +256,21 @@ class RiskEngine:
                     {"today": today},
                 )
                 open_rows = open_result.fetchall()
+        except Exception as e:
+            # Fail-safe: block trading if we can't even read realized P&L —
+            # mirrors _get_open_count / _has_open_position / _get_open_notional.
+            log.error("risk.db_error.daily_pnl", error=str(e),
+                       msg="Could not read realized daily PnL from DB — failing closed, trading halted")
+            return float("-inf")
 
-            if not open_rows:
-                return realized
+        if not open_rows:
+            return realized
 
+        # ── Unrealized P&L (Redis ticks) ────────────────────────────────────
+        # Best-effort only. If Redis itself is unavailable, fall back to the
+        # already-computed realized figure rather than discarding it — that
+        # is the conservative, meaningful number, not 0.0.
+        try:
             redis = get_redis()
             unrealized = 0.0
             for row in open_rows:
@@ -277,13 +294,11 @@ class RiskEngine:
             return total
 
         except Exception as e:
-            # Fail-open: return 0 so a transient DB/Redis blip doesn't permanently
-            # block all trading for the rest of the day. Per-trade risk limits still
-            # apply. The old -inf failsafe caused all same-day signals to be rejected
-            # after any momentary exception (e.g. DB contention during ORB batch scan).
+            # Redis unavailable — use realized-only rather than fail-opening to 0.0.
             log.warning("risk.db_error.daily_pnl", error=str(e),
-                        msg="Could not read daily PnL — assuming 0, per-trade limits still enforced")
-            return 0.0
+                        msg="Could not read unrealized PnL from Redis — using realized-only PnL, "
+                            "per-trade limits still enforced")
+            return realized
 
     async def _get_open_count(self) -> int:
         try:

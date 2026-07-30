@@ -98,14 +98,26 @@ class TradeLifecycleManager:
 
     # ── EOD / Kill-switch ─────────────────────────────────────────────────────
 
-    async def close_all_open_trades(self, reason: str = "TIME_EXIT") -> int:
+    async def close_all_open_trades(
+        self,
+        reason: str = "TIME_EXIT",
+        intraday_only: bool | None = None,
+    ) -> int:
         """
-        Force-close OPEN intraday trades at current market price.
-        TIME_EXIT (3:12 PM): skips SWING trades — they hold overnight on CNC product.
-        KILL_SWITCH: closes everything regardless of type.
+        Force-close OPEN trades at current market price.
+
+        intraday_only:
+          True  — skip SWING trades (they hold overnight on CNC product).
+          False — close everything regardless of type.
+          None  — derive from `reason` (legacy behaviour): TIME_EXIT is
+                  intraday-only, anything else closes everything.
+
+        Pass it explicitly rather than relying on the reason string, so the
+        exit reason recorded on the trade stays independent of the scope.
         Returns the number of trades closed.
         """
-        intraday_only = (reason == "TIME_EXIT")
+        if intraday_only is None:
+            intraday_only = (reason == "TIME_EXIT")
         open_trades = await self._load_open_trades(intraday_only=intraday_only)
         closed = 0
         for trade in open_trades:
@@ -208,7 +220,8 @@ class TradeLifecycleManager:
         """
         Update the milestone-based trailing stop for a trade.
 
-        Milestones differ by timeframe — same intent (let winners breathe), different scale:
+        Milestones differ by strategy_mode — same intent (let winners breathe),
+        different scale:
 
         SWING (1day / 1week) — V5 validated, trail first at 4R:
           Below 4R → hold original stop
@@ -229,9 +242,15 @@ class TradeLifecycleManager:
         if not planned_stop:
             return
 
-        is_long   = trade["direction"] == "LONG"
-        timeframe = trade.get("timeframe", "1day")
-        is_swing  = timeframe in ("1day", "1week")
+        is_long = trade["direction"] == "LONG"
+        # Use the persisted strategy_mode label (INTRADAY / SWING / POSITIONAL) set at
+        # entry by trade_executor from signal.timeframe. The trades table has no
+        # "timeframe" column, so the previous trade.get("timeframe", "1day") always fell
+        # through to the default — is_swing was permanently True and the INTRADAY
+        # milestones below were dead code.
+        # NULL/missing is treated as intraday, matching the intraday filter in
+        # _load_open_trades ("strategy_mode IS NULL OR strategy_mode != 'SWING'").
+        is_swing = str(trade.get("strategy_mode") or "").upper() == "SWING"
 
         # Initialise from planned stop if first time we see this trade
         existing = self._trailing_stops.get(trade_id, planned_stop)

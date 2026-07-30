@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Python 3.12 is required — see README.md "Python 3.12 — required":
+      #   - pandas-ta (unpinned) only publishes releases needing Python >=3.12,
+      #     so 3.11 and older cannot install this project at all.
+      #   - playwright==1.44.0 (hard-pins greenlet==3.0.3), pydantic==2.7.1,
+      #     aiohttp==3.9.5, asyncpg==0.29.0, sqlalchemy==2.0.30 all predate
+      #     cp313 wheels and try to build from source on 3.13.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools
+          pip install -r requirements.txt
+
+      # Unit tests are pure-unit (no Postgres/Redis needed) — see tests/conftest.py
+      - name: Run pytest
+        run: python -m pytest tests/ -v

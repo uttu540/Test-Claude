@@ -420,3 +420,35 @@ RANGING market + BREAKOUT_HIGH signal → blocked by filter → Claude never cal
 - `market:tick:INDIA VIX` → lp
 - `market:regime` → TRENDING_UP / TRENDING_DOWN / RANGING
 - `NewsFeedService.get_recent_news()` for NIFTY, RELIANCE, HDFCBANK, TCS → up to 8 headlines
+
+---
+
+## D-031 — API key auth on mutating endpoints, fail-closed under a real broker
+
+**Decision:** `POST /api/config` and `POST /api/bot/square-off` now require a `require_api_key` FastAPI dependency that checks a shared secret (`settings.api_key` / `API_KEY` env var) against the `X-API-Key` request header via `secrets.compare_digest`. Behaviour on a missing key is mode-dependent: in `live`/`semi-auto` (`settings.uses_real_broker`) the request is refused with 401 even before checking the header — there is no way to run those modes unauthenticated. In `development`/`paper` a missing `API_KEY` is allowed (request proceeds) so the local dashboard works with zero config, but the gap is logged once at WARNING.
+
+**Reasoning:**
+- The `Procfile` binds the API with `--host 0.0.0.0`, not `127.0.0.1` — it is reachable from the network, not just localhost, the moment the machine has any routable interface.
+- CORS (`allow_origins=settings.cors_origins`) only constrains requests originating from a browser honoring CORS. It does nothing to stop `curl`, a script, or another process on the same network from calling these routes directly — CORS is not an auth mechanism.
+- Before this change there was no auth at all on state-changing routes. Anyone who could reach port 8000 could rewrite the running config (including safety knobs like `confidence_threshold`) or trigger a square-off.
+- The asymmetry (hard-refuse vs. warn-and-allow) is deliberate, not an oversight: a real broker means real money is one unauthenticated `POST` away, so silence is not an acceptable default there. In dev/paper the worst case of an unauthenticated request is a wrong value in Redis or a no-op square-off against simulated positions — recoverable, and gating it behind a mandatory key would break the zero-config local dashboard experience for every contributor.
+
+**Alternative considered:** Require `API_KEY` unconditionally in every mode. Rejected — it would force every developer running `make start` locally to generate and manage a key before the dashboard would even load, for a threat model (network-reachable attacker) that doesn't exist on a laptop bound to a NAT'd home network. The mode-based split keeps the real threat (live/semi-auto with a real broker) fully covered without that tax.
+
+**Trade-off accepted:** `development`/`paper` remain genuinely unauthenticated by default. An operator who exposes those modes beyond localhost (e.g. port-forwards 8000 for remote access while iterating) is relying on the one-time warning log to notice and set `API_KEY` themselves — this is a documented gap, not a silent one.
+
+---
+
+## D-032 — `RiskEngine._get_todays_pnl()` fails closed, not open, on DB error
+
+**Decision:** If the realized-P&L query in `_get_todays_pnl()` cannot be read (DB error, including the `NameError` bug below), it returns `float("-inf")` — which always trips `daily_pnl <= -settings.daily_loss_limit_inr` and halts trading — instead of `0.0`, which always looks like "no loss yet" and lets trading continue.
+
+**Reasoning:**
+- This method was the one outlier in `RiskEngine`. Every other DB helper already failed closed on exception: `_get_open_count()` returns `settings.max_open_positions` (trips the max-positions check), `_has_open_position()` returns `True` (blocks as a false duplicate), `_get_open_notional()` returns `float("inf")` (trips the notional cap), `_has_traded_today()` returns `True` (blocks re-entry). `_get_todays_pnl()` alone returned `0.0` — the one value on its scale that reads as "everything is fine."
+- The bug that motivated this fix was silent: `_get_todays_pnl()` called `get_redis()` without importing it into the module. Every call raised `NameError`, which the method's own `except Exception` caught and mapped to `return 0.0`. With at least one open position, the loss-limit check never fired for the rest of that trading day — reproduced with a stubbed DB returning a ₹-99,999 loss and the limit never tripping.
+- A wrong-but-loud failure (an exception that crashes the caller) would have been caught in testing or logs immediately. A wrong-and-quiet failure that happens to be the single most safety-critical number in the risk engine is much worse — it degrades exactly the check whose entire job is to stop the bot from losing more money than intended, and does so without any user-visible symptom until the account is already down further than the configured limit.
+- Fail-closed here has a real cost: any transient DB blip (a deploy, a connection pool exhaustion, a brief network hiccup) now halts new entries for the rest of the day rather than trading through it. That cost is accepted deliberately — it is the same trade-off already made by every sibling helper in this class (see D-019 for the backtester-specific exception to this rule).
+
+**Relationship to D-019:** D-019 documents that these same helpers return *permissive* defaults (`0.0`, `0`, `False`) specifically so the **backtester** — which has no live PostgreSQL connection — doesn't crash on every simulated trade. That permissive behavior is correct for the backtester's exception path (`_backtest_symbol`) but was never supposed to apply to the live trading path, where the DB is expected to always be up and any read failure is a real, actionable error. This decision doesn't contradict D-019; it corrects `_get_todays_pnl()` to match the fail-closed contract the *other* live-path helpers already had, restoring the invariant D-019 describes for every helper except this one.
+
+**Alternative considered:** Treat a DB error as "unknown" and block only new entries while leaving existing management (SL/target exits, square-off) unaffected. Rejected for this pass as unnecessary complexity — `evaluate()` is only called pre-trade (new entries); positions already open are managed by the lifecycle manager on a separate path that doesn't call `RiskEngine`, so failing closed here already has exactly that scope.

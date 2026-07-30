@@ -39,8 +39,8 @@ class TestLongTrade:
         assert self.result.stt == approx(2.625)
 
     def test_exchange_charges(self):
-        # NSE: (10000 + 10500) * 0.0000345 = 0.70725
-        assert self.result.exchange_charges == approx(0.707, rel=1e-2)
+        # NSE (post-Oct 2024 rate, see charges.py): (10000 + 10500) * 0.0000297 = 0.60885
+        assert self.result.exchange_charges == approx(0.6089)
 
     def test_sebi_charges(self):
         # 20500 * 0.000001 = 0.0205
@@ -51,10 +51,10 @@ class TestLongTrade:
         assert self.result.stamp_duty == approx(0.30)
 
     def test_gst(self):
-        # 18% on (brokerage + exchange + SEBI)
-        base = 6.15 + 0.70725 + 0.0205
+        # 18% on (brokerage + exchange + SEBI); exchange uses post-Oct 2024 rate (0.0000297)
+        base = 6.15 + 0.60885 + 0.0205
         expected = base * 0.18
-        assert self.result.gst == approx(expected, rel=1e-2)
+        assert self.result.gst == approx(expected)
 
     def test_total_positive(self):
         assert self.result.total > 0

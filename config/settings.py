@@ -115,6 +115,13 @@ class Settings(BaseSettings):
     # Dev default: Vite dev server. Production: set your actual domain.
     # e.g. ALLOWED_ORIGINS=https://trading.yourdomain.com
     allowed_origins: str = "http://localhost:5173,http://localhost:3000"
+    # Shared secret required in the X-API-Key header for state-changing endpoints
+    # (POST /api/config, POST /api/bot/square-off). CORS only constrains browsers —
+    # this key is what stops curl/any process on the network from hitting them.
+    # Leave blank in dev/paper for a zero-config local dashboard; REQUIRED in
+    # live/semi-auto (real broker) — those modes hard-refuse mutating requests
+    # if this is unset. Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+    api_key: str = ""
 
     # ── Derived / Computed ────────────────────────────────────────────────────
     @property

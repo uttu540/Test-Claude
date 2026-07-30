@@ -59,6 +59,17 @@ class PaperBroker(BrokerInterface):
         base_price = price or trigger_price
         if not base_price and order_type == "MARKET":
             base_price = await self._get_market_price(symbol)
+            if base_price <= 0:
+                # Cannot price this fill — refuse rather than simulate a fill at 0,
+                # which would silently corrupt P&L. Caller (trade_executor) treats
+                # a None broker_id as a failed entry and marks the trade CANCELLED.
+                log.error(
+                    "paper.order_rejected_no_price",
+                    symbol=symbol,
+                    order_type=order_type,
+                    note="no market price available — refusing to simulate fill at 0",
+                )
+                return None
         fill_price = self._apply_slippage(base_price, transaction_type, order_type)
         fake_id    = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
 

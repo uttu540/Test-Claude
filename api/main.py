@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import json
 import asyncio
+import secrets
 from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
 import structlog
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
@@ -70,6 +71,54 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+# ── Auth ───────────────────────────────────────────────────────────────────────
+# CORS (above) only constrains browsers — curl or any process on the network
+# bypasses it entirely. State-changing routes therefore also require a shared
+# secret via the X-API-Key header, checked here with a constant-time compare.
+
+_unauth_warned = False  # log the "running unauthenticated" gap once, not per-request
+
+
+async def require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
+    """FastAPI dependency guarding mutating routes.
+
+    - api_key configured  -> header must match via secrets.compare_digest, else 401.
+    - api_key NOT configured:
+        - live/semi-auto (real broker): hard-refuse with 401. We will not allow
+          unauthenticated writes to reach a real-money broker just because the
+          operator forgot to set API_KEY.
+        - dev/paper (simulated broker): allow, so the local dashboard keeps
+          working with zero config — but log loudly (once) so the gap is visible.
+    """
+    global _unauth_warned
+    if not settings.api_key:
+        if settings.uses_real_broker:
+            log.error(
+                "api.auth_misconfigured",
+                msg="Refusing mutating request: no API_KEY set while running against "
+                    "a REAL broker (live/semi-auto). Set API_KEY in .env.",
+                env=settings.app_env.value,
+            )
+            raise HTTPException(
+                status_code=401,
+                detail="Server misconfigured: API_KEY must be set in live/semi-auto mode.",
+            )
+        if not _unauth_warned:
+            log.warning(
+                "api.running_unauthenticated",
+                msg="No API_KEY configured — mutating endpoints are UNAUTHENTICATED. "
+                    "This is only safe because app_env is dev/paper. Set API_KEY in "
+                    ".env before exposing this port beyond localhost.",
+                env=settings.app_env.value,
+            )
+            _unauth_warned = True
+        return
+
+    if not x_api_key or not secrets.compare_digest(x_api_key, settings.api_key):
+        log.warning("api.auth_failed")
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
 # ── Startup ────────────────────────────────────────────────────────────────────
@@ -177,9 +226,12 @@ async def get_positions() -> list[dict]:
 # ── Routes: Trades ─────────────────────────────────────────────────────────────
 
 @app.get("/api/trades")
-async def get_trades(page: int = 1, per_page: int = 50) -> dict:
+async def get_trades(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+) -> dict:
     """Paginated trade history, most recent first."""
-    offset = (max(page, 1) - 1) * per_page
+    offset = (page - 1) * per_page
     async with get_db_session() as session:
         total_result = await session.execute(text("SELECT COUNT(*) FROM trades"))
         total = total_result.scalar() or 0
@@ -310,7 +362,7 @@ async def get_today_pnl() -> dict:
 
 
 @app.get("/api/pnl/history")
-async def get_pnl_history(days: int = 30) -> list[dict]:
+async def get_pnl_history(days: int = Query(30, ge=1, le=365)) -> list[dict]:
     """Daily P&L for the last N days."""
     async with get_db_session() as session:
         result = await session.execute(
@@ -368,7 +420,10 @@ async def health_check() -> dict:
             await session.execute(text("SELECT 1"))
         checks["postgres"] = "ok"
     except Exception as e:
-        checks["postgres"] = f"error: {e}"
+        # Don't leak connection strings/hostnames to unauthenticated callers —
+        # the detail (e.g. DSN in the error) goes to the server log only.
+        log.error("health.postgres_check_failed", error=str(e))
+        checks["postgres"] = "error"
         healthy = False
 
     # Redis
@@ -377,7 +432,8 @@ async def health_check() -> dict:
         await redis.ping()
         checks["redis"] = "ok"
     except Exception as e:
-        checks["redis"] = f"error: {e}"
+        log.error("health.redis_check_failed", error=str(e))
+        checks["redis"] = "error"
         healthy = False
 
     # Kite token (only relevant in live/semi-auto)
@@ -389,7 +445,8 @@ async def health_check() -> dict:
             if not token:
                 healthy = False
         except Exception as e:
-            checks["kite_token"] = f"error: {e}"
+            log.error("health.kite_token_check_failed", error=str(e))
+            checks["kite_token"] = "error"
             healthy = False
     else:
         checks["kite_token"] = "n/a (dev/paper mode)"
@@ -433,11 +490,14 @@ async def get_config() -> dict:
     return await get_bot_config()
 
 
-@app.post("/api/config")
+@app.post("/api/config", dependencies=[Depends(require_api_key)])
 async def update_config(updates: dict) -> dict:
     """Merge updates into the bot config and persist to Redis. Returns full config."""
     from config.bot_config import set_bot_config
-    return await set_bot_config(updates)
+    try:
+        return await set_bot_config(updates)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/config/schema")
@@ -449,14 +509,47 @@ async def get_config_schema() -> dict:
 
 # ── Routes: Controls ──────────────────────────────────────────────────────────
 
-@app.post("/api/bot/square-off")
+@app.post("/api/bot/square-off", dependencies=[Depends(require_api_key)])
 async def square_off_all() -> dict:
-    """Emergency square off all intraday positions."""
+    """Emergency square off of INTRADAY positions: close at the broker (if real)
+    AND reconcile the DB in every mode.
+
+    Broadcasting a WS event alone (the original behavior) did nothing in dev/paper —
+    the dashboard button lied — and in live it never updated trades.status, leaving
+    positions/P&L views stale.
+
+    Scope is intraday-only (intraday_only=True), matching the dashboard button's
+    label and the broker call below: ZerodhaOrderManager.square_off_all_intraday()
+    filters to `product == "MIS"` and never exits CNC. Closing SWING trades in the
+    DB here would mark them CLOSED while the real CNC position stayed open at the
+    broker. A true close-everything kill switch needs a broker method that exits
+    CNC as well — it does not exist yet, so it is deliberately not offered here."""
+    from services.execution.trade_lifecycle import get_lifecycle_manager
+
+    broker_error: str | None = None
     if settings.uses_real_broker:
         from services.execution.broker_router import get_broker
-        await get_broker().square_off_all_intraday()
-    await manager.broadcast({"type": "system", "data": {"event": "square_off_triggered"}})
-    return {"status": "ok", "message": "Square off initiated"}
+        try:
+            await get_broker().square_off_all_intraday()
+        except Exception as e:
+            broker_error = str(e)
+            log.error("api.square_off_broker_error", error=broker_error)
+
+    closed = await get_lifecycle_manager().close_all_open_trades(
+        reason        = "MANUAL_SQUARE_OFF",
+        intraday_only = True,
+    )
+    log.warning("api.square_off_manual", closed=closed, broker_error=broker_error)
+
+    await manager.broadcast({
+        "type": "system",
+        "data": {"event": "square_off_triggered", "closed": closed},
+    })
+
+    result: dict = {"status": "ok", "message": "Square off complete", "closed": closed}
+    if broker_error:
+        result["broker_error"] = broker_error
+    return result
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ structlog==24.2.0
 
 # ── Async / Networking ────────────────────────────────────────────────────────
 aiohttp==3.9.5
-websockets==12.0
+websockets>=13.0,<16   # >=13 required by yfinance 1.2.1; only a transitive dep (uvicorn[standard])
 httpx==0.27.0
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -54,3 +54,7 @@ python-dateutil==2.9.0
 tenacity==8.3.0           # retry logic for API calls
 rich==13.7.1              # pretty terminal output
 vaderSentiment==3.3.2     # rule-based sentiment for news headlines (no model downloads)
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest==9.1.1
+pytest-asyncio==1.4.0      # async def test_* support (RiskEngine.evaluate is a coroutine)

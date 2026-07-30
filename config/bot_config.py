@@ -167,8 +167,39 @@ CONFIG_SCHEMA: dict[str, dict] = {
 DEFAULTS: dict = {k: v["default"] for k, v in CONFIG_SCHEMA.items()}
 
 
+def _coerce_type(val, typ: str):
+    """Coerce a raw (possibly stringified-from-Redis) value to its declared type.
+    Raises ValueError/TypeError on failure — callers decide how to handle that."""
+    if typ == "bool":
+        # Redis stores booleans as "true"/"false" strings or Python bool
+        return val if isinstance(val, bool) else str(val).lower() in ("true", "1")
+    elif typ == "int":
+        return int(val)
+    elif typ == "float":
+        return float(val)
+    else:
+        return str(val) if val is not None else ""
+
+
+def _in_bounds(val, meta: dict) -> bool:
+    """True if val respects the schema's declared min/max (no-op for non-numeric types)."""
+    if meta["type"] not in ("int", "float"):
+        return True
+    lo, hi = meta.get("min"), meta.get("max")
+    if lo is not None and val < lo:
+        return False
+    if hi is not None and val > hi:
+        return False
+    return True
+
+
 async def get_bot_config() -> dict:
-    """Read all config from Redis, falling back to defaults for missing keys."""
+    """Read all config from Redis, falling back to defaults for missing keys.
+
+    Defensive: a value already sitting in Redis that is out of range (e.g. from
+    before bounds enforcement existed, or written directly) falls back to the
+    schema default rather than being served to strategies as-is.
+    """
     from database.connection import get_redis
     redis = get_redis()
 
@@ -178,17 +209,15 @@ async def get_bot_config() -> dict:
     result: dict = {}
     for key, meta in CONFIG_SCHEMA.items():
         val = stored.get(key, meta["default"])
-        typ = meta["type"]
         try:
-            if typ == "bool":
-                # Redis stores booleans as "true"/"false" strings or Python bool
-                result[key] = val if isinstance(val, bool) else str(val).lower() in ("true", "1")
-            elif typ == "int":
-                result[key] = int(val)
-            elif typ == "float":
-                result[key] = float(val)
-            else:
-                result[key] = str(val) if val is not None else ""
+            coerced = _coerce_type(val, meta["type"])
+            if not _in_bounds(coerced, meta):
+                log.warning(
+                    "bot_config.stored_value_out_of_range",
+                    key=key, value=coerced, min=meta.get("min"), max=meta.get("max"),
+                )
+                coerced = meta["default"]
+            result[key] = coerced
         except (ValueError, TypeError):
             result[key] = meta["default"]
 
@@ -218,6 +247,8 @@ async def set_bot_config(updates: dict) -> dict:
     for key, val in updates.items():
         if key not in CONFIG_SCHEMA:
             continue
+        meta = CONFIG_SCHEMA[key]
+
         # Validate regime signal lists against SignalType enum
         if key.startswith("regime_") and key.endswith("_signals") and isinstance(val, str):
             names = [n.strip() for n in val.split(",") if n.strip()]
@@ -225,7 +256,23 @@ async def set_bot_config(updates: dict) -> dict:
             if bad:
                 log.warning("bot_config.invalid_signal_names", key=key, unknown=bad)
                 raise ValueError(f"Unknown signal type(s) in {key}: {bad}")
-        stored[key] = val
+
+        # Coerce to the declared type, then enforce the declared min/max bounds.
+        # CONFIG_SCHEMA declares min/max for every int/float knob (e.g.
+        # confidence_threshold: 40-100) — skipping this let callers disable
+        # signal-quality gates entirely (confidence_threshold=-999). Reject
+        # rather than silently clamp, consistent with the signal-name check above.
+        try:
+            coerced = _coerce_type(val, meta["type"])
+        except (ValueError, TypeError):
+            raise ValueError(f"{key} must be of type {meta['type']} (got {val!r})")
+
+        if not _in_bounds(coerced, meta):
+            lo, hi = meta.get("min"), meta.get("max")
+            log.warning("bot_config.out_of_range", key=key, value=coerced, min=lo, max=hi)
+            raise ValueError(f"{key}={coerced} out of range (allowed: {lo}..{hi})")
+
+        stored[key] = coerced
 
     await redis.set(REDIS_KEY, json.dumps(stored))
     log.info("bot_config.updated", keys=list(updates.keys()))
